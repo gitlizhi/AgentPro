@@ -1,0 +1,8 @@
+.env
+.venv
+/tmp
+/agent_memory
+/backendDir
+/chroma_db
+*.log
+/agent/skills/*
