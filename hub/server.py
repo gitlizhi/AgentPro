@@ -1,7 +1,6 @@
 """
-websocket
+websocket 服务端，负责转发消息
 """
-
 import asyncio
 import json
 import logging

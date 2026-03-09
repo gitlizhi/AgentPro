@@ -1,4 +1,6 @@
-# main.py
+"""
+Agent启动入口
+"""
 import asyncio
 import sys
 import uuid
@@ -8,6 +10,7 @@ from agent.db import init_db_pool, close_db_pool
 from agent.scheduler import init_scheduler
 from agent.communication import Communication
 from agent.tasks import set_reminder_comm
+from agent.tasks import consolidate_all_users
 import config
 
 if sys.platform == 'win32':
@@ -21,7 +24,17 @@ async def main():
     # 初始化调度器
     scheduler = init_scheduler()
     scheduler.start()
-
+    
+    scheduler.add_job(
+        consolidate_all_users,
+        trigger='cron',
+        hour=3,
+        minute=0,
+        id='memory_consolidation_daily',
+        replace_existing=True
+    )
+    # print(" 已调度每日记忆整理任务（每日3点）")
+    
     # 创建提醒机器人的通讯实例
     async def dummy_handler(data):
         """提醒机器人不需要处理收到的消息"""
@@ -39,7 +52,7 @@ async def main():
     # 创建主 Agent
     agent = Agent(
         # agent_id=f"agent_{uuid.uuid4()}",
-        agent_id=f"agent_15",
+        agent_id=f"agent_17",
         db_pool=pool,
         model_config_key="zhipu",
     )

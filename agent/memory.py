@@ -1,7 +1,9 @@
+"""
+记忆模块
+"""
 import os
 os.environ['CHROMA_CACHE_DIR'] = os.path.join(os.path.dirname(__file__), '..', 'chroma_cache')
 import chromadb
-from datetime import datetime
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -126,6 +128,67 @@ class LongTermMemory:
                 fact = line[4:].strip()
                 memories.append({"content": fact, "metadata": {}})
         return memories
+    
+    def clear_user_memory(self, user_id: str):
+        """删除用户的所有记忆（删除 collection）"""
+        try:
+            self.client.delete_collection(f"user_memories_{user_id}")
+            if user_id in self.collections:
+                del self.collections[user_id]
+        except Exception:
+            pass  # 集合不存在时忽略
+    
+    def add_facts_batch(self, facts: List[str], user_id: str, metadata: dict = None):
+        """批量添加事实，提高效率"""
+        coll = self._get_collection(user_id)
+        ids = [str(uuid.uuid4()) for _ in facts]
+        # 构建基础元数据
+        base_meta = metadata.copy() if metadata else {}
+        base_meta["timestamp"] = datetime.now().isoformat()
+        base_meta.setdefault("type", "fact")
+        base_meta["user_id"] = user_id
+        # 为每条事实生成独立的元数据副本
+        metadatas = [base_meta.copy() for _ in facts]
+        coll.add(
+            documents=facts,
+            metadatas=metadatas,
+            ids=ids
+        )
+        # 同步到 Markdown 文件（可选）
+        self._append_to_markdown(user_id, facts, metadatas)
+    
+    def _append_to_markdown(self, user_id: str, facts: List[str], metadatas: List[dict]):
+        """将批量事实追加到用户的 Markdown 记忆文件中"""
+        file_path = os.path.join(self.markdown_dir, f"{user_id}.md")
+        with open(file_path, 'a', encoding='utf-8') as f:
+            for fact, meta in zip(facts, metadatas):
+                timestamp = meta.get('timestamp', datetime.now().isoformat())
+                try:
+                    dt = datetime.fromisoformat(timestamp)
+                    time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    time_str = timestamp
+
+                f.write(f"\n## {time_str}\n")
+                f.write(f"- 事实：{fact}\n")
+                # 写入其他元数据（排除已单独显示的字段）
+                for key, value in meta.items():
+                    if key not in ['timestamp', 'thread_id', 'user_id']:
+                        f.write(f"- {key}：{value}\n")
+                f.write("\n")
+    
+    def get_random_facts(self, user_id: str, n: int = 3) -> List[str]:
+        """随机获取用户记忆中的 n 条事实"""
+        coll = self._get_collection(user_id)
+        try:
+            # 先获取总记录数（如果有元数据可以计数，但直接获取可能更好）
+            # 简单起见，获取前 n 条作为随机（虽然不是真随机，但可行）
+            result = coll.get(limit=n)
+            return result.get('documents', [])
+        except Exception as e:
+            print(f"获取随机记忆失败: {e}")
+            return []
+
 # 全局单例
 _memory_instance = None
 

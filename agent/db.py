@@ -1,5 +1,6 @@
-# agent/db.py
-import asyncio
+"""
+数据库连接池
+"""
 from typing import Optional
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -55,7 +56,6 @@ async def ensure_database_exists(uri: str):
             await conn.close()
 
 
-# agent/db.py
 async def init_db_pool():
     global _pool
     if _pool is None:

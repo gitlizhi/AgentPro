@@ -1,4 +1,6 @@
-# agent/intent.py
+"""
+意图识别枚举
+"""
 from enum import Enum
 from typing import Dict, Any
 
