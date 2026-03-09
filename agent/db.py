@@ -33,8 +33,8 @@ async def ensure_database_exists(uri: str):
     default_uri = urlunparse(new_parsed)
     
     # 打印调试信息（注意隐藏密码）
-    safe_uri = default_uri.replace(parsed.netloc.split('@')[-1] if '@' in parsed.netloc else parsed.netloc, '***')
-    print(f"Connecting to default database with URI: {safe_uri}")
+    # safe_uri = default_uri.replace(parsed.netloc.split('@')[-1] if '@' in parsed.netloc else parsed.netloc, '***')
+    # print(f"Connecting to default database with URI: {safe_uri}")
     
     conn = None
     try:
@@ -44,9 +44,9 @@ async def ensure_database_exists(uri: str):
             exists = await cur.fetchone()
             if not exists:
                 await cur.execute(f'CREATE DATABASE "{target_db}"')
-                print(f"✅ Database '{target_db}' created.")
-            else:
-                print(f"ℹ️ Database '{target_db}' already exists.")
+            #     print(f"✅ Database '{target_db}' created.")
+            # else:
+            #     print(f"ℹ️ Database '{target_db}' already exists.")
     except Exception as e:
         print(f"❌ Error connecting to default database: {e}")
         raise
@@ -85,13 +85,32 @@ async def init_db_pool():
         try:
             async with _pool.connection() as conn:
                 await conn.execute("SELECT 1")
-            print("✅ 连接池测试成功")
+            # print("✅ 连接池测试成功")
         except Exception as e:
-            print(f"❌ 连接池测试失败: {e}")
+            # print(f"❌ 连接池测试失败: {e}")
             await _pool.close()
             _pool = None
             raise
-
+            
+        # ---------- 新增：创建 reminders 表 ----------
+        async with _pool.connection() as conn:
+            await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS reminders (
+                        id SERIAL PRIMARY KEY,
+                        user_id TEXT NOT NULL,
+                        reminder_time TIMESTAMP NOT NULL,
+                        message TEXT NOT NULL,
+                        triggered BOOLEAN DEFAULT FALSE,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+            # 创建索引以加速查询
+            await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_reminders_user_time
+                    ON reminders (user_id, reminder_time) WHERE NOT triggered
+                """)
+            print("✅ 已确保 reminders 表存在")
+            
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)
         await checkpointer.setup()

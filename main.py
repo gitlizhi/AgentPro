@@ -1,41 +1,61 @@
-"""
-主程序入口
-"""
-import os
+# main.py
 import asyncio
 import sys
+import uuid
 import logging
 from agent.core import Agent
 from agent.db import init_db_pool, close_db_pool
+from agent.scheduler import init_scheduler
+from agent.communication import Communication
+from agent.tasks import set_reminder_comm
+import config
 
-
-# 设置 Windows 事件循环
 if sys.platform == 'win32':
-	asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 logging.basicConfig(level=logging.INFO)
 
-
 async def main():
-	# 初始化数据库连接池
-	pool = await init_db_pool()
-	
-	# 创建 Agent 实例（技能会自动从注册中心加载）
-	agent = Agent(
-		# agent_id=f"agent_{uuid.uuid4()}",
-		agent_id=f"agent_11",
-		db_pool=pool,
-		model_config_key="zhipu",
-	)
-	
-	try:
-		await agent.run()
-	except KeyboardInterrupt:
-		await agent.stop()
-	finally:
-		await close_db_pool()
-		logging.info("Database pool closed")
+    pool = await init_db_pool()
 
+    # 初始化调度器
+    scheduler = init_scheduler()
+    scheduler.start()
+
+    # 创建提醒机器人的通讯实例
+    async def dummy_handler(data):
+        """提醒机器人不需要处理收到的消息"""
+        pass
+
+    reminder_comm = Communication(
+        agent_id="reminder_bot",
+        hub_url=f"ws://{config.HUB_HOST}:{config.HUB_PORT}",
+        on_message=dummy_handler
+    )
+
+    # 将提醒机器人的通讯对象设置到 tasks 模块中，供 send_reminder 使用
+    set_reminder_comm(reminder_comm)
+
+    # 创建主 Agent
+    agent = Agent(
+        # agent_id=f"agent_{uuid.uuid4()}",
+        agent_id=f"agent_15",
+        db_pool=pool,
+        model_config_key="zhipu",
+    )
+
+    try:
+        # 并发运行主 Agent 和提醒机器人的连接
+        await asyncio.gather(
+            agent.run(),
+            reminder_comm.connect()   # reminder_comm.connect() 会一直运行，直到关闭
+        )
+    except KeyboardInterrupt:
+        await agent.stop()
+        await reminder_comm.close()
+    finally:
+        scheduler.shutdown()
+        await close_db_pool()
 
 if __name__ == "__main__":
-	asyncio.run(main())
+    asyncio.run(main())

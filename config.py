@@ -19,3 +19,6 @@ MEMORY_MARKDOWN_DIR = os.getenv("MEMORY_MARKDOWN_DIR", "./agent_memory")
 
 # pg数据库
 POSTGRES_URI = os.getenv("POSTGRES_URI", "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable")
+POSTGRES_URI_ASYNC = os.getenv("POSTGRES_URI", "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable")
+
+POSTGRES_URI_SYNC = POSTGRES_URI.replace("postgresql://", "postgresql+psycopg://")

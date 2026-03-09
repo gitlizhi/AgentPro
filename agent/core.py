@@ -33,6 +33,7 @@ class Agent:
         self._running = False
     
     async def _handle_message(self, data: dict):
+        print(data)
         msg_type = data.get("type")
         if msg_type == "message":
             payload = data.get("payload", {})

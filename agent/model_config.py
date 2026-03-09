@@ -7,7 +7,6 @@ from enum import Enum
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
-import config
 
 
 class ModelProvider(str, Enum):
@@ -22,6 +21,7 @@ class ModelProvider(str, Enum):
 	OLLAMA = "ollama"
 	PERPLEXITY = "perplexity"
 	XAI = "xai"  # Grok
+	ZHIPU = "zhipu"  # 智谱
 	OPENAI_COMPATIBLE = "openai_compatible"  # 其他兼容OpenAI格式的服务
 
 # 默认的 API 基础地址配置
@@ -31,6 +31,7 @@ DEFAULT_BASE_URLS = {
 	ModelProvider.ANTHROPIC: "https://api.anthropic.com/v1",
 	ModelProvider.GOOGLE: "https://generativelanguage.googleapis.com",
 	ModelProvider.OPENAI_COMPATIBLE: "https://open.bigmodel.cn/api/paas/v4",  # 需要用户指定
+	ModelProvider.ZHIPU: "https://open.bigmodel.cn/api/paas/v4",
 }
 
 class ModelConfig:
@@ -70,7 +71,7 @@ class ModelConfig:
 		api_key = api_key or self._get_api_key(provider)
 		
 		# 根据提供商类型创建模型
-		if provider == ModelProvider.OPENAI_COMPATIBLE:
+		if provider == ModelProvider.OPENAI_COMPATIBLE or provider == ModelProvider.ZHIPU:
 			# 使用 ChatOpenAI 接入兼容格式的服务
 			if not base_url:
 				raise ValueError("使用 OpenAI 兼容格式时必须提供 base_url")
@@ -118,6 +119,7 @@ class ModelConfig:
 			ModelProvider.PERPLEXITY: "PERPLEXITY_API_KEY",
 			ModelProvider.XAI: "XAI_API_KEY",
 			ModelProvider.OPENAI_COMPATIBLE: "OPENAI_COMPATIBLE_API_KEY",
+			ModelProvider.ZHIPU: "ZHIPU_API_KEY",
 		}
 		
 		env_var = env_var_map.get(provider)
@@ -169,7 +171,7 @@ class ModelConfig:
 				"temperature": 0,
 			},
 			"zhipu": {  # 智谱 AI
-				"provider": ModelProvider.OPENAI_COMPATIBLE,
+				"provider": ModelProvider.ZHIPU,
 				"model_name": "GLM-4.7",
 				"base_url": "https://open.bigmodel.cn/api/paas/v4/",
 				"temperature": 0,
