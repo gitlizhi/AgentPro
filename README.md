@@ -37,90 +37,96 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    ```bash
    git clone https://github.com/yourusername/agentpro.git
    cd agentpro
-  ```
+   ```
 
-2.创建虚拟环境并安装依赖（使用 uv 或 pip）
-
+2. 创建虚拟环境并安装依赖（使用 uv 或 pip）
    ```bash
-pip install uv
-uv venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-uv pip install -e .
-  ```
+      pip install uv
+      uv venv
+      source .venv/bin/activate  # Windows: .venv\Scripts\activate
+      uv pip install -e .
+   ```
 
-3.配置环境变量
+3. 配置环境变量
+   
+     ```bash
+      # PostgreSQL 连接（需自定义一个链接）
+      POSTGRES_URI=postgresql://user:password@localhost:5432/agentpro  
+      # 智谱 AI API 密钥
+      ZHIPU_API_KEY=your_api_key_here
+      # Hub 配置
+      HUB_HOST=localhost
+      HUB_PORT=8765
+      ```
 
-  ```bash
-# PostgreSQL 连接
-POSTGRES_URI=postgresql://user:password@localhost:5432/agentpro
-# 智谱 AI API 密钥
-ZHIPU_API_KEY=your_api_key_here
-# Hub 配置
-HUB_HOST=localhost
-HUB_PORT=8765
-```
 
-启动 Hub
+4. 启动 Hub
+    ```bash
+   python -m hub.server
+   ```
 
-python -m hub.server
+5. 启动智能体
 
-启动智能体
+     ```bash
+   python main.py
+   ```
 
-python main.py
+   你可以修改 main.py 中的 num_agents 变量来启动多个。
 
-你可以修改 main.py 中的 num_agents 变量来启动多个。
 
-启动测试客户端
+6. 启动测试客户端
 
-python test_client.py --agent agent_id
-
+     ```bash
+      python test_client.py --agent agent_id
+      ```
 
 客户端支持以下命令：
 
--/new 消息：开始新对话（生成新 thread_id）
+- /new 消息：开始新对话（生成新 thread_id）
 
--/img 图片路径 用户输入内容  ：上传图片
+- /img 图片路径 用户输入内容  ：上传图片
 
--/broadcast 消息：向所有智能体广播
+- /broadcast 消息：向所有智能体广播
 
--/target agent_id：切换当前目标智能体
+- /target agent_id：切换当前目标智能体
 
-普通输入：发送给当前目标智能体
+- 普通输入：发送给当前目标智能体
+
+    ```text
+   agentpro/
+   ├── agent/                      # 核心智能体模块
+   │   ├── brain.py                 # 大脑决策层
+   │   ├── core.py                  # 智能体主类
+   │   ├── communication.py         # WebSocket 通信
+   │   ├── db.py                    # 数据库连接池
+   │   ├── memory.py                # 长期记忆（ChromaDB + Markdown）
+   │   ├── memory_consolidation.py  # 记忆整理（去重、合并）
+   │   ├── scheduler.py             # APScheduler 调度器
+   │   ├── tasks.py                 # 后台任务（发送提醒、记忆整理）
+   │   ├── utils.py                 # 工具函数（模型调用）
+   │   ├── intent.py                # 意图枚举和描述
+   │   ├── model_config.py          # 模型配置管理
+   │   └── skills/                  # 技能目录（按需加载）
+   │       ├── remember-fact/       # 记住事实技能
+   │       ├── list-reminders/      # 查询提醒技能
+   │       └── ...
+   ├── hub/                         # 消息 Hub
+   │   └── server.py
+   ├── agent_memory/                # 长期记忆 Markdown 文件
+   ├── chroma_db/                   # ChromaDB 持久化目录
+   ├── tests/                       # 测试脚本
+   │   └── test_client.py
+   ├── .env.example                 # 环境变量示例
+   ├── main.py                      # 应用入口
+   ├── clean_checkpoints.py         # 清理短期记忆脚本
+   ├── requirements.txt             # 依赖列表（可选）
+   ├── pyproject.toml               # 项目配置（uv/pip）
+   └── README.md
+   ```
 
 
-agentpro/
-├── agent/                      # 核心智能体模块
-│   ├── brain.py                 # 大脑决策层
-│   ├── core.py                  # 智能体主类
-│   ├── communication.py         # WebSocket 通信
-│   ├── db.py                    # 数据库连接池
-│   ├── memory.py                # 长期记忆（ChromaDB + Markdown）
-│   ├── memory_consolidation.py  # 记忆整理（去重、合并）
-│   ├── scheduler.py             # APScheduler 调度器
-│   ├── tasks.py                 # 后台任务（发送提醒、记忆整理）
-│   ├── utils.py                 # 工具函数（模型调用）
-│   ├── intent.py                # 意图枚举和描述
-│   ├── model_config.py          # 模型配置管理
-│   └── skills/                  # 技能目录（按需加载）
-│       ├── remember-fact/       # 记住事实技能
-│       ├── list-reminders/      # 查询提醒技能
-│       └── ...
-├── hub/                         # 消息 Hub
-│   └── server.py
-├── agent_memory/                # 长期记忆 Markdown 文件
-├── chroma_db/                   # ChromaDB 持久化目录
-├── tests/                       # 测试脚本
-│   └── test_client.py
-├── .env.example                 # 环境变量示例
-├── main.py                      # 应用入口
-├── clean_checkpoints.py         # 清理短期记忆脚本
-├── requirements.txt             # 依赖列表（可选）
-├── pyproject.toml               # 项目配置（uv/pip）
-└── README.md
-
-
-🔧 配置说明
-主要配置项
+## 🔧 配置说明
+### 主要配置项
 变量名	说明	默认值
 POSTGRES_URI	PostgreSQL 连接字符串	postgresql://...
 ZHIPU_API_KEY	智谱 AI API 密钥	无
@@ -130,116 +136,127 @@ MEMORY_MARKDOWN_DIR	长期记忆 Markdown 文件目录	./agent_memory
 CHROMA_PERSIST_DIR	ChromaDB 持久化目录	./chroma_db
 
 
-模型配置
+### 模型配置
+
 在 agent/model_config.py 中预定义了多个模型配置：
 
-default: GLM-4.7（默认聊天模型）
+- default: GLM-4.7（默认聊天模型）
 
-vision: GLM-4.6v（视觉模型）
+- vision: GLM-4.6v（视觉模型）
 
-其他如 deepseek, claude, gemini 等可自行扩展。
+- 其他如 deepseek, claude, gemini 等可自行扩展。
 
 
-💡 使用示例
-设置提醒
-text
-你: 提醒我5分钟后喝水
-🤖 AI: ✅ 提醒已设置：将在 2026-03-10 15:30:00 提醒您：喝水
-5分钟后收到：
+## 💡 使用示例
+### 设置提醒
 
-text
+   ```text
+   你: 提醒我5分钟后喝水
+   🤖 AI: ✅ 提醒已设置：将在 2026-03-10 15:30:00 提醒您：喝水
+   5分钟后收到：
+   ```
+
+
+ ```text
 📨 来自 reminder_bot: ⏰ 提醒：喝水
-查看提醒
-text
+```
+
+### 查看提醒
+ ```text
 你: 查看我的提醒
 🤖 AI: 您当前的提醒：
 - 2026-03-10 15:30:00：喝水
 - 2026-03-10 16:00:00：开会
+```
 
-
-记住事实
-text
+### 记住事实
+```text
 你: 记住我喜欢喝冰美式
 🤖 AI: ✅ 已记住：我喜欢喝冰美式
+```
 
+### 多智能体广播
 
-多智能体广播
 在客户端输入：
 
-text
+```text
 /broadcast 大家好，今天有什么新鲜事？
+```
 
 所有在线智能体都会收到消息并可能回复。
 
 
-🧠 主动思考与内在自驱力
+## 🧠 主动思考与内在自驱力
 智能体每小时会随机生成一个想法，并可能主动向用户发送消息。这模拟了内在的思考能力，让智能体更像一个真正的伙伴。你可以在 brain.py 的 _generate_thought 方法中自定义思考类型和生成逻辑。
 
-🗂️ 记忆系统
-短期记忆：由 checkpointer 自动保存每个对话线程的消息历史，支持重启恢复。
+## 🗂️ 记忆系统
+- 短期记忆：由 checkpointer 自动保存每个对话线程的消息历史，支持重启恢复。
 
-长期记忆：通过 remember_fact 技能存储用户事实到 ChromaDB，并同步为 Markdown 文件（agent_memory/<user_id>.md）。每日凌晨3点（可在main.py更改时间）自动整理，使用大模型去重和合并相似事实。
+- 长期记忆：通过 remember_fact 技能存储用户事实到 ChromaDB，并同步为 Markdown 文件（agent_memory/<user_id>.md）。每日凌晨3点（可在main.py更改时间）自动整理，使用大模型去重和合并相似事实。
 
-📦 依赖管理
+## 📦 依赖管理
+
 项目使用 uv 进行依赖管理，pyproject.toml 已列出所有必要依赖。你也可以使用 pip 安装。
 
-主要依赖：
+### 主要依赖：
 
-langchain>=1.2.10
+- langchain>=1.2.10
 
-langchain-openai>=1.1.10
+- langchain-openai>=1.1.10
 
-langgraph-checkpoint-postgres>=3.0.4
+- langgraph-checkpoint-postgres>=3.0.4
 
-deepagents>=0.4.5
+- deepagents>=0.4.5
 
-chromadb>=1.5.2
+- chromadb>=1.5.2
 
-apscheduler>=3.11.2
+- apscheduler>=3.11.2
 
-psycopg[binary]>=3.2.0
+- psycopg[binary]>=3.2.0
 
-httpx>=0.27.0
+- httpx>=0.27.0
 
-websockets>=16.0
+- websockets>=16.0
 
-python-dotenv>=1.2.2
+- python-dotenv>=1.2.2
 
-🧪 测试
+## 🧪 测试
 运行测试客户端与智能体交互：
 
-bash
-python test_client.py --agent agent_17
+   ```bash
+   python test_client.py --agent agent_17
+   ```
 
-运行清理脚本（删除指定或所有短期记忆）：
+## 运行清理脚本（删除指定或所有短期记忆）：
 
-bash
-python clean_checkpoints.py --all
-python clean_checkpoints.py --thread "agent_17_super_user_xxx"
+   ```bash
+   python clean_checkpoints.py --all
+   python clean_checkpoints.py --thread "agent_17_super_user_xxx"
+   ```
 
+## 🤝 贡献指南
+### 欢迎贡献！请遵循以下步骤：
 
-🤝 贡献指南
-欢迎贡献！请遵循以下步骤：
+1. Fork 仓库
 
-Fork 仓库
+2. 创建功能分支 (git checkout -b feature/amazing-feature)
 
-创建功能分支 (git checkout -b feature/amazing-feature)
+3. 提交更改 (git commit -m 'Add amazing feature')
 
-提交更改 (git commit -m 'Add amazing feature')
+4. 推送到分支 (git push origin feature/amazing-feature)
 
-推送到分支 (git push origin feature/amazing-feature)
-
-打开 Pull Request
+5. 打开 Pull Request
 
 请确保代码符合 PEP 8 规范，并为新功能添加相应测试。
 
-📄 许可证
+## 📄 许可证
 本项目采用 MIT 许可证。详见 LICENSE 文件。
 
-🙏 致谢
+## 🙏 致谢
 LangChain 团队提供的强大框架
 
 deepagents 项目带来的技能系统灵感
 
 智谱 AI 提供的优秀模型 API
+
 
