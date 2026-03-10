@@ -15,9 +15,11 @@ def set_reminder_comm(comm):
     _reminder_comm = comm
 
 async def send_reminder(user_id: str, message: str):
+    global _reminder_comm
     if _reminder_comm is None:
         raise RuntimeError("Reminder comm not set")
-    await _reminder_comm.send_to_agent(user_id, {"text": f"提醒：{message}"})
+    # 通过 brain 发送并记录消息
+    await _reminder_comm.send_to_agent(user_id, f"⏰ 提醒：{message}")
 
 async def consolidate_all_users():
     """遍历所有用户的记忆文件，并行整理（异步）"""
@@ -31,4 +33,4 @@ async def consolidate_all_users():
             tasks.append(consolidate_user_memory(user_id))
     if tasks:
         await asyncio.gather(*tasks)
-    print(" 所有用户记忆整理完成")
+    # print(" 所有用户记忆整理完成")

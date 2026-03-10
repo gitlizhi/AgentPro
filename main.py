@@ -3,7 +3,6 @@ Agent启动入口
 """
 import asyncio
 import sys
-import uuid
 import logging
 from agent.core import Agent
 from agent.db import init_db_pool, close_db_pool
@@ -21,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 async def main():
     pool = await init_db_pool()
 
-    # 初始化调度器
+    # 初始化调度器（所有 Agent 共享）
     scheduler = init_scheduler()
     scheduler.start()
     
@@ -33,11 +32,9 @@ async def main():
         id='memory_consolidation_daily',
         replace_existing=True
     )
-    # print(" 已调度每日记忆整理任务（每日3点）")
     
-    # 创建提醒机器人的通讯实例
+    # 创建提醒机器人的通讯实例（只需一个）
     async def dummy_handler(data):
-        """提醒机器人不需要处理收到的消息"""
         pass
 
     reminder_comm = Communication(
@@ -45,26 +42,28 @@ async def main():
         hub_url=f"ws://{config.HUB_HOST}:{config.HUB_PORT}",
         on_message=dummy_handler
     )
-
-    # 将提醒机器人的通讯对象设置到 tasks 模块中，供 send_reminder 使用
     set_reminder_comm(reminder_comm)
 
-    # 创建主 Agent
-    agent = Agent(
-        # agent_id=f"agent_{uuid.uuid4()}",
-        agent_id=f"agent_17",
-        db_pool=pool,
-        model_config_key="zhipu",
-    )
+    # 创建多个 Agent 实例
+    num_agents = 3  # 你想要启动的 Agent 数量
+    agents = []
+    for i in range(1, num_agents + 1):
+        agent = Agent(
+            agent_id=f"agent_{i}",  # 确保每个 ID 唯一
+            db_pool=pool,
+            model_config_key="zhipu",
+        )
+        agents.append(agent)
+
+    # 将所有 Agent 的 run 任务和提醒机器人的 connect 任务合并
+    tasks = [agent.run() for agent in agents] + [reminder_comm.connect()]
 
     try:
-        # 并发运行主 Agent 和提醒机器人的连接
-        await asyncio.gather(
-            agent.run(),
-            reminder_comm.connect()   # reminder_comm.connect() 会一直运行，直到关闭
-        )
+        await asyncio.gather(*tasks)
     except KeyboardInterrupt:
-        await agent.stop()
+        # 停止所有 Agent
+        for agent in agents:
+            await agent.stop()
         await reminder_comm.close()
     finally:
         scheduler.shutdown()

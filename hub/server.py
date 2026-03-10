@@ -28,6 +28,9 @@ class Hub:
     
     async def route_message(self, data: dict):
         """根据 data['to'] 转发消息"""
+        if not isinstance(data, dict):
+            logger.warning(f"Received non-dict message: {data}")
+            return
         target = data.get("to")
         logger.info(f"Routing message to {target}: {data.get('payload')}")
         if target == "broadcast":

@@ -45,7 +45,8 @@ class Communication:
                         logger.warning("Connection closed")
                         break
                     except Exception as e:
-                        logger.error(f"Error receiving message: {e}")
+                        logger.error(f"Error receiving message: {e}, raw message: {message}")
+                        # logger.error(f"Error receiving message: {e}")
         finally:
             self._running = False
             self.websocket = None
