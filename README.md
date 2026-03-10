@@ -35,8 +35,8 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 
 1. 克隆仓库
    ```bash
-   git clone https://github.com/yourusername/agentpro.git
-   cd agentpro
+   git clone https://github.com/gitlizhi/AgentPro.git
+   cd AgentPro
    ```
 
 2. 创建虚拟环境并安装依赖（使用 uv 或 pip）
@@ -258,5 +258,6 @@ LangChain 团队提供的强大框架
 deepagents 项目带来的技能系统灵感
 
 智谱 AI 提供的优秀模型 API
+
 
 
