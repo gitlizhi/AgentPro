@@ -10,7 +10,9 @@ from agent.scheduler import init_scheduler
 from agent.communication import Communication
 from agent.tasks import set_reminder_comm
 from agent.tasks import consolidate_all_users
-import config
+from config import config
+from dotenv import load_dotenv
+load_dotenv()
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -39,17 +41,16 @@ async def main():
 
     reminder_comm = Communication(
         agent_id="reminder_bot",
-        hub_url=f"ws://{config.HUB_HOST}:{config.HUB_PORT}",
+        hub_url=f"ws://{config.hub.hub_host}:{config.hub.hub_port}",
         on_message=dummy_handler
     )
     set_reminder_comm(reminder_comm)
 
     # 创建多个 Agent 实例
-    num_agents = 3  # 你想要启动的 Agent 数量
     agents = []
-    for i in range(1, num_agents + 1):
+    for i in range(1, config.agent.num_agents + 1):
         agent = Agent(
-            agent_id=f"agent_{i}",  # 确保每个 ID 唯一
+            agent_id=f"{config.agent.agent_id_prefix}_{i}",  # 确保每个 ID 唯一
             db_pool=pool,
             model_config_key="zhipu",
         )

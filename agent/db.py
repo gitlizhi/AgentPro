@@ -5,7 +5,7 @@ from typing import Optional
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-import config
+from config import config
 
 _pool: Optional[AsyncConnectionPool] = None
 
@@ -59,12 +59,12 @@ async def ensure_database_exists(uri: str):
 async def init_db_pool():
     global _pool
     if _pool is None:
-        await ensure_database_exists(config.POSTGRES_URI)
-
+        await ensure_database_exists(config.db.postgres_uri)
         _pool = AsyncConnectionPool(
-            config.POSTGRES_URI,
-            min_size=0,
-            max_size=10,
+            config.db.postgres_uri,
+            min_size=config.db.postgres_pool_min_size,
+            max_size=config.db.postgres_pool_max_size,
+            timeout=config.db.postgres_pool_timeout,
             open=False,
             kwargs={
                 "autocommit": True,

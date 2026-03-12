@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import websockets
+from config import config
 from websockets.legacy.server import WebSocketServerProtocol
 
 logging.basicConfig(level=logging.INFO)
@@ -66,8 +67,8 @@ class Hub:
 
 async def main():
     hub = Hub()
-    async with websockets.serve(hub.handler, "0.0.0.0", 8765):
-        logger.info("Hub started on ws://0.0.0.0:8765")
+    async with websockets.serve(hub.handler, config.hub.hub_host, config.hub.hub_port):
+        logger.info(f"Hub started on ws://{config.hub.hub_host}:{config.hub.hub_port}")
         await asyncio.Future()  # 运行 forever
 
 

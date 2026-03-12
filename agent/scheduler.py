@@ -4,8 +4,7 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
-from sqlalchemy import create_engine
-import config
+from config import config
 
 # 全局调度器实例
 _scheduler = None
@@ -17,7 +16,7 @@ def init_scheduler():
         return _scheduler
 
     # 配置作业存储
-    jobstore = SQLAlchemyJobStore(url=config.POSTGRES_URI_SYNC)  # 需要使用同步连接字符串
+    jobstore = SQLAlchemyJobStore(url=config.db.postgres_uri_sync)  # 需要使用同步连接字符串
 
     # 配置执行器（异步执行器，支持异步作业函数）
     executors = {
@@ -28,7 +27,7 @@ def init_scheduler():
     _scheduler = AsyncIOScheduler(
         jobstores={'default': jobstore},
         executors=executors,
-        timezone='Asia/Shanghai'  # 可根据需要修改时区
+        timezone = config.scheduler.scheduler_timezone
     )
     return _scheduler
 

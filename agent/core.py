@@ -7,8 +7,7 @@ import random
 from agent.brain import Brain
 from agent.communication import Communication
 from psycopg_pool import ConnectionPool
-import config
-
+from config import config
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +23,7 @@ class Agent:
         
         self.comm = Communication(
             agent_id=agent_id,
-            hub_url=f"ws://{config.HUB_HOST}:{config.HUB_PORT}",
+            hub_url=f"ws://{config.hub.hub_host}:{config.hub.hub_port}",
             on_message=self._handle_message
         )
         self.brain = Brain(
@@ -71,8 +70,7 @@ class Agent:
     async def _periodic_think(self):
         """随机触发一次话题"""
         while self._running:
-            # await asyncio.sleep(random.randint(60, 600))  # 1分钟到10分钟随机
-            await asyncio.sleep(random.randint(30, 60))  # 1分钟到10分钟随机
+            await asyncio.sleep(random.randint(60, 600))  # 1分钟到10分钟随机
             # 在 brain 中执行，不干涉主线程
             await self.brain._think_and_act()
             

@@ -7,6 +7,7 @@ from enum import Enum
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from config import config
 
 
 class ModelProvider(str, Enum):
@@ -73,7 +74,7 @@ class ModelConfig:
         api_key = api_key or self._get_api_key(provider)
         
         # 根据提供商类型创建模型
-        if provider == ModelProvider.OPENAI_COMPATIBLE or provider == ModelProvider.ZHIPU or provider == ModelProvider.ZHIPU_IMAGE:
+        if provider in (ModelProvider.OPENAI_COMPATIBLE, ModelProvider.ZHIPU, ModelProvider.ZHIPU_IMAGE):
             # 使用 ChatOpenAI 接入兼容格式的服务
             if not base_url:
                 raise ValueError("使用 OpenAI 兼容格式时必须提供 base_url")
@@ -125,10 +126,8 @@ class ModelConfig:
             ModelProvider.ZHIPU_IMAGE: "ZHIPU_API_KEY",
         }
         
-        env_var = env_var_map.get(provider)
-        if env_var:
-            return os.getenv(env_var)
-        return None
+        if provider == ModelProvider.ZHIPU:
+            return config.model.zhipu_api_key
     
     def get_model(self, config_key: str = "default") -> BaseChatModel:
         """

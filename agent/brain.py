@@ -22,6 +22,7 @@ from agent.scheduler import get_scheduler
 from agent.tasks import send_reminder
 from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
+from config import config
 
 
 import logging
@@ -43,7 +44,7 @@ class Brain:
         self.agent_id = agent_id
         self.user_id = None
         # 获取模型
-        self.model = model_config.get_model(model_config_key)
+        self.model = model_config.get_model(config.model.default_provider)  # model_config 仍需按需
         self.thread_id = None
         
         self.comm = comm
@@ -66,10 +67,10 @@ class Brain:
             os.makedirs(root_dir)
         
         backend = LocalShellBackend(
-            root_dir=root_dir,
-            virtual_mode=True,
-            timeout=30,
-            max_output_bytes=10000,
+            root_dir=config.backend.backend_root_dir,
+            virtual_mode=config.backend.backend_virtual_mode,
+            timeout=config.backend.backend_timeout,
+            max_output_bytes=config.backend.backend_max_output_bytes,
             env={
                 "PATH": f"{os.path.dirname(sys.executable)};{os.environ.get('PATH', '')}",
                 "PYTHONPATH": root_dir,
