@@ -154,7 +154,7 @@ class Brain:
 
         只输出JSON，不要任何额外文字。"""
         try:
-            content = await call_zhipu_chat(prompt, model="glm-4.7", temperature=0.0)
+            content = await call_zhipu_chat(prompt, model=config.ModelConfig.default_model, temperature=config.ModelConfig.model_temperature)
             # 提取 choices[0].message.content
             content = content["choices"][0]["message"]["content"]
             # 例如：```json\n{...}\n```
@@ -202,7 +202,7 @@ class Brain:
         只输出答案，不要任何额外文字。"""
         # print(prompt)
         try:
-            response = await call_zhipu_chat(prompt, model="glm-4-flash", temperature=0.0)
+            response = await call_zhipu_chat(prompt, model=config.ModelConfig.intent_model, temperature=config.ModelConfig.model_temperature)
             content = response["choices"][0]["message"]["content"]
             print(f"content={content}")
             return content
@@ -492,7 +492,7 @@ class Brain:
         
             请生成一个自然、有温度、可能带有好奇心的内心想法。不要以“作为AI”开头，直接说出想法。"""
         try:
-            response = await call_zhipu_chat(prompt, model="GLM-4.7", temperature=0.8)      # temperature高一点
+            response = await call_zhipu_chat(prompt, model=config.ModelConfig.default_model, temperature=0.8)      # temperature高一点
             return response["choices"][0]["message"]["content"].strip()
         except Exception as e:
             # print(f"生成想法失败: {e}")

@@ -7,6 +7,7 @@ import asyncio
 from datetime import datetime
 from agent.memory import get_memory
 from agent.utils import call_zhipu_chat  # 注意：使用异步版本
+from config import config
 
 async def extract_facts_from_markdown(file_path: str) -> list:
     """从 Markdown 文件中提取所有事实内容（异步版，但这里只是读取文件，可以保持同步，但为了统一，可以用同步）"""
@@ -48,9 +49,8 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
             
             只输出 JSON，不要任何额外文字。"""
     try:
-        response = await call_zhipu_chat(prompt, model="GLM-4.7", temperature=0.0)
+        response = await call_zhipu_chat(prompt, model=config.ModelConfig.default_model, temperature=config.ModelConfig.model_temperature)
         content = response["choices"][0]["message"]["content"]
-        print(content)
         # 清理可能的 Markdown 代码块
         if content.startswith("```") and content.endswith("```"):
             lines = content.splitlines()
@@ -66,7 +66,7 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
             print("LLM返回格式错误，使用简单去重")
             return list(set(facts))
     except Exception as e:
-        print(f" LLM去重失败: {e}，使用简单去重")
+        # print(f" LLM去重失败: {e}，使用简单去重")
         return list(set(facts))
 
 async def consolidate_user_memory(user_id: str):
@@ -87,4 +87,4 @@ async def consolidate_user_memory(user_id: str):
 
     write_facts_to_markdown(markdown_path, unique_facts)  # 同步写入
 
-    print(f" 用户 {user_id} 记忆整理完成：{len(facts)} -> {len(unique_facts)} 条")
+    # print(f" 用户 {user_id} 记忆整理完成：{len(facts)} -> {len(unique_facts)} 条")

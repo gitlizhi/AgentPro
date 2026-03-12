@@ -7,6 +7,7 @@ load_dotenv()
 import os
 import httpx
 from typing import List, Dict, Any, Optional
+from config import config
 
 async def call_zhipu_chat(
     user_input: str,
@@ -25,7 +26,7 @@ async def call_zhipu_chat(
     :param max_tokens: 最大生成token数
     :return: API 返回的 JSON 数据（字典）
     """
-    api_key = os.getenv("ZHIPU_API_KEY")
+    api_key = config.ModelConfig.zhipu_api_key
     if not api_key:
         raise ValueError("环境变量 ZHIPU_API_KEY 未设置")
 
