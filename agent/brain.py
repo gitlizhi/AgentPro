@@ -10,25 +10,26 @@ import copy
 from agent.utils import call_zhipu_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
-from langchain.messages import AIMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain.agents.middleware import SummarizationMiddleware
 from agent.model_config import model_config  # 导入配置
 from agent.memory import get_memory
 from deepagents import create_deep_agent
 # from deepagents.backends.filesystem import FilesystemBackend
-from deepagents.backends import LocalShellBackend
+# from deepagents.backends import LocalShellBackend
 from agent.scheduler import get_scheduler
 from agent.tasks import send_reminder
 from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
 from config import config
+from langchain.tools import tool
+from agent.sandboxed_backend import DockerSandboxBackend
 
 
 import logging
 logging.getLogger('langgraph').setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
-
+    
 
 class Brain:
     
@@ -66,33 +67,42 @@ class Brain:
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
         
-        backend = LocalShellBackend(
-            root_dir=config.backend.backend_root_dir,
-            virtual_mode=config.backend.backend_virtual_mode,
-            timeout=config.backend.backend_timeout,
-            max_output_bytes=config.backend.backend_max_output_bytes,
-            env={
-                "PATH": f"{os.path.dirname(sys.executable)};{os.environ.get('PATH', '')}",
-                "PYTHONPATH": root_dir,
-                "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
-                "POSTGRES_URI": os.environ.get("POSTGRES_URI", ""),
-            }
+        self.docker_backend = DockerSandboxBackend(
+            image="python:3.12-slim",  # 可自定义镜像
+            mem_limit="512m",
+            cpu_limit=1.0,
+            network_disabled=True,  # 根据需要允许或禁用网络
+            desktop_path=config.backend.docker_volumes,      # 如果需要控制电脑桌面文件夹，需要配置
+            # env={
+            #     "PATH": f"{os.path.dirname(sys.executable)};{os.environ.get('PATH', '')}",
+            #     "PYTHONPATH": root_dir,
+            #     "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
+            #     "POSTGRES_URI": os.environ.get("POSTGRES_URI", ""),
+            # }
         )
-
+        
+        # backend = LocalShellBackend(
+        #     root_dir=config.backend.backend_root_dir,
+        #     virtual_mode=config.backend.backend_virtual_mode,
+        #     timeout=config.backend.backend_timeout,
+        #     max_output_bytes=config.backend.backend_max_output_bytes,
+        #     env={
+        #         "PATH": f"{os.path.dirname(sys.executable)};{os.environ.get('PATH', '')}",
+        #         "PYTHONPATH": root_dir,
+        #         "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
+        #         "POSTGRES_URI": os.environ.get("POSTGRES_URI", ""),
+        #     }
+        # )
+       
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         
-        # 基础系统提示
-        base_system_prompt = (
-            "你是一个有帮助的AI助手，可以调用工具来完成任务。"
-            # "如果需要特定领域的详细指导，请先调用 load_skill 工具加载对应技能。"
-        )
-        
         self.agent = create_deep_agent(
             model=self.model,
-            # tools=self.concrete_tools,
-            system_prompt=base_system_prompt,
-            backend=backend,
+            # tools=self._create_custom_tools(),  # 添加自定义工具
+            system_prompt=self._build_system_prompt(),
+            # backend=backend,
+            backend=self.docker_backend,
             skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
             interrupt_on={
@@ -118,12 +128,22 @@ class Brain:
             return "Unknown OS"
 
     def _build_system_prompt(self):
-        return (f"你是一个有帮助的AI助手，可以调用工具来完成任务。"
+        base = (f"你是一个有帮助的AI助手，可以调用工具来完成任务。"
                 f"你当前的运行环境是{self.get_platform()}。"
                 f"当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
                 "在调用工具或者skill之前，请先写下你的思考过程。"
                 "如果工具调用出错，请分析错误原因，并尝试其他方法。"
                 )
+        instructions = """
+        注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
+
+        例如：
+        - 用户说“读取桌面上的 test.txt”，你应该调用 `read_file` 工具，路径为 `/desktop/test.txt`。
+        - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
+
+        不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
+        """
+        return base + instructions
     
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         self.is_busy = True
@@ -154,7 +174,7 @@ class Brain:
 
         只输出JSON，不要任何额外文字。"""
         try:
-            content = await call_zhipu_chat(prompt, model=config.ModelConfig.default_model, temperature=config.ModelConfig.model_temperature)
+            content = await call_zhipu_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature)
             # 提取 choices[0].message.content
             content = content["choices"][0]["message"]["content"]
             # 例如：```json\n{...}\n```
@@ -202,7 +222,7 @@ class Brain:
         只输出答案，不要任何额外文字。"""
         # print(prompt)
         try:
-            response = await call_zhipu_chat(prompt, model=config.ModelConfig.intent_model, temperature=config.ModelConfig.model_temperature)
+            response = await call_zhipu_chat(prompt, model=config.model.intent_model, temperature=config.model.model_temperature)
             content = response["choices"][0]["message"]["content"]
             print(f"content={content}")
             return content
@@ -492,7 +512,7 @@ class Brain:
         
             请生成一个自然、有温度、可能带有好奇心的内心想法。不要以“作为AI”开头，直接说出想法。"""
         try:
-            response = await call_zhipu_chat(prompt, model=config.ModelConfig.default_model, temperature=0.8)      # temperature高一点
+            response = await call_zhipu_chat(prompt, model=config.model.default_model, temperature=0.8)      # temperature高一点
             return response["choices"][0]["message"]["content"].strip()
         except Exception as e:
             # print(f"生成想法失败: {e}")
@@ -552,3 +572,5 @@ class Brain:
         # 发送消息
         await self.comm.send_to_agent(user_id, {"text": content})
         print(f"[主动消息已记录] {content}")
+    
+    

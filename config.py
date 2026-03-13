@@ -66,6 +66,7 @@ class BackendConfig(BaseSettings):
     backend_virtual_mode: bool = Field(True, alias="BACKEND_VIRTUAL_MODE")
     backend_timeout: int = Field(30, alias="BACKEND_TIMEOUT")
     backend_max_output_bytes: int = Field(10000, alias="BACKEND_MAX_OUTPUT_BYTES")
+    docker_volumes: str = Field("F:\\agent-workspace", alias="DOCKER_VOLUMES")
 
 class SchedulerConfig(BaseSettings):
     """调度器配置"""
