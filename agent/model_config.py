@@ -174,7 +174,7 @@ class ModelConfig:
             },
             "zhipu": {  # 智谱 AI
                 "provider": ModelProvider.ZHIPU,
-                "model_name": "GLM-4.7",
+                "model_name": "GLM-4.5-Air",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4/",
                 "temperature": 0,
             },

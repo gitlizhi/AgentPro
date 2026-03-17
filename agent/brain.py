@@ -1,12 +1,17 @@
 """
 大脑决策层
 """
+import base64
 import os
 import sys
 import uuid
 import json
 import random
-import copy
+import asyncio
+import websockets
+import subprocess
+import time
+import os
 from agent.utils import call_zhipu_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -22,7 +27,6 @@ from agent.tasks import send_reminder
 from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
 from config import config
-from langchain.tools import tool
 from agent.sandboxed_backend import DockerSandboxBackend
 
 
@@ -67,22 +71,8 @@ class Brain:
         if not os.path.exists(root_dir):
             os.makedirs(root_dir)
         
-        self.docker_backend = DockerSandboxBackend(
-            image="python:3.12-slim",  # 可自定义镜像
-            mem_limit="512m",
-            cpu_limit=1.0,
-            network_disabled=True,  # 根据需要允许或禁用网络
-            desktop_path=config.backend.docker_volumes,      # 如果需要控制电脑桌面文件夹，需要配置
-            # env={
-            #     "PATH": f"{os.path.dirname(sys.executable)};{os.environ.get('PATH', '')}",
-            #     "PYTHONPATH": root_dir,
-            #     "SYSTEMROOT": os.environ.get("SYSTEMROOT", "C:\\Windows"),
-            #     "POSTGRES_URI": os.environ.get("POSTGRES_URI", ""),
-            # }
-        )
-        
         # backend = LocalShellBackend(
-        #     root_dir=config.backend.backend_root_dir,
+        #
         #     virtual_mode=config.backend.backend_virtual_mode,
         #     timeout=config.backend.backend_timeout,
         #     max_output_bytes=config.backend.backend_max_output_bytes,
@@ -93,6 +83,20 @@ class Brain:
         #         "POSTGRES_URI": os.environ.get("POSTGRES_URI", ""),
         #     }
         # )
+        
+        self.docker_backend = DockerSandboxBackend(
+            image="my-agent-base:latest",  # 可自定义镜像
+            mem_limit="1g",
+            cpu_limit=1.0,
+            # network_disabled=True,  # 根据需要允许或禁用网络
+            network_disabled=False,  # 浏览器需要网络
+            user="pwuser",  # 浏览器需要网络
+            desktop_path=config.backend.docker_volumes,      # 如果需要控制电脑桌面文件夹，需要配置
+            skills_host_path=os.path.join(os.getcwd(), "agent", "skills"),  # 假设当前工作目录是 F:\AgentPro
+            env={
+                "ZHIPU_API_KEY": config.model.zhipu_api_key,
+            }
+        )
        
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
@@ -113,7 +117,7 @@ class Brain:
             middleware=[
                     SummarizationMiddleware(
                     model=self.model,
-                    trigger=("tokens", 4000),  # 当历史超过 4000 token 时触发
+                    trigger=("tokens", 20000),  # 当历史超过 20000 token 时触发
                     keep=("messages", 20),  # 保留最近 20 条消息，其余用摘要代替
                 ),
             ]
@@ -129,7 +133,7 @@ class Brain:
 
     def _build_system_prompt(self):
         base = (f"你是一个有帮助的AI助手，可以调用工具来完成任务。"
-                f"你当前的运行环境是{self.get_platform()}。"
+                # f"你当前的运行环境是{self.get_platform()}。"
                 f"当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
                 "在调用工具或者skill之前，请先写下你的思考过程。"
                 "如果工具调用出错，请分析错误原因，并尝试其他方法。"
@@ -149,11 +153,8 @@ class Brain:
         self.is_busy = True
         try:
             self.user_id = user_id
-            if image_data:
-                return await self._handle_image(user_input, image_data)
-            else:
-                intent_data = await self._classify_intent(user_input)
-                return await self._handle_intent(intent_data, user_id, user_input, new_thread)
+            intent_data = await self._classify_intent(user_input)
+            return await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread)
         finally:
             self.is_busy = False
             self.last_run_time = datetime.now()
@@ -230,7 +231,7 @@ class Brain:
             print(f"意图分类失败: {e}")
             return IntentType.CHAT.value
     
-    async def _handle_intent(self, intent: str, user_id: str, user_input: str, new_thread) -> str:
+    async def _handle_intent(self, intent: str, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         """根据意图分发到对应的处理函数"""
         if intent == IntentType.SET_REMINDER.value:
             reminders = await self._detect_reminder_intent(user_input)
@@ -241,13 +242,13 @@ class Brain:
                 return "未能理解提醒的时间和内容，请重新描述。"
             
         elif intent == IntentType.COMPLEX_TASKS.value:
-            return await self._handle_complex_tasks(user_input, new_thread)
+            return await self._handle_complex_tasks(user_input, image_data, new_thread)
         
         elif intent == IntentType.QUERY_REMINDER.value:
             return await self._handle_query_reminder(user_id)
         
         else:  # chat 或其他
-            return await self._handle_chat(user_input, new_thread)
+            return await self._handle_chat(user_input, image_data, new_thread)
 
     async def _handle_set_reminder(self, reminders):
         responses = []
@@ -330,7 +331,7 @@ class Brain:
             result += f"- {dt} UTC：{row['message']}\n"
         return result
     
-    async def _handle_complex_tasks(self, user_input: str, new_thread: bool = False):
+    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False):
         """处理复杂推理任务时，默认不需要上下文。"""
         memories = []
         if self.memory:
@@ -344,7 +345,12 @@ class Brain:
                 for m in memories
             ])
             base_prompt += memory_text
-        print(f'base_prompt: {base_prompt}', flush=True)
+        
+        if image_data:
+            image_desc = await self._handle_image(image_data)
+            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
+            
+        # print(f'base_prompt: {base_prompt}', flush=True)
         messages = [
             {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
@@ -379,7 +385,7 @@ class Brain:
         # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
         return current_ai_message
     
-    async def _handle_chat(self, user_input: str, new_thread: bool = False):
+    async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False):
         """聊天"""
         chat_id = f'{self.agent_id}_{self.user_id}'
         if new_thread:
@@ -419,6 +425,10 @@ class Brain:
             base_prompt += f"\n\n[主动消息] AI刚才主动对用户说过：“{recent['content']}”"
             # 使用后立即删除，避免每条消息都重复出现（也可保留到过期，根据需要调整）
             del self.recent_active_messages[self.user_id]
+        
+        if image_data:
+            image_desc = await self._handle_image(image_data)
+            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
             
         # print(f'base_prompt: {base_prompt}', flush=True)
         messages = [
@@ -455,13 +465,13 @@ class Brain:
         # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
         return current_ai_message
     
-    async def _handle_image(self, user_input: str, image_data: str) -> str:
+    async def _handle_image(self, image_data: str) -> str:
         """处理图片输入，返回视觉模型的结果"""
         # 获取视觉模型（需要在 model_config.py 中预先配置）
         model = model_config.get_model("vision")
         # 构造多模态消息：文本 + 图片
         content = [
-            {"type": "text", "text": user_input},
+            {"type": "text", "text": "读取图片的内容，尽可能完整地描述出图片的内容。"},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
         ]
         messages = [{"role": "user", "content": content}]
@@ -573,4 +583,6 @@ class Brain:
         await self.comm.send_to_agent(user_id, {"text": content})
         print(f"[主动消息已记录] {content}")
     
+
+
     
