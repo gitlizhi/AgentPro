@@ -127,13 +127,14 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 
 ## 🔧 配置说明
 ### 主要配置项
-变量名	说明	默认值
-POSTGRES_URI	PostgreSQL 连接字符串	postgresql://...
-ZHIPU_API_KEY	智谱 AI API 密钥	无
-HUB_HOST	Hub 服务器主机	localhost
-HUB_PORT	Hub 服务器端口	8765
-MEMORY_MARKDOWN_DIR	长期记忆 Markdown 文件目录	./agent_memory
-CHROMA_PERSIST_DIR	ChromaDB 持久化目录	./chroma_db
+|变量名|	说明|	默认值|
+| --- | --- | --- |
+|POSTGRES_URI|	PostgreSQL 连接字符串|	postgresql://...|
+|ZHIPU_API_KEY|	智谱 AI API 密钥|	无
+|HUB_HOST	Hub| 服务器主机|	localhost|
+|HUB_PORT	Hub| 服务器端口|	8765|
+|MEMORY_MARKDOWN_DIR	|长期记忆 Markdown 文件目录|	./agent_memory|
+|CHROMA_PERSIST_DIR|	ChromaDB 持久化目录	|./chroma_db|
 
 
 ### 模型配置
