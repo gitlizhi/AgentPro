@@ -12,7 +12,8 @@ class DockerSandboxBackend(BaseSandbox):
     安全加固的 Docker 沙箱后端，遵循最小权限原则。
     """
     def __init__(self,
-                 image: str = "my-agent-base:latest",       # 本地已经构建好镜像了
+                 # image: str = "my-agent-base:latest",       # 本地已经构建好镜像了
+                 image: str = "python:3.12-slim",               # 通用镜像
                  mem_limit: str = "256m",
                  cpu_limit: float = 0.5,
                  network_disabled: bool = True,
