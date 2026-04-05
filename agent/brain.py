@@ -2,8 +2,8 @@
 大脑决策层
 """
 import base64
-import os
 import sys
+import re
 import uuid
 import json
 import random
@@ -188,7 +188,7 @@ class Brain:
                     lines = lines[:-1]
                 content = "\n".join(lines).strip()
             data = json.loads(content)
-            print(f"data={data}, type={type(data)}")
+            # print(f"data={data}, type={type(data)}")
             # 确保字段存在
             if "reminders" not in data:
                 data["reminders"] = []
@@ -201,7 +201,28 @@ class Brain:
             return {"reminders": [], "has_other": True}
     
     async def _classify_intent(self, user_input: str) -> dict:
-        """调用大模型进行意图分类，返回包含intent和可能参数的字典"""
+        """调用大模型进行意图分类，返回包含intent和可能参数的字典，先使用关键词进行提取，不行再做大模型意图识别"""
+        # 时间词正则（包含自然语言）
+        time_patterns = [
+            r'(\d+)\s*分钟[后内]',
+            r'(\d+)\s*小时[后内]',
+            r'(\d+)\s*天[后内]',
+            r'明天', r'后天', r'今天', r'下周', r'下个月',
+            r'(\d{1,2})点',
+            r'(\d+)\s*秒[后内]',
+        ]
+        has_time = any(re.search(p, user_input) for p in time_patterns)
+        
+        # 设置提醒：必须有时间词 + 提醒/记/闹钟
+        if has_time and ('提醒' in user_input or '记' in user_input or '闹钟' in user_input):
+            return IntentType.SET_REMINDER.value
+        
+        # 查询提醒：精确的关键词（避免误匹配）
+        query_keywords = ['我的提醒', '查看提醒', '有哪些提醒', '未到期的提醒', '提醒列表', '提醒我什么', '待办',
+                          '提醒一下']
+        if any(kw in user_input for kw in query_keywords):
+            return IntentType.QUERY_REMINDER.value
+        
         # 构建意图选项字符串
         intent_lines = []
         intent_str = ""
@@ -236,7 +257,7 @@ class Brain:
         if intent == IntentType.SET_REMINDER.value:
             reminders = await self._detect_reminder_intent(user_input)
             if reminders:
-                print(f'reminders={reminders}')
+                # print(f'reminders={reminders}')
                 return await self._handle_set_reminder(reminders)
             else:
                 return "未能理解提醒的时间和内容，请重新描述。"
@@ -274,28 +295,39 @@ class Brain:
                     remind_time = remind_time.astimezone(timezone.utc).replace(tzinfo=None)
                 
                 if remind_time:
-                    job_id = f"reminder_{self.user_id}_{int(remind_time.timestamp())}"
-                    scheduler.add_job(
-                        send_reminder,
-                        trigger='date',
-                        run_date=remind_time,
-                        args=[self.user_id, message],
-                        id=job_id,
-                        replace_existing=True
-                    )
-                    # 2. 插入 reminders 表
-                    async with pool.connection() as conn:
-                        async with conn.cursor() as cur:
-                            await cur.execute(
-                                "INSERT INTO reminders (user_id, reminder_time, message) VALUES (%s, %s, %s)",
-                                (self.user_id, remind_time, message)
+                    from sqlalchemy.exc import OperationalError
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            job_id = f"reminder_{self.user_id}_{int(remind_time.timestamp())}"
+                            scheduler.add_job(
+                                send_reminder,
+                                trigger='date',
+                                run_date=remind_time,
+                                args=[self.user_id, message],
+                                id=job_id,
+                                replace_existing=True,
+                                misfire_grace_time=30   # 如果在 misfire_grace_time 时间差内，依然运行
                             )
-                    responses.append(f"在 {remind_time.strftime('%Y-%m-%d %H:%M:%S')} 提醒你 {message}")
+                            # 2. 插入 reminders 表
+                            async with pool.connection() as conn:
+                                async with conn.cursor() as cur:
+                                    await cur.execute(
+                                        "INSERT INTO reminders (user_id, reminder_time, message) VALUES (%s, %s, %s)",
+                                        (self.user_id, remind_time, message)
+                                    )
+                            responses.append(f"在 {remind_time.strftime('%Y-%m-%d %H:%M:%S')} 提醒你 {message}")
+                            break
+                        except OperationalError as e:
+                            if attempt == max_retries - 1:
+                                raise
+                            print(f"数据库连接错误，重试 {attempt + 1}/{max_retries}...")
+                            time.sleep(2**attempt)
                 else:
                     responses.append(f"出错了，无法理解这个时间：{time_str}")
             else:
                 responses.append("出错了 提醒信息不完整")
-        return "好的，我会" + "，".join(responses)
+        return "好的，reminder_bot会" + "，".join(responses)
     
     async def _handle_query_reminder(self, user_id: str) -> str:
         from agent.db import get_pool
@@ -373,6 +405,7 @@ class Brain:
                         current_ai_message = ""
                     # 发送工具调用信息
                     tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
+                    tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
                     await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                     # 工具调用本身可能不包含文本，但如果有内容也累积
             # 处理工具返回消息块
@@ -453,6 +486,7 @@ class Brain:
                         current_ai_message = ""
                     # 发送工具调用信息
                     tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
+                    tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
                     await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                     # 工具调用本身可能不包含文本，但如果有内容也累积
             # 处理工具返回消息块
