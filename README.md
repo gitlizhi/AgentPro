@@ -58,14 +58,16 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
       HUB_HOST=localhost
       HUB_PORT=8765
       ```
+4. 安装docker desktop
+  官网地址：https://www.docker.com/products/docker-desktop/
+  安装后启动 docker desktop
 
-
-4. 启动 Hub
+5. 启动 Hub
     ```bash
-   python -m hub.server
+   cd hub && python server.py
    ```
 
-5. 启动智能体
+6. 启动智能体
 
      ```bash
    python main.py
@@ -74,23 +76,16 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    你可以修改 main.py 中的 num_agents 变量来启动多个。
 
 
-6. 启动测试客户端
+7. 启动测试客户端后，在浏览器打开http://127.0.0.1:8000
 
      ```bash
-      python test_client.py --agent agent_id
+      python client.py
+
       ```
 
-客户端支持以下命令：
+客户端支持以下命令（新版客户端已经移除旧命令）：
 
 - /new 消息：开始新对话（生成新 thread_id）
-
-- /img 图片路径 用户输入内容  ：上传图片
-
-- /broadcast 消息：向所有智能体广播
-
-- /target agent_id：切换当前目标智能体
-
-- 普通输入：发送给当前目标智能体
 
     ```text
    agentpro/
@@ -114,8 +109,7 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    │   └── server.py
    ├── agent_memory/                # 长期记忆 Markdown 文件
    ├── chroma_db/                   # ChromaDB 持久化目录
-   ├── tests/                       # 测试脚本
-   │   └── test_client.py
+   ├── client.py                       # 客户端
    ├── .env.example                 # 环境变量示例
    ├── main.py                      # 应用入口
    ├── clean_checkpoints.py         # 清理短期记忆脚本
