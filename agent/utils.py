@@ -35,7 +35,7 @@ async def call_zhipu_chat(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    messages = [{"role": "system", "content": "你是一个意图识别的人工智能助手"}, {"role": "user", "content": user_input}]
+    messages = [{"role": "system", "content": "你是一个聪明的人工智能助手"}, {"role": "user", "content": user_input}]
     payload = {
         "model": model,
         "messages": messages,

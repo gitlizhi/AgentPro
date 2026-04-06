@@ -5,4 +5,8 @@
 /backendDir
 /chroma_db
 *.log
+*.json
+*.md
 /agent/skills/*
+agent/data/memories/*
+agent/data/pending/*

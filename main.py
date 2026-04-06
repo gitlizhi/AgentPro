@@ -10,6 +10,7 @@ from agent.scheduler import init_scheduler
 from agent.communication import Communication
 from agent.tasks import set_reminder_comm
 from agent.tasks import consolidate_all_users
+from agent.memory_processor import memory_task
 from config import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -57,8 +58,8 @@ async def main():
         agents.append(agent)
 
     # 将所有 Agent 的 run 任务和提醒机器人的 connect 任务合并
-    tasks = [agent.run() for agent in agents] + [reminder_comm.connect()]
-
+    memory_task_obj  = asyncio.create_task(memory_task())
+    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), memory_task_obj]
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
@@ -66,6 +67,12 @@ async def main():
         for agent in agents:
             await agent.stop()
         await reminder_comm.close()
+        # 取消记忆任务
+        memory_task_obj.cancel()
+        try:
+            await memory_task_obj   # 等待取消完成
+        except asyncio.CancelledError:
+            pass
     finally:
         scheduler.shutdown()
         await close_db_pool()

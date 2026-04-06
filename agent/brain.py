@@ -1,15 +1,10 @@
 """
 大脑决策层
 """
-import base64
-import sys
 import re
 import uuid
 import json
 import random
-import asyncio
-import websockets
-import subprocess
 import time
 import os
 from agent.utils import call_zhipu_chat
@@ -28,7 +23,7 @@ from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
 from config import config
 from agent.sandboxed_backend import DockerSandboxBackend
-
+from agent.tools import log_memory, retrieve_memory, load_full_memory, update_memory_confidence
 
 import logging
 logging.getLogger('langgraph').setLevel(logging.DEBUG)
@@ -103,7 +98,7 @@ class Brain:
         
         self.agent = create_deep_agent(
             model=self.model,
-            # tools=self._create_custom_tools(),  # 添加自定义工具
+            tools=[log_memory, retrieve_memory, load_full_memory, update_memory_confidence],  # 添加自定义工具
             system_prompt=self._build_system_prompt(),
             # backend=backend,
             backend=self.docker_backend,
@@ -118,7 +113,7 @@ class Brain:
                     SummarizationMiddleware(
                     model=self.model,
                     trigger=("tokens", 20000),  # 当历史超过 20000 token 时触发
-                    keep=("messages", 20),  # 保留最近 20 条消息，其余用摘要代替
+                    keep=("messages", 30),  # 保留最近 30 条消息，其余用摘要代替
                 ),
             ]
         )
@@ -132,7 +127,11 @@ class Brain:
             return "Unknown OS"
 
     def _build_system_prompt(self):
-        base = (f"你是一个有帮助的AI助手，可以调用工具来完成任务。"
+        base = (f"你是一个智能体，可以调用工具来完成任务,同时拥有长期记忆系统。在执行复杂任务时，请遵循以下规则："
+                "1. **开始新任务前**，先调用 `retrieve_memory` 搜索相关经验，根据返回的摘要决定是否加载完整记忆。"
+                "2. **执行每个关键步骤后**（工具调用、错误、用户反馈），调用 `log_memory` 记录原始日志。"
+                "3. **当你根据某条记忆成功解决问题后**，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
+                "4. 记忆库采用渐进式披露：先看摘要，需要细节才加载完整内容。"
                 # f"你当前的运行环境是{self.get_platform()}。"
                 f"当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
                 "在调用工具或者skill之前，请先写下你的思考过程。"
@@ -142,7 +141,6 @@ class Brain:
         注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
 
         例如：
-        - 用户说“读取桌面上的 test.txt”，你应该调用 `read_file` 工具，路径为 `/desktop/test.txt`。
         - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
 
         不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
