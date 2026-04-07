@@ -7,9 +7,11 @@ import json
 import random
 import time
 import os
+import asyncio
 from agent.utils import call_zhipu_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
+from langgraph.types import Command
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain.agents.middleware import SummarizationMiddleware
 from agent.model_config import model_config  # 导入配置
@@ -59,6 +61,10 @@ class Brain:
             db_pool = get_pool()
         self.checkpointer = AsyncPostgresSaver(db_pool)
         
+        self._pending_approvals = {}
+        # 用于去重（记录已发送的消息ID）
+        self.sent_msg_ids = []
+        
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
         # root_dir = os.path.expanduser("~")  # 这会得到当前用户的家目录
@@ -105,9 +111,8 @@ class Brain:
             skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
             interrupt_on={
-                "delete_file": True,  # Default: approve, edit, reject
-                "execute": False,
-                "read_file": False,  # No interrupts needed
+                "delete_file": {"allowed_decisions": ["approve", "reject"]},  # Default: approve, edit, reject
+                "execute": {"allowed_decisions": ["approve", "reject"]},
             },
             middleware=[
                     SummarizationMiddleware(
@@ -128,12 +133,12 @@ class Brain:
 
     def _build_system_prompt(self):
         base = (f"你是一个智能体，可以调用工具来完成任务,同时拥有长期记忆系统。在执行复杂任务时，请遵循以下规则："
-                "1. **开始新任务前**，先调用 `retrieve_memory` 搜索相关经验，根据返回的摘要决定是否加载完整记忆。"
-                "2. **执行每个关键步骤后**（工具调用、错误、用户反馈），调用 `log_memory` 记录原始日志。"
-                "3. **当你根据某条记忆成功解决问题后**，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
+                "1. 开始新任务前，先调用 `retrieve_memory` 搜索相关经验，根据返回的摘要决定是否加载完整记忆。"
+                "2. 执行每个关键步骤后（工具调用、错误、用户反馈），调用 `log_memory` 记录原始日志。"
+                "3. 当你根据某条记忆成功解决问题后，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
                 "4. 记忆库采用渐进式披露：先看摘要，需要细节才加载完整内容。"
                 # f"你当前的运行环境是{self.get_platform()}。"
-                f"当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
+                "当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
                 "在调用工具或者skill之前，请先写下你的思考过程。"
                 "如果工具调用出错，请分析错误原因，并尝试其他方法。"
                 )
@@ -362,12 +367,32 @@ class Brain:
         return result
     
     async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False):
-        """处理复杂推理任务时，默认不需要上下文。"""
+        # 构建系统提示和消息（与原来保持一致）
+        chat_id = f'{self.agent_id}_{self.user_id}'
+        if new_thread:
+            # 用户要求新对话：生成新 ID，并更新元数据
+            print(f'new_thread: {new_thread}', flush=True)
+            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+        else:
+            # 尝试从长期记忆恢复上次的 thread_id
+            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
+                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
+                if last_thread:
+                    print(f'加载从长期记忆中的last_thread_id')
+                    self.thread_id = last_thread
+                else:
+                    print(f'首次对话，生成新 ID')
+                    # 首次对话，生成新 ID
+                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+        if self.thread_id not in self.sent_msg_ids:
+            self.sent_msg_ids.clear()
+            self.sent_msg_ids.insert(0, self.thread_id)
+        
         memories = []
         if self.memory:
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
-        
-        # 2. 构建系统提示（基础提示 + 长期记忆信息）
         base_prompt = self._build_system_prompt()
         if memories:
             memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
@@ -375,46 +400,84 @@ class Brain:
                 for m in memories
             ])
             base_prompt += memory_text
-        
         if image_data:
             image_desc = await self._handle_image(image_data)
             base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
-            
-        # print(f'base_prompt: {base_prompt}', flush=True)
+        
         messages = [
             {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
         
-        current_ai_message = ""  # 累积当前 AI 消息的文本
-        async for chunk, metadata in self.agent.astream(
-                {"messages": messages},
-                {"configurable": {"thread_id": uuid.uuid4()}},      # 独立的上下文
-                stream_mode="messages",
-        ):
-            # 处理 AI 消息块（可能是文本片段或工具调用）
-            if chunk.type == "AIMessageChunk":
-                if chunk.content:
-                    # 实时发送每个文本片段给用户（打字机效果）
-                    current_ai_message += chunk.content
-                if chunk.tool_calls:
-                    if current_ai_message:
-                        await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
-                        current_ai_message = ""
-                    # 发送工具调用信息
-                    tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
-                    tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
-                    await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                    # 工具调用本身可能不包含文本，但如果有内容也累积
-            # 处理工具返回消息块
-            elif chunk.type == "ToolMessageChunk":
-                if current_ai_message:
-                    await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
-                    current_ai_message = ""
-                tool_result = f"🛠️ 工具返回: {chunk.content}"
-                await self.comm.send_to_agent(self.user_id, {"text": tool_result})
-        # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
-        return current_ai_message
+        # 注意：必须使用同一个 thread_id，不能动态生成
+        config = {"configurable": {"thread_id": self.thread_id}}
+        
+        # HITL 循环：初始输入为 messages
+        input_state = {"messages": messages}
+        command = None
+        
+        while True:
+            # 如果有恢复命令，则使用 Command 作为输入
+            if command:
+                input_state = Command(resume=command)
+            
+            async for event in self.agent.astream(
+                    input_state,
+                    config,
+                    stream_mode="values",
+            ):
+                # 检测中断
+                if "__interrupt__" in event:
+                    interrupts = event["__interrupt__"]
+                    # 处理所有中断，收集用户决策
+                    decisions = await self._process_interrupts(interrupts)
+                    # 假设只有一个中断，取第一个决策
+                    command = decisions[0] if decisions else None
+                    break  # 退出当前流，进入下一轮循环
+                else:
+                    # 正常消息处理
+                    if "messages" in event:
+                        for msg in event["messages"]:
+                            # 处理 AI 消息（思考内容）
+                            if msg.type == "ai" and msg.content:
+                                msg_id = getattr(msg, 'id', None)
+                                if msg_id and msg_id not in self.sent_msg_ids:
+                                    self.sent_msg_ids.append(msg_id)
+                                    # 发送完整消息（类似原代码中的 current_ai_message 累积后发送）
+                                    await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                                    final_answer = msg.content
+                                elif not msg_id:
+                                    # 无ID时使用内容哈希（备用）
+                                    content_hash = hash(msg.content)
+                                    if content_hash not in self.sent_msg_ids:
+                                        self.sent_msg_ids.append(content_hash)
+                                        await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                                        final_answer = msg.content
+                            
+                            # 处理工具调用（去重）
+                            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    tc_id = tc.get('id')
+                                    if tc_id and tc_id not in self.sent_msg_ids:
+                                        self.sent_msg_ids.append(tc_id)
+                                        tool_call_info = f"🔧 调用工具: {tc}"
+                                        # 截断过长内容（与原逻辑一致）
+                                        tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
+                                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
+                            
+                            # 处理工具返回消息
+                            elif msg.type == "tool":
+                                msg_id = getattr(msg, 'id', None)
+                                if msg_id and msg_id not in self.sent_msg_ids:
+                                    self.sent_msg_ids.append(msg_id)
+                                    tool_result = f"🛠️ 工具返回: {msg.content}"
+                                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
+            
+            else:
+                # 没有中断，流正常结束
+                break
+        
+        # return final_answer
     
     async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False):
         """聊天"""
@@ -614,6 +677,45 @@ class Brain:
         # 发送消息
         await self.comm.send_to_agent(user_id, {"text": content})
         print(f"[主动消息已记录] {content}")
+    
+    async def _process_interrupts(self, interrupts):
+        """处理中断列表，返回决策列表"""
+        decisions = []
+        for interrupt in interrupts:
+            value = interrupt.value
+            action_requests = value.get("action_requests", [])
+            review_configs = value.get("review_configs", [])
+            for action in action_requests:
+                tool_name = action.get("name")
+                tool_args = action.get("args")
+                config = next((cfg for cfg in review_configs if cfg["action_name"] == tool_name), {})
+                allowed = config.get("allowed_decisions", ["approve", "reject"])
+                # 发送审批请求给前端，带上 from 字段（当前 Agent ID）
+                msg = {
+                    "type": "approval_request",
+                    "from": self.agent_id,  # 关键：指明发起者
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "allowed": allowed
+                }
+                await self.comm.send_to_agent(self.user_id, msg)
+                # 等待用户决策
+                decision = await self._wait_for_user_decision(tool_name)
+                decisions.append(decision)
+        return decisions
+    
+    async def _wait_for_user_decision(self, tool_name: str):
+        """等待用户对该工具的审批决策"""
+        future = asyncio.get_event_loop().create_future()
+        self._pending_approvals[tool_name] = future
+        decision = await future
+        return decision
+    
+    def _complete_approval(self, tool_name: str, decision):
+        print('in _complete_approval ===')
+        if tool_name in self._pending_approvals:
+            self._pending_approvals[tool_name].set_result({"decisions": [decision]})
+            del self._pending_approvals[tool_name]
     
 
 

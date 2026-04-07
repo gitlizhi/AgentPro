@@ -31,7 +31,6 @@ class Communication:
                     "agent_id": self.agent_id
                 })
                 logger.info(f"Agent {self.agent_id} connected to hub")
-                
                 # 监听消息
                 while self._running:
                     try:
@@ -47,6 +46,8 @@ class Communication:
                     except Exception as e:
                         logger.error(f"Error receiving message: {e}, raw message: {message}")
                         # logger.error(f"Error receiving message: {e}")
+                        break
+
         finally:
             self._running = False
             self.websocket = None

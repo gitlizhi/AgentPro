@@ -4,6 +4,8 @@ Agent启动入口
 import asyncio
 import sys
 import logging
+import uuid
+
 from agent.core import Agent
 from agent.db import init_db_pool, close_db_pool
 from agent.scheduler import init_scheduler
@@ -49,9 +51,9 @@ async def main():
 
     # 创建多个 Agent 实例
     agents = []
-    for i in range(1, config.agent.num_agents + 1):
+    for i in range(config.agent.num_agents):
         agent = Agent(
-            agent_id=f"{config.agent.agent_id_prefix}_{i}",  # 确保每个 ID 唯一
+            agent_id=f"{config.agent.agent_id_prefix}_{uuid.uuid4()}",  # 确保每个 ID 唯一
             db_pool=pool,
             model_config_key="zhipu",
         )

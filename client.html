@@ -6,14 +6,10 @@
     <title>AgentPro · 智能体空间</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        /* 原有样式保持不变，新增审批面板样式 */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: 'Inter', system-ui, sans-serif;
             background: radial-gradient(circle at 10% 30%, #0F172A, #020617);
             height: 100vh;
             display: flex;
@@ -21,8 +17,7 @@
             justify-content: center;
             padding: 20px;
         }
-
-        .app {
+        .agent-container {
             width: 1300px;
             max-width: 95vw;
             height: 88vh;
@@ -33,337 +28,84 @@
             display: flex;
             overflow: hidden;
         }
-
-        .sidebar {
-            width: 280px;
-            background: rgba(0, 0, 0, 0.3);
-            backdrop-filter: blur(8px);
-            border-right: 1px solid rgba(255,255,255,0.05);
-            display: flex;
-            flex-direction: column;
-        }
-
-        .sidebar-header {
-            padding: 24px 20px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-        }
-
-        .sidebar-header h1 {
-            font-size: 1.6rem;
-            font-weight: 600;
-            background: linear-gradient(135deg, #E2E8F0, #A5B4FC);
-            background-clip: text;
-            -webkit-background-clip: text;
-            color: transparent;
-        }
-
-        .sidebar-header p {
-            font-size: 0.7rem;
-            color: #6B7280;
-            margin-top: 6px;
-        }
-
-        .agents-list {
-            flex: 1;
-            overflow-y: auto;
-            padding: 16px 12px;
-        }
-
-        .agent-card {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 12px 16px;
-            margin-bottom: 8px;
-            background: rgba(255,255,255,0.02);
-            border-radius: 20px;
-            cursor: pointer;
-            transition: all 0.2s;
-            border: 1px solid transparent;
-        }
-
-        .agent-card:hover {
-            background: rgba(255,255,255,0.06);
-            transform: translateX(4px);
-        }
-
-        .agent-card.active {
-            background: rgba(99, 102, 241, 0.2);
-            border-color: rgba(99, 102, 241, 0.4);
-        }
-
-        .agent-avatar {
-            width: 42px;
-            height: 42px;
-            background: linear-gradient(145deg, #3B82F6, #8B5CF6);
-            border-radius: 24px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.3rem;
-        }
-
-        .agent-info {
-            flex: 1;
-        }
-
-        .agent-name {
-            font-weight: 500;
-            font-size: 0.9rem;
-            color: #F1F5F9;
-        }
-
-        .agent-status {
-            font-size: 0.65rem;
-            color: #10B981;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            margin-top: 4px;
-        }
-
-        .chat-area {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background: rgba(0,0,0,0.15);
-        }
-
-        .chat-header {
-            padding: 20px 28px;
-            background: rgba(15, 23, 42, 0.5);
-            backdrop-filter: blur(4px);
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-        }
-
-        .chat-header h2 {
-            font-size: 1.2rem;
-            font-weight: 500;
-            color: #E2E8F0;
-        }
-
-        .chat-header span {
-            font-size: 0.7rem;
-            color: #6B7280;
-        }
-
-        .messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 24px 28px;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-
-        .messages::-webkit-scrollbar {
-            width: 5px;
-        }
-        .messages::-webkit-scrollbar-track {
-            background: rgba(0,0,0,0.2);
-        }
-        .messages::-webkit-scrollbar-thumb {
-            background: rgba(255,255,255,0.2);
-            border-radius: 5px;
-        }
-
-        .message {
-            display: flex;
-            flex-direction: column;
-            max-width: 85%;
-            animation: fadeUp 0.2s ease;
-        }
-
-        .message.self {
-            align-self: flex-end;
-        }
-
-        .message-meta {
-            font-size: 0.65rem;
-            font-weight: 500;
-            margin-bottom: 4px;
-            margin-left: 12px;
-            color: #94A3B8;
-        }
-
-        .message.self .message-meta {
-            text-align: right;
-            margin-right: 12px;
-        }
-
-        .bubble {
-            padding: 10px 18px;
-            border-radius: 24px;
-            font-size: 0.9rem;
-            line-height: 1.5;
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(4px);
-            border: 1px solid rgba(255,255,255,0.05);
-            color: #E2E8F0;
-        }
-
-        .message.self .bubble {
-            background: linear-gradient(135deg, #4F46E5, #7C3AED);
-            border: none;
-            color: white;
-            border-bottom-right-radius: 6px;
-        }
-
+        .sidebar { width: 280px; background: rgba(0,0,0,0.3); backdrop-filter: blur(8px); border-right: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; }
+        .sidebar-header { padding: 24px 20px; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .sidebar-header h1 { font-size: 1.6rem; font-weight: 600; background: linear-gradient(135deg, #E2E8F0, #A5B4FC); background-clip: text; -webkit-background-clip: text; color: transparent; }
+        .sidebar-header p { font-size: 0.7rem; color: #6B7280; margin-top: 6px; }
+        .agents-list { flex: 1; overflow-y: auto; padding: 16px 12px; }
+        .agent-card { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 8px; background: rgba(255,255,255,0.02); border-radius: 20px; cursor: pointer; transition: all 0.2s; border: 1px solid transparent; }
+        .agent-card:hover { background: rgba(255,255,255,0.06); transform: translateX(4px); }
+        .agent-card.active { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.4); }
+        .agent-avatar { width: 42px; height: 42px; background: linear-gradient(145deg, #3B82F6, #8B5CF6); border-radius: 24px; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; }
+        .agent-info { flex: 1; }
+        .agent-name { font-weight: 500; font-size: 0.9rem; color: #F1F5F9; }
+        .agent-status { font-size: 0.65rem; color: #10B981; display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; background: rgba(0,0,0,0.15); }
+        .chat-header { padding: 20px 28px; background: rgba(15,23,42,0.5); backdrop-filter: blur(4px); border-bottom: 1px solid rgba(255,255,255,0.05); }
+        .chat-header h2 { font-size: 1.2rem; font-weight: 500; color: #E2E8F0; }
+        .chat-header span { font-size: 0.7rem; color: #6B7280; }
+        .messages { flex: 1; overflow-y: auto; padding: 24px 28px; display: flex; flex-direction: column; gap: 20px; }
+        .messages::-webkit-scrollbar { width: 5px; }
+        .messages::-webkit-scrollbar-track { background: rgba(0,0,0,0.2); }
+        .messages::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 5px; }
+        .message { display: flex; flex-direction: column; max-width: 85%; animation: fadeUp 0.2s ease; overflow: hidden;}
+        .message.self { align-self: flex-end; }
+        .message-meta { font-size: 0.65rem; font-weight: 500; margin-bottom: 4px; margin-left: 12px; color: #94A3B8; display: flex; gap: 8px; }
+        .message.self .message-meta { text-align: right; margin-right: 12px; }
+        .bubble { padding: 10px 18px; border-radius: 24px; font-size: 0.9rem; line-height: 1.5; background: rgba(30,41,59,0.7); backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.05); color: #E2E8F0; word-wrap: break-word; overflow-wrap: break-word;word-break: break-word;    }
+        .message.self .bubble { background: linear-gradient(135deg, #4F46E5, #7C3AED); border: none; color: white; border-bottom-right-radius: 6px; }
         .bubble p { margin-bottom: 6px; }
         .bubble p:last-child { margin-bottom: 0; }
-        .bubble code {
-            background: rgba(0,0,0,0.4);
-            padding: 2px 6px;
-            border-radius: 6px;
-            font-family: monospace;
-            font-size: 0.8rem;
-        }
-        .bubble pre {
-            background: rgba(0,0,0,0.4);
-            padding: 12px;
+        .bubble code { background: rgba(0,0,0,0.4); padding: 2px 6px; border-radius: 6px; font-family: monospace; font-size: 0.8rem; }
+        .bubble pre { background: rgba(0,0,0,0.4); padding: 12px; border-radius: 16px; overflow-x: auto; margin: 8px 0; }
+        .bubble ul, .bubble ol { padding-left: 1.5rem; margin: 6px 0; }
+        .bubble a { color: #A5B4FC; text-decoration: none; border-bottom: 1px dotted; }
+        .input-zone { padding: 16px 28px 24px; background: rgba(15,23,42,0.5); backdrop-filter: blur(12px); border-top: 1px solid rgba(255,255,255,0.05); }
+        .input-flex { display: flex; gap: 12px; align-items: flex-end; }
+        .input-box { flex: 1; background: rgba(0,0,0,0.35); border-radius: 32px; border: 1px solid rgba(255,255,255,0.1); transition: all 0.2s; }
+        .input-box:focus-within { border-color: #6366F1; box-shadow: 0 0 0 2px rgba(99,102,241,0.2); }
+        #messageInput { width: 100%; background: transparent; border: none; padding: 12px 20px; color: #F1F5F9; font-size: 0.9rem; outline: none; resize: none; font-family: inherit; }
+        .btn-group { display: flex; gap: 8px; }
+        .icon-btn { background: rgba(255,255,255,0.05); border: none; width: 44px; height: 44px; border-radius: 44px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; cursor: pointer; color: #CBD5E1; transition: 0.2s; }
+        .icon-btn:hover { background: rgba(99,102,241,0.4); color: white; }
+        #sendBtn { background: linear-gradient(135deg, #4F46E5, #7C3AED); border: none; padding: 0 24px; border-radius: 40px; font-weight: 500; color: white; cursor: pointer; transition: 0.2s; }
+        #sendBtn:hover { transform: scale(0.96); opacity: 0.9; }
+        .preview-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; background: rgba(0,0,0,0.4); border-radius: 32px; padding: 6px 16px; width: fit-content; }
+        .preview-img { max-height: 48px; border-radius: 12px; }
+        .remove-img { background: none; border: none; color: #F87171; cursor: pointer; }
+        .status { text-align: center; font-size: 0.65rem; color: #6B7280; margin-top: 10px; }
+        /* 审批面板 */
+        .approval-panel {
+            position: fixed;
+            bottom: 100px;
+            right: 20px;
+            background: #1e293b;
             border-radius: 16px;
-            overflow-x: auto;
-            margin: 8px 0;
-        }
-        .bubble ul, .bubble ol {
-            padding-left: 1.5rem;
-            margin: 6px 0;
-        }
-        .bubble a {
-            color: #A5B4FC;
-            text-decoration: none;
-            border-bottom: 1px dotted;
-        }
-
-        .input-zone {
-            padding: 16px 28px 24px;
-            background: rgba(15, 23, 42, 0.5);
-            backdrop-filter: blur(12px);
-            border-top: 1px solid rgba(255,255,255,0.05);
-        }
-
-        .input-flex {
-            display: flex;
-            gap: 12px;
-            align-items: flex-end;
-        }
-
-        .input-box {
-            flex: 1;
-            background: rgba(0,0,0,0.35);
-            border-radius: 32px;
+            padding: 16px;
+            box-shadow: 0 10px 25px -5px rgba(0,0,0,0.3);
+            z-index: 1000;
+            max-width: 300px;
             border: 1px solid rgba(255,255,255,0.1);
-            transition: all 0.2s;
         }
-
-        .input-box:focus-within {
-            border-color: #6366F1;
-            box-shadow: 0 0 0 2px rgba(99,102,241,0.2);
-        }
-
-        #messageInput {
-            width: 100%;
-            background: transparent;
+        .approval-btn {
+            padding: 6px 12px;
             border: none;
-            padding: 12px 20px;
-            color: #F1F5F9;
-            font-size: 0.9rem;
-            outline: none;
-            resize: none;
-            font-family: inherit;
-        }
-
-        .btn-group {
-            display: flex;
-            gap: 8px;
-        }
-
-        .icon-btn {
-            background: rgba(255,255,255,0.05);
-            border: none;
-            width: 44px;
-            height: 44px;
-            border-radius: 44px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.2rem;
+            border-radius: 20px;
             cursor: pointer;
-            color: #CBD5E1;
-            transition: 0.2s;
-        }
-
-        .icon-btn:hover {
-            background: rgba(99,102,241,0.4);
-            color: white;
-        }
-
-        #sendBtn {
-            background: linear-gradient(135deg, #4F46E5, #7C3AED);
-            border: none;
-            padding: 0 24px;
-            border-radius: 40px;
             font-weight: 500;
-            color: white;
-            cursor: pointer;
-            transition: 0.2s;
+            margin-right: 8px;
         }
-
-        #sendBtn:hover {
-            transform: scale(0.96);
-            opacity: 0.9;
-        }
-
-        .preview-bar {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
-            background: rgba(0,0,0,0.4);
-            border-radius: 32px;
-            padding: 6px 16px;
-            width: fit-content;
-        }
-        .preview-img {
-            max-height: 48px;
-            border-radius: 12px;
-        }
-        .remove-img {
-            background: none;
-            border: none;
-            color: #F87171;
-            cursor: pointer;
-        }
-        .status {
-            text-align: center;
-            font-size: 0.65rem;
-            color: #6B7280;
-            margin-top: 10px;
-        }
-        .message-meta {
-            font-size: 0.65rem;
-            font-weight: 500;
-            margin-bottom: 4px;
-            margin-left: 12px;
-            color: #94A3B8;
-            display: flex;
-            gap: 8px;
-        }
-
+        .approval-btn.approve { background: #10b981; color: white; }
+        .approval-btn.reject { background: #ef4444; color: white; }
+        .approval-btn.edit { background: #f59e0b; color: white; }
         @keyframes fadeUp {
-            from {
-                opacity: 0;
-                transform: translateY(8px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
     </style>
 </head>
 <body>
-<div class="app">
+<div class="agent-container">
     <div class="sidebar">
         <div class="sidebar-header">
             <h1>AgentPro</h1>
@@ -373,7 +115,7 @@
     </div>
     <div class="chat-area">
         <div class="chat-header">
-            <h2 id="currentAgentName">未连接</h2>
+            <h2 id="currentAgentName">未选择</h2>
             <span id="currentAgentStatus">就绪</span>
         </div>
         <div class="messages" id="messages"></div>
@@ -397,13 +139,25 @@
 </div>
 <input type="file" id="imageInput" accept="image/*" style="display: none;">
 
+<!-- 审批面板 -->
+<div id="approvalPanel" class="approval-panel" style="display: none;">
+    <div id="approvalContent"></div>
+    <div style="margin-top: 12px; display: flex; gap: 8px;">
+        <button id="approveBtn" class="approval-btn approve">✅ 批准</button>
+        <button id="rejectBtn" class="approval-btn reject">❌ 拒绝</button>
+        <button id="editBtn" class="approval-btn edit">✏️ 修改</button>
+    </div>
+</div>
+
 <script>
     let ws = null;
     let currentAgent = null;
     let agents = [];
     let messageHistory = {};
     let currentImageBase64 = null;
+    let pendingApproval = null;  // { tool, args, allowed, fromAgent }
 
+    // DOM 元素
     const agentsContainer = document.getElementById('agentsList');
     const messagesDiv = document.getElementById('messages');
     const messageInput = document.getElementById('messageInput');
@@ -416,6 +170,11 @@
     const removeImgBtn = document.getElementById('removeImageBtn');
     const imageInput = document.getElementById('imageInput');
     const imageBtn = document.getElementById('imageBtn');
+    const approvalPanel = document.getElementById('approvalPanel');
+    const approvalContent = document.getElementById('approvalContent');
+    const approveBtn = document.getElementById('approveBtn');
+    const rejectBtn = document.getElementById('rejectBtn');
+    const editBtn = document.getElementById('editBtn');
 
     marked.setOptions({ breaks: true, gfm: true });
 
@@ -434,7 +193,7 @@
             } else if (data.type === 'message') {
                 const from = data.from;
                 const text = data.text;
-                const time = new Date().toLocaleTimeString();   // 接收时间
+                const time = new Date().toLocaleTimeString();
                 if (!messageHistory[from]) messageHistory[from] = [];
                 messageHistory[from].push({ sender: from, text, time });
                 if (from === currentAgent) {
@@ -444,6 +203,21 @@
                     document.title = '📩 新消息';
                     setTimeout(() => { document.title = 'AgentPro · 智能体空间'; }, 3000);
                 }
+            } else if (data.type === 'approval_request') {
+                // 显示审批面板
+                pendingApproval = {
+                    tool: data.tool,
+                    args: data.args,
+                    allowed: data.allowed,
+                    fromAgent: data.from
+                };
+                approvalContent.innerHTML = `
+                    <strong>🔐 工具调用需要审批</strong><br>
+                    工具: ${escapeHtml(data.tool)}<br>
+                    参数: ${JSON.stringify(data.args)}<br>
+                    允许操作: ${data.allowed.join(', ')}
+                `;
+                approvalPanel.style.display = 'block';
             }
         };
         ws.onclose = () => {
@@ -495,7 +269,7 @@
         const msgDiv = document.createElement('div');
         msgDiv.className = `message ${isSelf ? 'self' : ''}`;
         const rendered = marked.parse(text);
-        const timeStr = time ? time : new Date().toLocaleTimeString();
+        const timeStr = time ? time.split(' ')[1] || time : new Date().toLocaleTimeString();
         const senderName = isSelf ? '我' : sender;
         msgDiv.innerHTML = `
             <div class="message-meta">${escapeHtml(senderName)} · ${escapeHtml(timeStr)}</div>
@@ -541,10 +315,11 @@
             newThread = true;
             text = text.substring(4).trim() || "新对话";
         }
+        const time = new Date().toLocaleTimeString();
         if (text) {
             if (!messageHistory[currentAgent]) messageHistory[currentAgent] = [];
-            messageHistory[currentAgent].push({ sender: '我', text, time: new Date().toLocaleTimeString() });
-            displayMessage('我', text);
+            messageHistory[currentAgent].push({ sender: '我', text, time });
+            displayMessage('我', text, time);
         }
         ws.send(JSON.stringify({
             type: 'send',
@@ -570,6 +345,7 @@
         });
     }
 
+    // 图片上传
     imageBtn.addEventListener('click', () => imageInput.click());
     imageInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
@@ -586,6 +362,51 @@
         currentImageBase64 = null;
         previewDiv.style.display = 'none';
         imageInput.value = '';
+    });
+
+    // 审批按钮事件
+    approveBtn.addEventListener('click', () => {
+        if (pendingApproval) {
+            ws.send(JSON.stringify({
+                type: 'approval_decision',
+                to: pendingApproval.fromAgent,
+                tool: pendingApproval.tool,
+                decision: 'approve'
+            }));
+            approvalPanel.style.display = 'none';
+            pendingApproval = null;
+        }
+    });
+    rejectBtn.addEventListener('click', () => {
+        if (pendingApproval) {
+            ws.send(JSON.stringify({
+                type: 'approval_decision',
+                to: pendingApproval.fromAgent,
+                tool: pendingApproval.tool,
+                decision: 'reject'
+            }));
+            approvalPanel.style.display = 'none';
+            pendingApproval = null;
+        }
+    });
+    editBtn.addEventListener('click', () => {
+        if (pendingApproval) {
+            const editedArgs = prompt('请输入修改后的参数 (JSON格式):', JSON.stringify(pendingApproval.args));
+            if (editedArgs) {
+                try {
+                    const argsObj = JSON.parse(editedArgs);
+                    ws.send(JSON.stringify({
+                        type: 'approval_decision',
+                        to: pendingApproval.fromAgent,
+                        tool: pendingApproval.tool,
+                        decision: 'edit',
+                        edited_args: argsObj
+                    }));
+                    approvalPanel.style.display = 'none';
+                    pendingApproval = null;
+                } catch(e) { alert('JSON格式错误'); }
+            }
+        }
     });
 
     messageInput.addEventListener('input', function() {

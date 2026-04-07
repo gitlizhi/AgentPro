@@ -62,6 +62,23 @@ async def websocket_endpoint(websocket: WebSocket):
                         "to": target,
                         "payload": payload
                     }))
+            # 在 websocket_endpoint 中，处理前端发送的 approval_decision
+            elif message.get("type") == "approval_decision":
+                target = message.get("to")  # 目标 Agent ID
+                decision = message.get("decision")
+                tool = message.get("tool")
+                edited_args = message.get("edited_args")
+                # 构造命令文本，通过 Hub 发送给对应的 Agent
+                command = f"/{decision} {tool}"
+                if edited_args:
+                    command += f" {json.dumps(edited_args)}"
+                await hub_ws.send(json.dumps({
+                    "type": "message",
+                    "from": my_agent_id,
+                    "to": target,
+                    "payload": {"text": command}
+                }))
+            
     except WebSocketDisconnect:
         frontend_connections.remove(websocket)
 
@@ -86,15 +103,27 @@ async def connect_to_hub():
                         sender = data.get("from")
                         payload = data.get("payload", {})
                         text = payload.get("text", "")
-                        cleaned = clean_agent_response(text)
-                        if not cleaned:
-                            continue
-                        for conn in frontend_connections:
-                            await conn.send_json({
-                                "type": "message",
-                                "from": sender,
-                                "text": cleaned
-                            })
+                        type = payload.get("type", "")
+                        if type == 'approval_request':
+                            for conn in frontend_connections:
+                                await conn.send_json({
+                                    "type": "approval_request",
+                                    "from": payload.get("from"),
+                                    "tool": payload.get("tool"),
+                                    "args": payload.get("args"),
+                                    "allowed": payload.get("allowed")
+                                })
+                        else:
+                            cleaned = clean_agent_response(text)
+                            if not cleaned:
+                                continue
+                            for conn in frontend_connections:
+                                await conn.send_json({
+                                    "type": "message",
+                                    "from": sender,
+                                    "text": cleaned
+                                })
+                    
         except Exception as e:
             print(f"Hub 连接失败: {e}")
             await asyncio.sleep(5)

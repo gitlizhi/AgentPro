@@ -48,7 +48,10 @@ class Hub:
                 if aid != sender:
                     await ws.send(json.dumps(data, ensure_ascii=False))
         elif target in self.clients:
-            await self.clients[target].send(json.dumps(data, ensure_ascii=False))
+            try:
+                await self.clients[target].send(json.dumps(data, ensure_ascii=False))
+            except Exception as e:
+                logger.error(f"Failed to send to {target}: {e}")
         else:
             logger.warning(f"Target agent {target} not found")
     
@@ -70,7 +73,7 @@ class Hub:
                 else:
                     logger.warning(f"Unknown message type: {data.get('type')}")
         except websockets.exceptions.ConnectionClosed:
-            pass
+            print('=============== Connection closed ===============')
         finally:
             if agent_id:
                 await self.unregister(agent_id)
