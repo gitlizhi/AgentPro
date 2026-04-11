@@ -1,6 +1,91 @@
 """
 记忆（过往经验） 处理模块
 """
+
+"""
+核心架构：三级渐进式记忆检索
+设计了一个分层记忆系统，共三层，按需加载：
+
+第一级	索引文件 (index.json)   提供全局统计（高频标签、最近任务），帮助决定查哪些标签
+第二级	摘要列表（每个记忆的 step_summary + task_summary）  快速浏览相关经验的概要，决定哪一条值得细看
+第三级	完整记忆（Markdown 文件）  获取详细步骤、原始日志、错误信息等
+
+
+标签只存在于第一级和第二级之间——用来索引和过滤摘要，而不是直接用于语义匹配。
+摘要才是用来判断相关性的主要文本。Agent 读摘要后，再决定是否加载完整内容。
+
+标签用于快速过滤（粗粒度）。
+摘要用于语义判断（细粒度）。
+
+1.标签（Tags）
+作用：粗粒度过滤器，用于快速缩小候选记忆范围。
+
+2.摘要（Summaries）
+作用：细粒度的相关性判断。Agent 阅读摘要文本（自然语言），判断是否与当前任务相关。
+
+3.完整记忆（Full Memory）
+作用：提供可执行的步骤、错误栈、配置参数等具体细节，供 Agent 模仿或调整。
+存储格式：Markdown 文件，包含 frontmatter（元数据）和原始日志。
+
+
+检索流程（以“爬取百度图片”为例）
+1.用户提问：“帮我爬取百度图片，关键词‘刘亦菲’。”
+
+2.Agent 调用 retrieve_memory(query)：
+
+ - 读取 index.json，发现高频标签有 web_crawler, download, delete 等。
+ - 从 query 中提取可能的标签：web_crawler（因为“爬取”）、download（因为“图片”）。
+ - 扫描所有记忆文件，找到包含这些标签的文件（最多 10 个）。
+ - 提取每个文件的 step_summary，返回给 Agent。
+
+3.Agent 阅读摘要：
+
+ - 看到“创建百度图片爬虫脚本，成功下载3张图片到桌面” → 高度相关。
+ - 看到“删除桌面图片文件” → 不相关。
+
+4.Agent 调用 load_full_memory 加载相关记忆的完整 Markdown 文件。
+
+5.Agent 基于记忆中的步骤，调整后执行新任务。
+
+标签在这里的作用：只是第一轮筛选器，避免扫描所有记忆。真正的相关性判断完全依赖摘要文本。
+
+
+
+记忆转经验思维导图
+
+用户请求
+   │
+   ▼
+Agent.run() ──调用──► retrieve_memory(query)
+                           │
+                           ├─ 1. 读取 index.json（高频标签、最近任务）
+                           │
+                           ├─ 2. 从 query 中提取候选标签（例如通过关键词映射）
+                           │
+                           ├─ 3. 在 /memories/*.md 中 grep 包含这些标签的文件
+                           │
+                           ├─ 4. 对每个文件解析 frontmatter，取出 step_summary 和 task_summary
+                           │
+                           ├─ 5. 按（置信度 × 时间衰减）排序，返回前 N 条摘要
+                           │
+                           └─ 6. Agent 阅读摘要，决定是否调用 load_full_memory()
+                                    │
+                                    ▼
+                              执行任务
+                                    │
+                                    ▼
+                        关键步骤后调用 log_memory()
+                                    │
+                                    ▼
+                        原始日志写入 /pending/*.json
+                                    │
+                                    ▼
+              异步 memory_processor 处理：
+                    - 调用 LLM 生成摘要、标签、置信度
+                    - 保存为 /memories/*.md
+                    - 更新 index.json
+
+"""
 import asyncio
 import json
 import re
@@ -72,9 +157,20 @@ async def call_llm_to_summarize(raw_log: Dict) -> Dict:
     }}
     
     要求：
-    - tags 由你根据内容来总结，可以是一个或者多个
     - 如果日志包含错误，tags 中必须包含 'error' 或具体错误类型
     - step_summary 要突出操作和结果，比如“执行了数据库迁移，成功”或“尝试连接Redis，超时失败”
+    - tags 由你根据内容来总结，可以是一个或者多个
+        标签生成规则（非常重要）：
+        1. 每个标签是一个简短的关键词短语，使用下划线连接单词，例如：create_crawler_script、delete_image_files、connect_database。
+        2. 标签应该体现“动作 + 对象”或“领域 + 动作”，长度不超过30字符。
+        3. 禁止包含结果词（如 success、failed、error）、具体的人名/地名/文件名、时间信息。
+        4. 最多生成3个标签，如果任务单一可以只给1个。
+        5. 不要使用过于宽泛的词如 "task"、"operation"，尽量具体。
+        
+        示例：
+        - 日志：使用 requests 和 beautifulsoup 爬取百度图片，保存到桌面。 → 标签：["web_crawler", "download", "beautifulsoup"]
+        - 日志：删除桌面上的 3 张图片文件。 → 标签：["file_management", "delete"]
+        - 日志：配置 Flask 应用的数据库连接池。 → 标签：["deployment", "configure", "flask"]
     
     请直接输出 JSON 对象，不要使用 Markdown 代码块，不要添加任何额外解释。
     """

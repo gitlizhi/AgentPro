@@ -200,3 +200,4 @@ def update_memory_confidence(filename: str, success: bool):
             break
     filepath.write_text("\n".join(new_lines), encoding='utf-8')
     return f"Updated confidence for {filename} to {new_conf:.2f}"
+

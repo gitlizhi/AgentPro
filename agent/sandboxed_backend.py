@@ -57,6 +57,7 @@ class DockerSandboxBackend(BaseSandbox):
                 volumes[self.desktop_path] = {"bind": "/desktop", "mode": "rw"}
             if self.skills_host_path:
                 volumes[self.skills_host_path] = {"bind": "/agent/skills", "mode": "ro"}
+            # volumes["F:\\EvolvedAgents"] = {"bind": "/EvolvedAgents", "mode": "rw"}
             # 新增 conversation_history 挂载
             conversation_host_path = os.path.join(os.getcwd(), "conversation_history")
             os.makedirs(conversation_host_path, exist_ok=True)

@@ -86,6 +86,7 @@ class Brain:
         # )
         
         self.docker_backend = DockerSandboxBackend(
+            # image="python:3.12-slim",
             image="my-agent-base:latest",  # 可自定义镜像
             mem_limit="1g",
             cpu_limit=1.0,
@@ -93,7 +94,7 @@ class Brain:
             network_disabled=False,  # 浏览器需要网络
             user="pwuser",  # 浏览器需要网络
             desktop_path=config.backend.docker_volumes,      # 如果需要控制电脑桌面文件夹，需要配置
-            skills_host_path=os.path.join(os.getcwd(), "agent", "skills"),  # 假设当前工作目录是 F:\AgentPro
+            skills_host_path=os.path.join(os.getcwd(), "agent", "skills"),
             env={
                 "ZHIPU_API_KEY": config.model.zhipu_api_key,
             }
@@ -110,10 +111,9 @@ class Brain:
             backend=self.docker_backend,
             skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
-            interrupt_on={
-                "delete_file": {"allowed_decisions": ["approve", "reject"]},  # Default: approve, edit, reject
-                "execute": {"allowed_decisions": ["approve", "reject"]},
-            },
+            # interrupt_on={
+            #     "execute": {"allowed_decisions": ["approve", "edit", "reject"]}
+            # },
             middleware=[
                     SummarizationMiddleware(
                     model=self.model,
@@ -260,7 +260,6 @@ class Brain:
         if intent == IntentType.SET_REMINDER.value:
             reminders = await self._detect_reminder_intent(user_input)
             if reminders:
-                # print(f'reminders={reminders}')
                 return await self._handle_set_reminder(reminders)
             else:
                 return "未能理解提醒的时间和内容，请重新描述。"
@@ -445,14 +444,13 @@ class Brain:
                                     self.sent_msg_ids.append(msg_id)
                                     # 发送完整消息（类似原代码中的 current_ai_message 累积后发送）
                                     await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                                    final_answer = msg.content
+
                                 elif not msg_id:
                                     # 无ID时使用内容哈希（备用）
                                     content_hash = hash(msg.content)
                                     if content_hash not in self.sent_msg_ids:
                                         self.sent_msg_ids.append(content_hash)
                                         await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                                        final_answer = msg.content
                             
                             # 处理工具调用（去重）
                             if hasattr(msg, 'tool_calls') and msg.tool_calls:
@@ -462,7 +460,7 @@ class Brain:
                                         self.sent_msg_ids.append(tc_id)
                                         tool_call_info = f"🔧 调用工具: {tc}"
                                         # 截断过长内容（与原逻辑一致）
-                                        tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
+                                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
                                         await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                             
                             # 处理工具返回消息
@@ -476,8 +474,6 @@ class Brain:
             else:
                 # 没有中断，流正常结束
                 break
-        
-        # return final_answer
     
     async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False):
         """聊天"""
@@ -712,7 +708,6 @@ class Brain:
         return decision
     
     def _complete_approval(self, tool_name: str, decision):
-        print('in _complete_approval ===')
         if tool_name in self._pending_approvals:
             self._pending_approvals[tool_name].set_result({"decisions": [decision]})
             del self._pending_approvals[tool_name]

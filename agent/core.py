@@ -55,13 +55,23 @@ class Agent:
                     parts = user_input.split(maxsplit=2)
                     tool_name = parts[1] if len(parts) > 1 else None
                     edited_args = json.loads(parts[2]) if len(parts) > 2 else None
-                    await self.brain._complete_approval(tool_name, {"type": "edit", "edited_action": edited_args})
+                    if edited_args:
+                        decision = {
+                            "type": "edit",
+                            "edited_action": {
+                                "name": tool_name,
+                                "args": edited_args
+                            }
+                        }
+                        await self.brain._complete_approval(tool_name, decision)
+                    else:
+                        await self.comm.send_to_agent(sender, {"text": "编辑命令格式错误"})
                     return
     
                 # 普通消息：后台处理，不阻塞
                 asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
                 # 可选：立即回复“已收到”
-                await self.comm.send_to_agent(sender, {"text": "✅ 已收到，正在处理..."})
+                # await self.comm.send_to_agent(sender, {"text": "✅ 已收到，正在处理..."})
     
             elif msg_type == "register_ack":
                 logger.info("Registration acknowledged by hub")
@@ -79,7 +89,7 @@ class Agent:
                 image_data=image_data,
                 new_thread=new_thread
             )
-            await self.comm.send_to_agent(sender, {"text": response})
+            await self.comm.send_to_agent(sender, {"text": response if response else ''})
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             await self.comm.send_to_agent(sender, {"text": f"处理出错: {e}"})
