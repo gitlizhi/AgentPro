@@ -64,26 +64,12 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
   官网地址：https://www.docker.com/products/docker-desktop/
   安装后启动 docker desktop
 
-5. 启动 Hub
+5. 一键启动 
     ```bash
-   cd hub && python server.py
+   双击  start_project.bat
+   # 停止脚本    stop_project.bat
    ```
 
-6. 启动智能体
-
-     ```bash
-   python main.py
-   ```
-
-   你可以修改 main.py 中的 num_agents 变量来启动多个。
-
-
-7. 启动测试客户端后，在浏览器打开http://127.0.0.1:8000
-
-     ```bash
-      python client.py
-
-      ```
 
 客户端支持以下命令（新版客户端已经移除旧命令）：
 
@@ -104,10 +90,7 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    │   ├── intent.py                # 意图枚举和描述
    │   ├── model_config.py          # 模型配置管理
    │   └── skills/                  # 技能目录（按需加载）
-   │       ├── remember-fact/       # 记住事实技能
-   │       ├── list-reminders/      # 查询提醒技能
-   │       └── ...
-       └── data/                    # 记忆转经验（按需加载，渐进式披露）
+   │   └── data/                    # 记忆转经验（按需加载，渐进式披露）
    │       ├── memories/            # 过往经验目录
    │       ├── pengding/            # 待处理经验
    ├── hub/                         # 消息 Hub
@@ -117,6 +100,8 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    ├── client.py                       # 客户端
    ├── .env.example                 # 环境变量示例
    ├── main.py                      # 应用入口
+   ├── start_project.bat                  # 一键启动脚本
+   ├── stop_project.bat                  # 停止脚本
    ├── clean_checkpoints.py         # 清理短期记忆脚本
    ├── requirements.txt             # 依赖列表（可选）
    ├── pyproject.toml               # 项目配置（uv/pip）
@@ -147,45 +132,6 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 - 其他如 deepseek, claude, gemini 等可自行扩展。
 
 
-## 💡 使用示例
-### 设置提醒
-
-   ```text
-   你: 提醒我5分钟后喝水
-   🤖 AI: ✅ 提醒已设置：将在 2026-03-10 15:30:00 提醒您：喝水
-   5分钟后收到：
-   ```
-
-
- ```text
-📨 来自 reminder_bot: ⏰ 提醒：喝水
-```
-
-### 查看提醒
- ```text
-你: 查看我的提醒
-🤖 AI: 您当前的提醒：
-- 2026-03-10 15:30:00：喝水
-- 2026-03-10 16:00:00：开会
-```
-
-### 记住事实
-```text
-你: 记住我喜欢喝冰美式
-🤖 AI: ✅ 已记住：我喜欢喝冰美式
-```
-
-### 多智能体广播
-
-在客户端输入：
-
-```text
-/broadcast 大家好，今天有什么新鲜事？
-```
-
-所有在线智能体都会收到消息并可能回复。
-
-
 ## 🧠 主动思考与内在自驱力
 智能体每小时会随机生成一个想法，并可能主动向用户发送消息。这模拟了内在的思考能力，让智能体更像一个真正的伙伴。你可以在 brain.py 的 _generate_thought 方法中自定义思考类型和生成逻辑。
 
@@ -198,7 +144,7 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 
 项目使用 uv 进行依赖管理，pyproject.toml 已列出所有必要依赖。你也可以使用 pip 安装。
 
-### 主要依赖：
+### 主要依赖（不全，建议按照pyproject.toml进行加载）：
 
 - langchain>=1.2.10
 
@@ -220,12 +166,6 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 
 - python-dotenv>=1.2.2
 
-## 🧪 测试
-运行测试客户端与智能体交互：
-
-   ```bash
-   python test_client.py --agent agent_17
-   ```
 
 ## 运行清理脚本（删除指定或所有短期记忆）：
 
