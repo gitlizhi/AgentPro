@@ -95,7 +95,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List
 from config import config
-from agent.utils import call_zhipu_chat
+from agent.utils import call_big_model_chat
 # 配置
 BASE_DIR = Path(__file__).parent.absolute()   # memory_processor.py 所在的目录（agent目录）
 PENDING_DIR = BASE_DIR / "data" / "pending"
@@ -174,8 +174,8 @@ async def call_llm_to_summarize(raw_log: Dict) -> Dict:
     
     请直接输出 JSON 对象，不要使用 Markdown 代码块，不要添加任何额外解释。
     """
-    content = await call_zhipu_chat(prompt, model=config.model.default_model,
-                                    temperature=0.3)
+    content = await call_big_model_chat(prompt, model=config.model.default_model,
+                                    temperature=0.3, is_json=True)
     # 提取模型输出的文本内容
     content_str = content["choices"][0]["message"]["content"]
     

@@ -23,7 +23,7 @@ class Communication:
         """连接 Hub 并持续监听消息"""
         self._running = True
         try:
-            async with websockets.connect(self.hub_url) as ws:
+            async with websockets.connect(self.hub_url, ping_interval=20, ping_timeout=10) as ws:
                 self.websocket = ws
                 # 发送注册信息
                 await self.send({

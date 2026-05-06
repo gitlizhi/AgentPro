@@ -3,9 +3,16 @@
 """
 import json
 import uuid
+import os
+import subprocess
+import winreg
+import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, Literal, Tuple, Any, List
 from langchain.tools import tool
+from pywinauto import Application, Desktop
+from pywinauto.findwindows import ElementNotFoundError
 
 BASE_DIR = Path(__file__).parent.absolute()   # memory_processor.py 所在的目录（agent目录）
 PENDING_DIR = BASE_DIR / "data" / "pending"
@@ -201,3 +208,432 @@ def update_memory_confidence(filename: str, success: bool):
     filepath.write_text("\n".join(new_lines), encoding='utf-8')
     return f"Updated confidence for {filename} to {new_conf:.2f}"
 
+
+def _find_app_path(app_name: str) -> Optional[str]:
+    """根据应用名称（支持中文或英文）查找可执行文件路径"""
+    # 1. 尝试 where 命令（在 PATH 中查找）
+    try:
+        result = subprocess.run(
+            ['where', app_name + '.exe'],
+            capture_output=True, text=True, timeout=5, shell=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split('\n')[0]
+    except:
+        pass
+    
+    # 2. 搜索常见安装目录（限制深度 3，只找 .exe）
+    search_dirs = [
+        r"C:\Program Files",
+        r"C:\Program Files (x86)",
+        os.path.expanduser(r"~\AppData\Local\Programs"),
+        os.path.expanduser(r"~\AppData\Local"),
+        os.path.expanduser(r"~\AppData\Roaming"),
+    ]
+    # 可能的应用名称变体（去除空格，小写）
+    name_variants = [app_name, app_name.replace(" ", ""), app_name.lower()]
+    for base_dir in search_dirs:
+        if not os.path.exists(base_dir):
+            continue
+        for root, dirs, files in os.walk(base_dir):
+            # 限制深度，避免遍历过深
+            depth = root[len(base_dir):].count(os.sep)
+            if depth > 3:
+                continue
+            for file in files:
+                if file.endswith('.exe'):
+                    file_lower = file.lower()
+                    for variant in name_variants:
+                        if variant.lower() in file_lower:
+                            return os.path.join(root, file)
+    
+    # 3. 搜索开始菜单快捷方式
+    start_menu_dirs = [
+        os.path.expanduser(r"~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"),
+        r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
+    ]
+    for menu_dir in start_menu_dirs:
+        if not os.path.exists(menu_dir):
+            continue
+        for root, dirs, files in os.walk(menu_dir):
+            for file in files:
+                if file.endswith('.lnk'):
+                    shortcut_path = os.path.join(root, file)
+                    # 解析快捷方式目标（需要 pywin32 或使用 powershell）
+                    try:
+                        # 使用 powershell 解析
+                        ps_cmd = f'$sh = New-Object -ComObject WScript.Shell; $lnk = $sh.CreateShortcut("{shortcut_path}"); Write-Host $lnk.TargetPath'
+                        result = subprocess.run(
+                            ['powershell', '-Command', ps_cmd],
+                            capture_output=True, text=True, timeout=2
+                        )
+                        if result.returncode == 0 and result.stdout.strip():
+                            target = result.stdout.strip()
+                            if target and target.lower().endswith('.exe'):
+                                # 检查目标文件名是否包含应用名
+                                if any(variant.lower() in target.lower() for variant in name_variants):
+                                    return target
+                    except:
+                        pass
+    
+    # 4. 查询注册表 App Paths
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths")
+        # 枚举子项
+        i = 0
+        while True:
+            try:
+                subkey_name = winreg.EnumKey(key, i)
+                if subkey_name.lower().startswith(app_name.lower()) or app_name.lower() in subkey_name.lower():
+                    subkey = winreg.OpenKey(key, subkey_name)
+                    path, _ = winreg.QueryValueEx(subkey, "")
+                    if path and os.path.exists(path):
+                        return path
+                i += 1
+            except OSError:
+                break
+    except:
+        pass
+    
+    return None
+
+def _find_matching_windows(title: Optional[str] = None, class_name: Optional[str] = None) -> List:
+    """返回匹配的窗口列表（用于调试和选择）"""
+    windows = Desktop(backend="uia").windows()
+    matches = []
+    for w in windows:
+        if title and title in w.window_text():
+            matches.append(w)
+        elif class_name and w.class_name() == class_name:
+            matches.append(w)
+        elif not title and not class_name:
+            matches.append(w)
+    return matches
+
+
+def _connect_to_window(
+    title: Optional[str] = None,
+    class_name: Optional[str] = None,
+    process_id: Optional[int] = None,
+    fuzzy_title: bool = True,
+    timeout: int = 5,
+    index: int = 0
+) -> Application:
+    """
+    连接到窗口，支持模糊匹配和多窗口选择（index 指定第几个匹配，0 为第一个）
+    """
+    try:
+        if title and fuzzy_title:
+            app = Application(backend="uia").connect(title_re=f".*{title}.*", timeout=timeout)
+        else:
+            app = Application(backend="uia").connect(
+                title=title, class_name=class_name, process=process_id, timeout=timeout
+            )
+        return app
+    except Exception as e:
+        # 如果是因为多个匹配项，则手动选择第一个
+        if "There are 2 elements that match" in str(e):
+            matches = _find_matching_windows(title=title, class_name=class_name)
+            if index < len(matches):
+                return Application(backend="uia").connect(handle=matches[index].handle)
+            else:
+                raise Exception(f"找到 {len(matches)} 个匹配窗口，但索引 {index} 超出范围。可用的窗口标题: {[w.window_text() for w in matches]}")
+        else:
+            raise
+
+
+# 辅助函数：根据参数定位窗口和控件
+def _find_window_and_control(
+    title: Optional[str] = None,
+    class_name: Optional[str] = None,
+    process_id: Optional[int] = None,
+    control_type: Optional[str] = None,
+    auto_id: Optional[str] = None,
+    control_class: Optional[str] = None,
+    timeout: int = 5,
+    fuzzy_title: bool = True,
+    window_index: int = 0,
+) -> Tuple[Application, Any]:
+    """
+    连接到窗口并返回控件对象。
+    window_index: 当有多个匹配窗口时，选择第几个（0-based）。
+    """
+    app = _connect_to_window(
+        title=title, class_name=class_name, process_id=process_id,
+        fuzzy_title=fuzzy_title, timeout=timeout, index=window_index
+    )
+
+    if control_type is None and auto_id is None and control_class is None:
+        return app, app.top_window()
+
+    dlg = app.top_window()
+    try:
+        if auto_id:
+            ctrl = dlg.child_window(auto_id=auto_id, control_type=control_type, class_name=control_class)
+        elif control_type:
+            ctrl = dlg.child_window(control_type=control_type, class_name=control_class)
+        elif control_class:
+            ctrl = dlg.child_window(class_name=control_class)
+        else:
+            raise ValueError("必须提供 auto_id, control_type 或 control_class 之一")
+        ctrl.wait('exists', timeout=timeout)
+        return app, ctrl
+    except Exception as e:
+        raise Exception(f"未找到控件: {e}")
+
+
+@tool
+async def windows_automation(
+    action: Literal[
+        "start", "connect", "click", "double_click", "right_click",
+        "type", "send_keys", "select", "get_text", "set_text", "wait",
+        "maximize", "minimize", "restore", "close", "screenshot",
+        "get_property", "scroll", "drag_drop", "menu_select"
+    ],
+    app_path: Optional[str] = None,
+    title: Optional[str] = None,
+    class_name: Optional[str] = None,
+    process_id: Optional[int] = None,
+    control_type: Optional[str] = None,
+    auto_id: Optional[str] = None,
+    control_class: Optional[str] = None,
+    text: Optional[str] = None,
+    value: Optional[str] = None,
+    item: Optional[str] = None,
+    keys: Optional[str] = None,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    direction: Optional[str] = None,
+    source_auto_id: Optional[str] = None,
+    target_auto_id: Optional[str] = None,
+    menu_path: Optional[str] = None,
+    save_path: Optional[str] = None,
+    property_name: Optional[str] = None,
+    timeout: int = 10,
+    window_index: int = 0,   # 新增：选择第几个匹配窗口
+) -> str:
+    """
+    控制 Windows 应用程序。支持多窗口选择（通过 window_index 参数）。
+    当连接微信出现“多个匹配”错误时，可以尝试 window_index=0 或 1。
+    """
+    try:
+        # 处理 start 和 connect 单独，因为它们不需要控件定位
+        if action == "start":
+            if not app_path:
+                return "错误: start 操作需要提供 app_path"
+            # 如果不是完整路径（不包含反斜杠或盘符），尝试自动查找
+            if not (app_path.startswith('C:') or app_path.startswith('\\')):
+                actual_path = _find_app_path(app_path)
+                if actual_path:
+                    app_path = actual_path
+                else:
+                    return f"无法自动找到应用 '{app_path}' 的安装路径，请手动提供完整路径。"
+            try:
+                Application(backend="uia").start(app_path)
+                return f"成功启动应用: {app_path}"
+            except Exception as e:
+                return f"启动失败: {e}"
+        
+        elif action == "connect":
+            try:
+                app = _connect_to_window(
+                    title=title, class_name=class_name, process_id=process_id,
+                    fuzzy_title=True, timeout=timeout, index=window_index
+                )
+                return f"成功连接到窗口: {title or class_name or process_id} (窗口索引 {window_index})"
+            except Exception as e:
+                return f"连接失败: {e}"
+        
+        # 对于需要窗口和控件的操作，定位控件（支持模糊标题）
+        try:
+            app, control = _find_window_and_control(
+                title=title, class_name=class_name, process_id=process_id,
+                control_type=control_type, auto_id=auto_id, control_class=control_class,
+                timeout=timeout, fuzzy_title=True, window_index=window_index
+            )
+        except Exception as e:
+            return f"定位窗口/控件失败: {e}"
+
+        # 执行具体操作
+        if action == "click":
+            control.click()
+            return f"已点击控件: {auto_id or control_type or control_class}"
+
+        elif action == "double_click":
+            control.double_click()
+            return "已双击控件"
+
+        elif action == "right_click":
+            control.right_click()
+            return "已右键点击控件"
+
+        elif action == "type":
+            if text is None:
+                return "错误: type 操作需要提供 text"
+            control.type_keys(text, with_spaces=True)
+            return f"已输入文本: {text}"
+
+        elif action == "send_keys":
+            if keys is None:
+                return "错误: send_keys 操作需要提供 keys"
+            control.type_keys(keys)
+            return f"已发送按键: {keys}"
+
+        elif action == "select":
+            if value is None:
+                return "错误: select 操作需要提供 value"
+            control.select(value)
+            return f"已选择项: {value}"
+
+        elif action == "get_text":
+            txt = control.window_text()
+            return f"控件文本: {txt}"
+
+        elif action == "set_text":
+            if text is None:
+                return "错误: set_text 操作需要提供 text"
+            control.set_text(text)
+            return f"已设置文本: {text}"
+
+        elif action == "wait":
+            try:
+                control.wait('exists', timeout=timeout)
+                return f"控件在 {timeout} 秒内已出现"
+            except:
+                return f"等待超时: 控件未在 {timeout} 秒内出现"
+
+        elif action == "maximize":
+            control.maximize()
+            return "窗口已最大化"
+
+        elif action == "minimize":
+            control.minimize()
+            return "窗口已最小化"
+
+        elif action == "restore":
+            control.restore()
+            return "窗口已还原"
+
+        elif action == "close":
+            control.close()
+            return "窗口已关闭"
+
+        elif action == "screenshot":
+            if save_path is None:
+                return "错误: screenshot 操作需要提供 save_path"
+            control.capture_as_image().save(save_path)
+            return f"截图已保存至 {save_path}"
+
+        elif action == "get_property":
+            if property_name is None:
+                return "错误: get_property 操作需要提供 property_name"
+            # 获取常见属性
+            if hasattr(control, property_name):
+                val = getattr(control, property_name)()
+            else:
+                try:
+                    props = control.get_properties()
+                    val = props.get(property_name)
+                except:
+                    return f"无法获取属性 {property_name}"
+            return f"属性 {property_name}: {val}"
+
+        elif action == "scroll":
+            if direction == "up":
+                control.scroll(direction='up', amount=1)
+            elif direction == "down":
+                control.scroll(direction='down', amount=1)
+            elif x is not None and y is not None:
+                control.scroll(x, y)
+            else:
+                return "错误: scroll 操作需要提供 direction 或 x,y"
+            return "已执行滚动"
+
+        elif action == "drag_drop":
+            if source_auto_id is None or target_auto_id is None:
+                return "错误: drag_drop 操作需要提供 source_auto_id 和 target_auto_id"
+            # 重新获取源和目标控件
+            _, source_ctrl = _find_window_and_control(
+                title=title, class_name=class_name, process_id=process_id,
+                auto_id=source_auto_id, control_type=control_type, control_class=control_class
+            )
+            _, target_ctrl = _find_window_and_control(
+                title=title, class_name=class_name, process_id=process_id,
+                auto_id=target_auto_id, control_type=control_type, control_class=control_class
+            )
+            source_ctrl.drag_mouse(target_ctrl)
+            return "拖拽完成"
+
+        elif action == "menu_select":
+            if menu_path is None:
+                return "错误: menu_select 操作需要提供 menu_path"
+            items = menu_path.split("->")
+            menu = control.menu()
+            for item in items:
+                menu = menu.item(item)
+            menu.select()
+            return f"已选择菜单项: {menu_path}"
+
+        else:
+            return f"未知操作: {action}"
+
+    except ElementNotFoundError as e:
+        return f"未找到窗口或控件: {e}"
+    except Exception as e:
+        return f"执行 {action} 时出错: {e}"
+
+
+@tool
+async def launch_agent(agent_name: str, expertise: str) -> str:
+    """启动一个新的 Agent 实例，并指定其专长。例如：launch_agent(agent_name='researcher', expertise='擅长搜索和资料整理')"""
+    # 避免重复启动同名 Agent
+    # 可以使用全局记录已启动的 agent_id，或者依赖 Hub 的去重
+    cmd = [
+        sys.executable, "main.py",
+        "--agent-id", agent_name,
+        "--system-prompt", f"你是一个{expertise}的AI助手。你的专长是{expertise}。请根据用户请求提供帮助。**重要约束**：**绝对禁止使用 `task` 工具**。所有任务都必须自己完成，不得委托给其他子智能体。你可以使用其他可用工具（如搜索、记忆检索等），但必须直接处理用户请求。"
+    ]
+    try:
+        # 启动新进程（后台运行，不等待）
+        process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
+        _spawned_agents[agent_name] = {"pid": process.pid, "process": process}
+        return f"已启动 Agent '{agent_name}'，专长：{expertise}"
+    except Exception as e:
+        return f"启动失败: {e}"
+
+
+@tool
+async def stop_agent(agent_name: str) -> str:
+    """终止指定的子 Agent 进程。"""
+    if agent_name not in _spawned_agents:
+        return f"未找到名为 '{agent_name}' 的子 Agent（可能尚未启动或已终止）。"
+    info = _spawned_agents[agent_name]
+    try:
+        if sys.platform == 'win32':
+            # Windows 下使用 taskkill 强制终止进程树
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(info['pid'])], capture_output=True)
+        else:
+            info['process'].terminate()
+            try:
+                info['process'].wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                info['process'].kill()
+        del _spawned_agents[agent_name]
+        return f"已成功终止 Agent '{agent_name}'。"
+    except Exception as e:
+        return f"终止失败: {e}"
+
+@tool
+async def stop_all_agents() -> str:
+    """终止所有已启动的子 Agent。"""
+    stopped = []
+    for name in list(_spawned_agents.keys()):
+        result = await stop_agent(name)
+        stopped.append(name)
+    return f"已终止以下 Agent: {', '.join(stopped)}"
+
+# 全局记录由 launch_agent 启动的子进程
+_spawned_agents = {}  # {agent_name: {"pid": int, "process": subprocess.Popen}}
+
+def get_spawned_agents():
+    return _spawned_agents

@@ -29,7 +29,7 @@ class ModelProvider(str, Enum):
 # 默认的 API 基础地址配置
 DEFAULT_BASE_URLS = {
     ModelProvider.OPENAI: "https://api.openai.com/v1",
-    ModelProvider.DEEPSEEK: "https://api.deepseek.com/v1",
+    ModelProvider.DEEPSEEK: "https://api.deepseek.com",
     ModelProvider.ANTHROPIC: "https://api.anthropic.com/v1",
     ModelProvider.GOOGLE: "https://generativelanguage.googleapis.com",
     ModelProvider.OPENAI_COMPATIBLE: "https://open.bigmodel.cn/api/paas/v4",  # 需要用户指定
@@ -74,11 +74,20 @@ class ModelConfig:
         api_key = api_key or self._get_api_key(provider)
         
         # 根据提供商类型创建模型
-        if provider in (ModelProvider.OPENAI_COMPATIBLE, ModelProvider.ZHIPU, ModelProvider.ZHIPU_IMAGE):
+        if provider in (ModelProvider.OPENAI_COMPATIBLE, ModelProvider.ZHIPU, ModelProvider.ZHIPU_IMAGE, ModelProvider.DEEPSEEK):
             # 使用 ChatOpenAI 接入兼容格式的服务
             if not base_url:
                 raise ValueError("使用 OpenAI 兼容格式时必须提供 base_url")
-            
+            if provider == ModelProvider.DEEPSEEK:
+                return ChatOpenAI(
+                    model=model_name,
+                    api_key=api_key,
+                    base_url=base_url,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra_body={"thinking": {"type": "disabled"}},
+                    **kwargs
+                )
             return ChatOpenAI(
                 model=model_name,
                 api_key=api_key,
@@ -125,9 +134,7 @@ class ModelConfig:
             ModelProvider.ZHIPU: "ZHIPU_API_KEY",
             ModelProvider.ZHIPU_IMAGE: "ZHIPU_API_KEY",
         }
-        
-        if provider == ModelProvider.ZHIPU:
-            return config.model.zhipu_api_key
+        return os.environ.get(env_var_map[provider], config.model.api_key)
     
     def get_model(self, config_key: str = "default") -> BaseChatModel:
         """
@@ -149,21 +156,25 @@ class ModelConfig:
             "default": {
                 "provider": ModelProvider.OPENAI,
                 "model_name": "gpt-4o-mini",
+                "base_url": config.model.base_url,
                 "temperature": 0,
             },
             "deepseek": {
                 "provider": ModelProvider.DEEPSEEK,
-                "model_name": "deepseek-chat",
+                "model_name": "deepseek-v4-flash",
+                "base_url": config.model.base_url,
                 "temperature": 0.1,
             },
             "claude": {
                 "provider": ModelProvider.ANTHROPIC,
                 "model_name": "claude-3-sonnet",
+                "base_url": config.model.base_url,
                 "temperature": 0,
             },
             "gemini": {
                 "provider": ModelProvider.GOOGLE,
                 "model_name": "gemini-1.5-pro",
+                "base_url": config.model.base_url,
                 "temperature": 0,
             },
             "tongyi": {  # 通义千问（通过 OpenAI 兼容格式）

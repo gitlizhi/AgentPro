@@ -1,6 +1,7 @@
 """
 智能体主类
 """
+import re
 import json
 import asyncio
 import logging
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class Agent:
-    def __init__(self, agent_id: str, db_pool=None, model_config_key: str = "zhipu"):
+    def __init__(self, agent_id: str, db_pool=None, custom_system_prompt: str = None):
         self.agent_id = agent_id
         self._think_task = None
         self.comm = Communication(
@@ -23,9 +24,9 @@ class Agent:
         )
         self.brain = Brain(
             comm=self.comm,
-            model_config_key=model_config_key,
             db_pool=db_pool,
-            agent_id=agent_id
+            agent_id=agent_id,
+            custom_system_prompt=custom_system_prompt  # 传递
         )
         self._running = False
 
@@ -41,12 +42,24 @@ class Agent:
                 new_thread = payload.get("new_thread", False)
                 image_data = payload.get("image")
                 sender = data.get("from")
-    
+                # 如果是来自其他 Agent 的消息（非自身），也作为新消息处理
+                if user_input and sender != self.agent_id:
+                    asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
+                    return
                 # 审批命令必须立即处理，不能放到后台任务
                 if user_input.startswith("/approve"):
                     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
                     await self.brain._complete_approval(tool_name, {"type": "approve"})
                     return
+                if user_input.startswith("/approve"):
+                    parts = user_input.split()
+                    tool_name = parts[1] if len(parts) > 1 else None
+                    if tool_name:
+                        await self.brain._complete_approval(tool_name, {"type": "approve"})
+                    else:
+                        await self.comm.send_to_agent(sender, {"text": "错误：未指定工具名称"})
+                    return
+                
                 elif user_input.startswith("/reject"):
                     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
                     await self.brain._complete_approval(tool_name, {"type": "reject"})
@@ -89,7 +102,12 @@ class Agent:
                 image_data=image_data,
                 new_thread=new_thread
             )
-            await self.comm.send_to_agent(sender, {"text": response if response else ''})
+            if response:
+                response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
+            if not response and sender != 'super_user':
+                return
+            reply_payload = {"text": response if response else ''}
+            await self.comm.send_to_agent(sender, reply_payload)
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             await self.comm.send_to_agent(sender, {"text": f"处理出错: {e}"})
@@ -110,3 +128,4 @@ class Agent:
         if self._think_task:
             self._think_task.cancel()
         await self.comm.close()
+        await self.brain.close()

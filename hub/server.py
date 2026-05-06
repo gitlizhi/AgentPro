@@ -73,6 +73,8 @@ class Hub:
                 else:
                     logger.warning(f"Unknown message type: {data.get('type')}")
         except websockets.exceptions.ConnectionClosed:
+            import traceback
+            traceback.print_exc()
             print('=============== Connection closed ===============')
         finally:
             if agent_id:

@@ -46,13 +46,13 @@ class HubConfig(BaseSettings):
 
 class ModelConfig(BaseSettings):
     """模型相关配置"""
-    zhipu_api_key: Optional[str] = Field(None, alias="ZHIPU_API_KEY")
+    api_key: Optional[str] = Field(None, alias="API_KEY")
     default_provider: Optional[str] = Field(None, alias="DEFAULT_PROVIDER")
+    base_url: Optional[str] = Field(None, alias="BASE_URL")
     default_model: str = Field("GLM-4.5-Air", alias="DEFAULT_MODEL")
     vision_model: str = Field("glm-4.6v", alias="VISION_MODEL")
     intent_model: str = Field("GLM-4.5-Air", alias="INTENT_MODEL")
     model_temperature: float = Field(0.0, alias="MODEL_TEMPERATURE")
-    # 可以扩展其他模型提供商的配置
 
 class AgentConfig(BaseSettings):
     """Agent实例配置"""

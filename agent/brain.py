@@ -8,7 +8,7 @@ import random
 import time
 import os
 import asyncio
-from agent.utils import call_zhipu_chat
+from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
 from langgraph.types import Command
@@ -16,7 +16,7 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain.agents.middleware import SummarizationMiddleware
 from agent.model_config import model_config  # 导入配置
 from agent.memory import get_memory
-from deepagents import create_deep_agent
+from deepagents import create_deep_agent, SubAgent
 # from deepagents.backends.filesystem import FilesystemBackend
 # from deepagents.backends import LocalShellBackend
 from agent.scheduler import get_scheduler
@@ -24,23 +24,25 @@ from agent.tasks import send_reminder
 from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
 from config import config
+from langchain.tools import tool
+from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
-from agent.tools import log_memory, retrieve_memory, load_full_memory, update_memory_confidence
+from agent.tools import (log_memory, retrieve_memory, load_full_memory,
+                         update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents)
 
 import logging
 logging.getLogger('langgraph').setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
-    
 
 class Brain:
     
     def __init__(
             self,
             comm = None,
-            model_config_key: str = "zhipu",
             db_pool=None,
             use_long_term_memory=True,
-            agent_id=None
+            agent_id=None,
+            custom_system_prompt=None,
     ):
         
         self.agent_id = agent_id
@@ -61,10 +63,15 @@ class Brain:
             db_pool = get_pool()
         self.checkpointer = AsyncPostgresSaver(db_pool)
         
+        # 和其他Agent交互工具
+        self.send_to_agent_tool = self._create_send_to_agent_tool()
+        self.agent_msg_cache = {}  # user_id -> 累积的消息文本
+        self.agent_msg_timer = {}  # user_id -> asyncio.Task
+        
         self._pending_approvals = {}
         # 用于去重（记录已发送的消息ID）
         self.sent_msg_ids = []
-        
+
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
         # root_dir = os.path.expanduser("~")  # 这会得到当前用户的家目录
@@ -96,24 +103,36 @@ class Brain:
             desktop_path=config.backend.docker_volumes,      # 如果需要控制电脑桌面文件夹，需要配置
             skills_host_path=os.path.join(os.getcwd(), "agent", "skills"),
             env={
-                "ZHIPU_API_KEY": config.model.zhipu_api_key,
+                "API_KEY": config.model.api_key,
             }
         )
-       
+        
+        # research_subagent = {
+        #     "name": "research-agent",
+        #     "description": "Used to research more in depth questions",
+        #     "system_prompt": "You are a great researcher",
+        #     "tools": [TavilySearch(max_results=5)],
+        #     # "model": self.model,  # Optional override, defaults to main agent model
+        # }
+        # subagents = [research_subagent]
+        
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         
         self.agent = create_deep_agent(
             model=self.model,
-            tools=[log_memory, retrieve_memory, load_full_memory, update_memory_confidence],  # 添加自定义工具
-            system_prompt=self._build_system_prompt(),
+            tools=[self.send_to_agent_tool, TavilySearch(max_results=5), log_memory, retrieve_memory, load_full_memory,
+                   update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents],  # 添加自定义工具
+            system_prompt=self._build_system_prompt() if custom_system_prompt is None else custom_system_prompt,
             # backend=backend,
             backend=self.docker_backend,
             skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
-            # interrupt_on={
-            #     "execute": {"allowed_decisions": ["approve", "edit", "reject"]}
-            # },
+            # subagents=subagents,
+            interrupt_on={
+                # "execute": {"allowed_decisions": ["approve", "edit", "reject"]},
+                "windows_automation": {"allowed_decisions": ["approve", "reject"]}
+            },
             middleware=[
                     SummarizationMiddleware(
                     model=self.model,
@@ -141,22 +160,37 @@ class Brain:
                 "当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
                 "在调用工具或者skill之前，请先写下你的思考过程。"
                 "如果工具调用出错，请分析错误原因，并尝试其他方法。"
+                "当你需要执行多步骤任务时，请将内部推理过程放在 < thinking >...< / thinking > 标签内。"
+                "这些标签内的内容不会被发送给其他 Agent，只有标签外的内容才会被作为回复发送。"
+                "在与其他 Agent 辩论或协作时，直接输出你的观点或反驳，不要输出“让我检索记忆”、“好的，我准备好了”等旁白。"
                 )
         instructions = """
         注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
-
         例如：
         - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
-
         不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
         """
+        # extra = """
+        # 当你需要操作电脑上的应用程序时（如打开记事本、点击按钮、输入文字等），请使用 `windows_automation` 工具。
+        # 该工具支持以下操作：start, connect, click, double_click, right_click, type, send_keys, select, get_text, set_text, wait, maximize, minimize, restore, close, screenshot, get_property, scroll, drag_drop, menu_select。
+        # 请根据用户需求选择合适的 action 和参数。
+        # 使用示例：
+        #     - 启动微信：`windows_automation(action="start", app_path="WeChat")`
+        #     - 连接到已运行的微信：`windows_automation(action="connect", title="微信")`
+        #     - 点击控件：`windows_automation(action="click", title="微信", auto_id="...")`
+        # """
+        # return base + instructions + extra
         return base + instructions
     
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         self.is_busy = True
         try:
             self.user_id = user_id
-            intent_data = await self._classify_intent(user_input)
+            if self.user_id != 'super_user':        # 如果是Agent之间的交互，则跳过意图识别，直接认为是复杂任务
+                intent_data = IntentType.COMPLEX_TASKS.value
+            else:
+                intent_data = await self._classify_intent(user_input)
+            # print(f'意图识别为：{intent_data}')
             return await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread)
         finally:
             self.is_busy = False
@@ -178,7 +212,7 @@ class Brain:
 
         只输出JSON，不要任何额外文字。"""
         try:
-            content = await call_zhipu_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature)
+            content = await call_big_model_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature, is_json=True)
             # 提取 choices[0].message.content
             content = content["choices"][0]["message"]["content"]
             # 例如：```json\n{...}\n```
@@ -247,9 +281,8 @@ class Brain:
         只输出答案，不要任何额外文字。"""
         # print(prompt)
         try:
-            response = await call_zhipu_chat(prompt, model=config.model.intent_model, temperature=config.model.model_temperature)
+            response = await call_big_model_chat(prompt, model=config.model.intent_model, temperature=config.model.model_temperature)
             content = response["choices"][0]["message"]["content"]
-            print(f"content={content}")
             return content
         except Exception as e:
             print(f"意图分类失败: {e}")
@@ -367,6 +400,31 @@ class Brain:
     
     async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False):
         # 构建系统提示和消息（与原来保持一致）
+        # 如果是 Agent 之间的对话，执行缓存合并逻辑
+        if self.user_id != 'super_user':
+            # 取消已有的定时器（新消息到来，重新计时）
+            if self.user_id in self.agent_msg_timer:
+                self.agent_msg_timer[self.user_id].cancel()
+            
+            # 累积消息
+            if self.user_id not in self.agent_msg_cache:
+                self.agent_msg_cache[self.user_id] = user_input
+            else:
+                self.agent_msg_cache[self.user_id] += "\n" + user_input
+            
+            # 创建新的延时处理任务
+            async def delayed_process():
+                await asyncio.sleep(5)
+                if hasattr(self, 'agent_msg_cache'):
+                    full_input = self.agent_msg_cache.pop(self.user_id, "")
+                    if full_input:
+                        await self._process_agent_message(full_input, image_data, new_thread)
+                    if self.user_id in self.agent_msg_timer:
+                        del self.agent_msg_timer[self.user_id]
+            if user_input:
+                self.agent_msg_timer[self.user_id] = asyncio.create_task(delayed_process())
+            return  # 等待定时器，不立即处理
+        
         chat_id = f'{self.agent_id}_{self.user_id}'
         if new_thread:
             # 用户要求新对话：生成新 ID，并更新元数据
@@ -388,9 +446,9 @@ class Brain:
         if self.thread_id not in self.sent_msg_ids:
             self.sent_msg_ids.clear()
             self.sent_msg_ids.insert(0, self.thread_id)
-        
+                    
         memories = []
-        if self.memory:
+        if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
         base_prompt = self._build_system_prompt()
         if memories:
@@ -453,7 +511,7 @@ class Brain:
                                         await self.comm.send_to_agent(self.user_id, {"text": msg.content})
                             
                             # 处理工具调用（去重）
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user':
                                 for tc in msg.tool_calls:
                                     tc_id = tc.get('id')
                                     if tc_id and tc_id not in self.sent_msg_ids:
@@ -464,7 +522,117 @@ class Brain:
                                         await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                             
                             # 处理工具返回消息
-                            elif msg.type == "tool":
+                            elif msg.type == "tool" and self.user_id == 'super_user':
+                                msg_id = getattr(msg, 'id', None)
+                                if msg_id and msg_id not in self.sent_msg_ids:
+                                    self.sent_msg_ids.append(msg_id)
+                                    tool_result = f"🛠️ 工具返回: {msg.content}"
+                                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
+            
+            else:
+                # 没有中断，流正常结束
+                break
+    
+    async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
+        # 这里靠定时任务执行
+        chat_id = f'{self.agent_id}_{self.user_id}'
+        if new_thread:
+            # 用户要求新对话：生成新 ID，并更新元数据
+            print(f'new_thread: {new_thread}', flush=True)
+            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+        else:
+            # 尝试从长期记忆恢复上次的 thread_id
+            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
+                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
+                if last_thread:
+                    print(f'加载从长期记忆中的last_thread_id')
+                    self.thread_id = last_thread
+                else:
+                    print(f'首次对话，生成新 ID')
+                    # 首次对话，生成新 ID
+                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+        if self.thread_id not in self.sent_msg_ids:
+            self.sent_msg_ids.clear()
+            self.sent_msg_ids.insert(0, self.thread_id)
+        
+        memories = []
+        if self.memory and self.user_id == 'super_user':
+            memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
+        base_prompt = self._build_system_prompt()
+        if memories:
+            memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
+                f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
+                for m in memories
+            ])
+            base_prompt += memory_text
+        if image_data:
+            image_desc = await self._handle_image(image_data)
+            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
+        
+        messages = [
+            {"role": "system", "content": base_prompt},
+            {"role": "user", "content": user_input}
+        ]
+        
+        # 注意：必须使用同一个 thread_id，不能动态生成
+        config = {"configurable": {"thread_id": self.thread_id}}
+        
+        # HITL 循环：初始输入为 messages
+        input_state = {"messages": messages}
+        command = None
+        
+        while True:
+            # 如果有恢复命令，则使用 Command 作为输入
+            if command:
+                input_state = Command(resume=command)
+            
+            async for event in self.agent.astream(
+                    input_state,
+                    config,
+                    stream_mode="values",
+            ):
+                # 检测中断
+                if "__interrupt__" in event:
+                    interrupts = event["__interrupt__"]
+                    # 处理所有中断，收集用户决策
+                    decisions = await self._process_interrupts(interrupts)
+                    # 假设只有一个中断，取第一个决策
+                    command = decisions[0] if decisions else None
+                    break  # 退出当前流，进入下一轮循环
+                else:
+                    # 正常消息处理
+                    if "messages" in event:
+                        for msg in event["messages"]:
+                            # 处理 AI 消息（思考内容）
+                            if msg.type == "ai" and msg.content:
+                                msg_id = getattr(msg, 'id', None)
+                                if msg_id and msg_id not in self.sent_msg_ids:
+                                    self.sent_msg_ids.append(msg_id)
+                                    # 发送完整消息（类似原代码中的 current_ai_message 累积后发送）
+                                    await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                                
+                                elif not msg_id:
+                                    # 无ID时使用内容哈希（备用）
+                                    content_hash = hash(msg.content)
+                                    if content_hash not in self.sent_msg_ids:
+                                        self.sent_msg_ids.append(content_hash)
+                                        await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                            
+                            # 处理工具调用（去重）
+                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user':
+                                for tc in msg.tool_calls:
+                                    tc_id = tc.get('id')
+                                    if tc_id and tc_id not in self.sent_msg_ids:
+                                        self.sent_msg_ids.append(tc_id)
+                                        tool_call_info = f"🔧 调用工具: {tc}"
+                                        # 截断过长内容（与原逻辑一致）
+                                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
+                                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
+                            
+                            # 处理工具返回消息
+                            elif msg.type == "tool" and self.user_id == 'super_user':
                                 msg_id = getattr(msg, 'id', None)
                                 if msg_id and msg_id not in self.sent_msg_ids:
                                     self.sent_msg_ids.append(msg_id)
@@ -497,12 +665,12 @@ class Brain:
                     self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
         
         memories = []
-        if self.memory:
+        if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
         
         # 2. 构建系统提示（基础提示 + 长期记忆信息）
         base_prompt = self._build_system_prompt()
-        if memories:
+        if memories and self.user_id == 'super_user':
             memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
                 f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
                 for m in memories
@@ -542,17 +710,19 @@ class Brain:
                         await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
                         current_ai_message = ""
                     # 发送工具调用信息
-                    tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
-                    tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
-                    await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
+                    if self.user_id == 'super_user':        # 只有和人类交互才返回工具调用信息
+                        tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
+                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
+                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                     # 工具调用本身可能不包含文本，但如果有内容也累积
             # 处理工具返回消息块
             elif chunk.type == "ToolMessageChunk":
                 if current_ai_message:
                     await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
                     current_ai_message = ""
-                tool_result = f"🛠️ 工具返回: {chunk.content}"
-                await self.comm.send_to_agent(self.user_id, {"text": tool_result})
+                if self.user_id == 'super_user':
+                    tool_result = f"🛠️ 工具返回: {chunk.content}"
+                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
         # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
         return current_ai_message
     
@@ -613,7 +783,7 @@ class Brain:
         
             请生成一个自然、有温度、可能带有好奇心的内心想法。不要以“作为AI”开头，直接说出想法。"""
         try:
-            response = await call_zhipu_chat(prompt, model=config.model.default_model, temperature=0.8)      # temperature高一点
+            response = await call_big_model_chat(prompt, model=config.model.default_model, temperature=0.8)      # temperature高一点
             return response["choices"][0]["message"]["content"].strip()
         except Exception as e:
             # print(f"生成想法失败: {e}")
@@ -701,17 +871,39 @@ class Brain:
         return decisions
     
     async def _wait_for_user_decision(self, tool_name: str):
-        """等待用户对该工具的审批决策"""
         future = asyncio.get_event_loop().create_future()
         self._pending_approvals[tool_name] = future
-        decision = await future
-        return decision
+        try:
+            decision = await asyncio.wait_for(future, timeout=60)  # 60秒超时
+            return decision
+        except asyncio.TimeoutError:
+            print(f"等待审批超时: {tool_name}")
+            return {"type": "reject"}  # 超时默认拒绝
     
-    def _complete_approval(self, tool_name: str, decision):
+    async def _complete_approval(self, tool_name: str, decision):
+        print(f"[DEBUG] Completing approval for {tool_name}, pending keys: {list(self._pending_approvals.keys())}")
         if tool_name in self._pending_approvals:
             self._pending_approvals[tool_name].set_result({"decisions": [decision]})
             del self._pending_approvals[tool_name]
+        else:
+            print(f"[WARN] No pending approval for {tool_name}")
     
-
+    def _create_send_to_agent_tool(self):
+        @tool
+        async def send_to_agent(target_agent_id: str, message: str) -> str:
+            """
+            向指定的 Agent 发送消息，不等待对方回复。
+            :param target_agent_id: 目标 Agent 的 ID，例如 'debater' 或 'researcher'。
+            :param message: 要发送的消息内容，例如 '请反驳我的观点'。
+            :return: 发送成功的标志
+            示例: send_to_agent(target_agent_id='debater', message='现在请开始反驳。')
+            """
+            await self.comm.send_to_agent(target_agent_id, {"text": message})
+            return f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
+        return send_to_agent
+    
+    async def close(self):
+        for task in self.agent_msg_timer.values():
+            task.cancel()
 
     

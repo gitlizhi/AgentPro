@@ -6,7 +6,7 @@ import json
 import asyncio
 from datetime import datetime
 from agent.memory import get_memory
-from agent.utils import call_zhipu_chat  # 注意：使用异步版本
+from agent.utils import call_big_model_chat  # 注意：使用异步版本
 from config import config
 
 async def extract_facts_from_markdown(file_path: str) -> list:
@@ -49,7 +49,7 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
             
             只输出 JSON，不要任何额外文字。"""
     try:
-        response = await call_zhipu_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature)
+        response = await call_big_model_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature, is_json=True)
         content = response["choices"][0]["message"]["content"]
         # 清理可能的 Markdown 代码块
         if content.startswith("```") and content.endswith("```"):
