@@ -109,7 +109,21 @@ async def init_db_pool():
                     CREATE INDEX IF NOT EXISTS idx_reminders_user_time
                     ON reminders (user_id, reminder_time) WHERE NOT triggered
                 """)
-            print("✅ 已确保 reminders 表存在")
+            # print("✅ 已确保 reminders 表存在")
+            await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS rooms (
+                        room_id VARCHAR(255) PRIMARY KEY,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+            await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS room_members (
+                    room_id VARCHAR(255) REFERENCES rooms(room_id) ON DELETE CASCADE,
+                    agent_id VARCHAR(255),
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (room_id, agent_id)
+                );
+                """)
             
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)

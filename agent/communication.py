@@ -66,6 +66,15 @@ class Communication:
             "payload": payload
         })
     
+    async def send_to_room(self, room_id: str, payload: dict):
+        """发送消息给指定智能体"""
+        await self.send({
+            "type": "group_message",
+            "from": self.agent_id,
+            "room_id": room_id,
+            "payload": payload
+        })
+    
     async def close(self):
         self._running = False
         if self.websocket:

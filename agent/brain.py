@@ -65,6 +65,9 @@ class Brain:
         
         # 和其他Agent交互工具
         self.send_to_agent_tool = self._create_send_to_agent_tool()
+        # 创建群组相关的工具
+        room_tools = self._create_room_tools()
+        
         self.agent_msg_cache = {}  # user_id -> 累积的消息文本
         self.agent_msg_timer = {}  # user_id -> asyncio.Task
         
@@ -118,11 +121,13 @@ class Brain:
         
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
+        # 自定义工具
+        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), log_memory, retrieve_memory, load_full_memory,
+                   update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents] + room_tools
         
         self.agent = create_deep_agent(
             model=self.model,
-            tools=[self.send_to_agent_tool, TavilySearch(max_results=5), log_memory, retrieve_memory, load_full_memory,
-                   update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents],  # 添加自定义工具
+            tools=tools,
             system_prompt=self._build_system_prompt() if custom_system_prompt is None else custom_system_prompt,
             # backend=backend,
             backend=self.docker_backend,
@@ -130,8 +135,8 @@ class Brain:
             checkpointer=self.checkpointer,
             # subagents=subagents,
             interrupt_on={
-                # "execute": {"allowed_decisions": ["approve", "edit", "reject"]},
-                "windows_automation": {"allowed_decisions": ["approve", "reject"]}
+                "windows_automation": {"allowed_decisions": ["approve", "reject"]},
+                "launch_agent": {"allowed_decisions": ["approve", "reject"]},
             },
             middleware=[
                     SummarizationMiddleware(
@@ -151,7 +156,8 @@ class Brain:
             return "Unknown OS"
 
     def _build_system_prompt(self):
-        base = (f"你是一个智能体，可以调用工具来完成任务,同时拥有长期记忆系统。在执行复杂任务时，请遵循以下规则："
+        base = (f"你是一个智能体，你的AgentID和名字都是 {self.agent_id}"
+                f"可以调用工具来完成任务,同时拥有长期记忆系统。在执行复杂任务时，请遵循以下规则："
                 "1. 开始新任务前，先调用 `retrieve_memory` 搜索相关经验，根据返回的摘要决定是否加载完整记忆。"
                 "2. 执行每个关键步骤后（工具调用、错误、用户反馈），调用 `log_memory` 记录原始日志。"
                 "3. 当你根据某条记忆成功解决问题后，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
@@ -182,7 +188,29 @@ class Brain:
         # return base + instructions + extra
         return base + instructions
     
-    async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
+    async def update_memory(self, user_id: str, user_input: str, thread_id: str):
+        """静默更新指定线程的记忆"""
+        await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
+        
+    async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
+                      thread_id_override: str = None, silent: bool = False) -> str:
+        self.is_busy = True
+        try:
+            self.user_id = user_id
+            effective_thread_id = thread_id_override if thread_id_override else self.thread_id
+            if self.user_id != 'super_user':
+                intent_data = IntentType.COMPLEX_TASKS.value
+            else:
+                intent_data = await self._classify_intent(user_input)
+            response = await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread,
+                                                 effective_thread_id, silent)
+            return response if not silent else ""
+        finally:
+            self.is_busy = False
+            self.last_run_time = datetime.now()
+    
+    async def process_group_message(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
+        # 处理群组消息
         self.is_busy = True
         try:
             self.user_id = user_id
@@ -288,23 +316,27 @@ class Brain:
             print(f"意图分类失败: {e}")
             return IntentType.CHAT.value
     
-    async def _handle_intent(self, intent: str, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
-        """根据意图分发到对应的处理函数"""
-        if intent == IntentType.SET_REMINDER.value:
-            reminders = await self._detect_reminder_intent(user_input)
-            if reminders:
-                return await self._handle_set_reminder(reminders)
+    async def _handle_intent(self, intent: str, user_id: str, user_input: str, image_data: str = None,
+                             new_thread: bool = False, thread_id: str = None, silent: bool = False) -> str:
+        # 临时覆盖 self.thread_id
+        original_thread_id = self.thread_id
+        if thread_id:
+            self.thread_id = thread_id
+        try:
+            if intent == IntentType.SET_REMINDER.value:
+                reminders = await self._detect_reminder_intent(user_input)
+                if reminders:
+                    return await self._handle_set_reminder(reminders)
+                else:
+                    return "未能理解提醒的时间和内容，请重新描述。"
+            elif intent == IntentType.COMPLEX_TASKS.value:
+                return await self._handle_complex_tasks(user_input, image_data, new_thread, silent)
+            elif intent == IntentType.QUERY_REMINDER.value:
+                return await self._handle_query_reminder(user_id)
             else:
-                return "未能理解提醒的时间和内容，请重新描述。"
-            
-        elif intent == IntentType.COMPLEX_TASKS.value:
-            return await self._handle_complex_tasks(user_input, image_data, new_thread)
-        
-        elif intent == IntentType.QUERY_REMINDER.value:
-            return await self._handle_query_reminder(user_id)
-        
-        else:  # chat 或其他
-            return await self._handle_chat(user_input, image_data, new_thread)
+                return await self._handle_chat(user_input, image_data, new_thread, silent)
+        finally:
+            self.thread_id = original_thread_id
 
     async def _handle_set_reminder(self, reminders):
         responses = []
@@ -398,7 +430,7 @@ class Brain:
             result += f"- {dt} UTC：{row['message']}\n"
         return result
     
-    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False):
+    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False, silent: bool = False):
         # 构建系统提示和消息（与原来保持一致）
         # 如果是 Agent 之间的对话，执行缓存合并逻辑
         if self.user_id != 'super_user':
@@ -511,7 +543,7 @@ class Brain:
                                         await self.comm.send_to_agent(self.user_id, {"text": msg.content})
                             
                             # 处理工具调用（去重）
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user':
+                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
                                 for tc in msg.tool_calls:
                                     tc_id = tc.get('id')
                                     if tc_id and tc_id not in self.sent_msg_ids:
@@ -522,7 +554,7 @@ class Brain:
                                         await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                             
                             # 处理工具返回消息
-                            elif msg.type == "tool" and self.user_id == 'super_user':
+                            elif msg.type == "tool" and self.user_id == 'super_user' and not silent:
                                 msg_id = getattr(msg, 'id', None)
                                 if msg_id and msg_id not in self.sent_msg_ids:
                                     self.sent_msg_ids.append(msg_id)
@@ -643,7 +675,7 @@ class Brain:
                 # 没有中断，流正常结束
                 break
     
-    async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False):
+    async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False, silent: bool = False):
         """聊天"""
         chat_id = f'{self.agent_id}_{self.user_id}'
         if new_thread:
@@ -706,25 +738,27 @@ class Brain:
                     # 实时发送每个文本片段给用户（打字机效果）
                     current_ai_message += chunk.content
                 if chunk.tool_calls:
-                    if current_ai_message:
+                    if current_ai_message and not silent:
                         await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
                         current_ai_message = ""
                     # 发送工具调用信息
-                    if self.user_id == 'super_user':        # 只有和人类交互才返回工具调用信息
+                    if self.user_id == 'super_user' and not silent:  # 只有和人类交互才返回工具调用信息
                         tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
                         # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
                         await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                     # 工具调用本身可能不包含文本，但如果有内容也累积
             # 处理工具返回消息块
             elif chunk.type == "ToolMessageChunk":
-                if current_ai_message:
+                if current_ai_message and not silent:
                     await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
                     current_ai_message = ""
-                if self.user_id == 'super_user':
+                if self.user_id == 'super_user' and not silent:
                     tool_result = f"🛠️ 工具返回: {chunk.content}"
                     await self.comm.send_to_agent(self.user_id, {"text": tool_result})
         # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
-        return current_ai_message
+        # if current_ai_message and not silent:
+        #     await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
+        return current_ai_message if not silent else ""
     
     async def _handle_image(self, image_data: str) -> str:
         """处理图片输入，返回视觉模型的结果"""
@@ -881,9 +915,9 @@ class Brain:
             return {"type": "reject"}  # 超时默认拒绝
     
     async def _complete_approval(self, tool_name: str, decision):
-        print(f"[DEBUG] Completing approval for {tool_name}, pending keys: {list(self._pending_approvals.keys())}")
+        # print(f"[DEBUG] Completing approval for {tool_name}, pending keys: {list(self._pending_approvals.keys())}")
         if tool_name in self._pending_approvals:
-            self._pending_approvals[tool_name].set_result({"decisions": [decision]})
+            self._pending_approvals[tool_name].set_result(decision)
             del self._pending_approvals[tool_name]
         else:
             print(f"[WARN] No pending approval for {tool_name}")
@@ -905,5 +939,35 @@ class Brain:
     async def close(self):
         for task in self.agent_msg_timer.values():
             task.cancel()
-
     
+    def _create_room_tools(self):
+        @tool
+        async def create_room(room_id: str) -> str:
+            """创建一个新群组。"""
+            await self.comm.send({"type": "create_room", "room_id": room_id, "agent_id": self.agent_id})
+            return f"已创建群组 {room_id}"
+        
+        @tool
+        async def join_room(room_id: str) -> str:
+            """加入一个已有群组。"""
+            await self.comm.send({"type": "join_room", "room_id": room_id, "agent_id": self.agent_id})
+            return f"已请求加入群组 {room_id}"
+        
+        @tool
+        async def leave_room(room_id: str) -> str:
+            """离开群组。"""
+            await self.comm.send({"type": "leave_room", "room_id": room_id, "agent_id": self.agent_id})
+            return f"已离开群组 {room_id}"
+        
+        @tool
+        async def send_group_message(room_id: str, message: str) -> str:
+            """向群组发送消息。"""
+            await self.comm.send({
+                "type": "group_message",
+                "room_id": room_id,
+                "from": self.agent_id,
+                "payload": {"text": message}
+            })
+            return f"消息已发送到群组 {room_id}"
+        
+        return [create_room, join_room, leave_room, send_group_message]
