@@ -124,6 +124,17 @@ async def init_db_pool():
                     PRIMARY KEY (room_id, agent_id)
                 );
                 """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id SERIAL PRIMARY KEY,
+                    thread_id VARCHAR(255) NOT NULL,
+                    role VARCHAR(20) NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages(thread_id)")
             
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)

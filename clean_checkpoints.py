@@ -13,6 +13,9 @@
     
     # 清除所有群聊房间、成员及短期记忆
     python clean_checkpoints.py --clear-rooms
+    
+    # 清除指定智能体的聊天记录
+    python clean_checkpoints.py --agent agent_main
 """
 import asyncio
 import argparse
@@ -88,12 +91,47 @@ async def clean_all_short_memory():
             await checkpointer.adelete_thread(thread_id)
     print("✅ 所有短期记忆线程清理完成")
 
+async def clean_agent(agent_id: str):
+    """删除指定智能体的所有私聊对话记录（持久化消息 + 短期记忆）"""
+    await init_db_pool()
+    pool = get_pool()
+    pattern = f"private_{agent_id}_%"
+    
+    # 1. 删除 chat_messages 表中所有匹配的消息
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # 先查询匹配的线程数（用于日志）
+            await cur.execute("SELECT COUNT(DISTINCT thread_id) FROM chat_messages WHERE thread_id LIKE %s", (pattern,))
+            thread_count = (await cur.fetchone())[0]
+            # 删除消息记录
+            await cur.execute("DELETE FROM chat_messages WHERE thread_id LIKE %s", (pattern,))
+            deleted_msg_count = cur.rowcount
+            print(f"📋 删除 {deleted_msg_count} 条聊天消息，来自 {thread_count} 个线程")
+    
+    # 2. 删除短期记忆检查点（checkpoints）中对应的线程
+    checkpointer = AsyncPostgresSaver(pool)
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT DISTINCT thread_id FROM checkpoints WHERE thread_id LIKE %s", (pattern,))
+            rows = await cur.fetchall()
+            thread_ids = [row[0] for row in rows]
+    
+    deleted_checkpoints = 0
+    for tid in thread_ids:
+        await checkpointer.adelete_thread(tid)
+        deleted_checkpoints += 1
+        print(f"🧠 清理短期记忆线程: {tid}")
+    
+    print(f"✅ 智能体 {agent_id} 的所有私聊记录已清理（消息数: {deleted_msg_count}, 检查点线程: {deleted_checkpoints}）")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="清理短期记忆和群组数据")
     parser.add_argument("--thread", help="指定要删除的短期记忆线程 ID")
     parser.add_argument("--all", action="store_true", help="删除所有短期记忆线程")
     parser.add_argument("--room", help="指定要删除的群聊房间 ID（同时清理对应短期记忆）")
     parser.add_argument("--clear-rooms", action="store_true", help="删除所有群聊房间及成员（同时清理对应短期记忆）")
+    parser.add_argument("--agent", help="指定要清理的智能体 ID（如 'reminder_bot'），将删除该智能体的全部私聊记录（包括持久化消息和短期记忆）")
     args = parser.parse_args()
 
     if args.thread:
@@ -104,5 +142,7 @@ if __name__ == "__main__":
         asyncio.run(delete_room_and_checkpoints(args.room))
     elif args.clear_rooms:
         asyncio.run(clear_all_rooms())
+    elif args.agent:
+        asyncio.run(clean_agent(args.agent))
     else:
         print("请指定 --thread、--all、--room 或 --clear-rooms")

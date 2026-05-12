@@ -212,10 +212,13 @@ class Hub:
                     
                 else:
                     logger.warning(f"Unknown message type: {data.get('type')}")
-        except websockets.exceptions.ConnectionClosed:
-            import traceback
-            traceback.print_exc()
-            print('=============== Connection closed ===============')
+        except (websockets.exceptions.ConnectionClosed, ConnectionError, OSError) as e:
+            # 连接关闭是正常情况，静默处理或仅记录 info 级别日志
+            logger.info(
+                f"WebSocket connection closed for agent {agent_id if agent_id else 'unknown'}: {type(e).__name__}: {e}")
+        except Exception as e:
+            # 其他意外错误才记录堆栈
+            logger.error(f"Unexpected error in handler for agent {agent_id}: {e}", exc_info=True)
         finally:
             if agent_id:
                 await self.unregister(agent_id)

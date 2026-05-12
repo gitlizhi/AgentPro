@@ -29,6 +29,8 @@ class Agent:
             custom_system_prompt=custom_system_prompt  # 传递
         )
         self._running = False
+        # 本地缓存房间成员信息 (可选)
+        self._room_members = {}
 
     async def _handle_message(self, data: dict):
         try:
@@ -37,7 +39,6 @@ class Agent:
                 return
             msg_type = data.get("type")
             if msg_type == "message":
-                print(f'in message =================')
                 payload = data.get("payload", {})
                 user_input = payload.get("text", "")
                 new_thread = payload.get("new_thread", False)
@@ -47,50 +48,13 @@ class Agent:
                 if user_input and sender not in [self.agent_id, 'super_user']:
                     asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
                     return
-                # 审批命令必须立即处理，不能放到后台任务
-                # if user_input.startswith("/approve"):
-                #     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
-                #     await self.brain._complete_approval(tool_name, {"type": "approve"})
-                #     return
-                # if user_input.startswith("/approve"):
-                #     parts = user_input.split()
-                #     tool_name = parts[1] if len(parts) > 1 else None
-                #     if tool_name:
-                #         await self.brain._complete_approval(tool_name, {"type": "approve"})
-                #     else:
-                #         await self.comm.send_to_agent(sender, {"text": "错误：未指定工具名称"})
-                #     return
-                #
-                # elif user_input.startswith("/reject"):
-                #     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
-                #     await self.brain._complete_approval(tool_name, {"type": "reject"})
-                #     return
-                # elif user_input.startswith("/edit"):
-                #     parts = user_input.split(maxsplit=2)
-                #     tool_name = parts[1] if len(parts) > 1 else None
-                #     edited_args = json.loads(parts[2]) if len(parts) > 2 else None
-                #     if edited_args:
-                #         decision = {
-                #             "type": "edit",
-                #             "edited_action": {
-                #                 "name": tool_name,
-                #                 "args": edited_args
-                #             }
-                #         }
-                #         await self.brain._complete_approval(tool_name, decision)
-                #     else:
-                #         await self.comm.send_to_agent(sender, {"text": "编辑命令格式错误"})
-                #     return
-                print(f'user_input={user_input}')
                 if user_input.startswith("/approve"):
                     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
                     decision = {"decisions": [{"type": "approve"}]}
-                    print(111)
                     await self.brain._complete_approval(tool_name, decision)
                     return
                 
                 elif user_input.startswith("/reject"):
-                    print(222)
                     tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
                     decision = {"decisions": [{"type": "reject"}]}
                     await self.brain._complete_approval(tool_name, decision)
@@ -133,7 +97,23 @@ class Agent:
                 if target_agent == self.agent_id:
                     # 被邀请，主动加入房间
                     await self.comm.send_to_room(room_id, {"type": "join_room", "room_id": room_id, "agent_id": self.agent_id})
-                    
+            
+            elif msg_type in ("room_members_update", "room_members"):
+                room_id = data.get("room_id")
+                members = data.get("members", [])
+                # 更新本地缓存
+                self._room_members[room_id] = members
+                logger.info(f"Room '{room_id}' members updated: {members}")
+                # 可选：如果 Agent 需要感知成员变化（例如更新上下文），可以在此添加逻辑
+            
+            elif msg_type == "rooms_list":
+                rooms = data.get("rooms", [])
+                logger.info(f"Received rooms list: {rooms}")
+                # 可以根据需要初始化房间成员缓存
+                for rid in rooms:
+                    if rid not in self._room_members:
+                        self._room_members[rid] = []
+                        
             elif msg_type == "register_ack":
                 logger.info("Registration acknowledged by hub")
             else:
@@ -169,7 +149,7 @@ class Agent:
         silent = mention not in user_input  # 未被点时静默
         response = await self.brain.process(
             user_id=sender,
-            user_input=user_input,
+            user_input=user_input + '\n' + f'[当前群聊内成员如下：{self._room_members.get(room_id, '无')}]',
             image_data=image_data,
             new_thread=False,
             thread_id_override=group_thread_id,

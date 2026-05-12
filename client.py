@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import json
 import re
 from contextlib import asynccontextmanager
@@ -6,7 +7,49 @@ import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
+from pydantic import BaseModel
+from datetime import datetime
+import psycopg
+from config import config  # 导入你的配置
 
+# 获取数据库连接字符串（同步方式）
+DB_URI = config.db.postgres_uri
+
+def get_db_connection():
+    return psycopg.connect(DB_URI)
+
+# 在 lifespan 中初始化表（同步）
+def init_db():
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id SERIAL PRIMARY KEY,
+                thread_id VARCHAR(255) NOT NULL,
+                role VARCHAR(20) NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    conn.commit()
+    conn.close()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()   # 同步初始化
+    asyncio.create_task(connect_to_hub())
+    yield
+
+    
+class MessageIn(BaseModel):
+    thread_id: str
+    role: str   # 'user' or 'assistant'
+    content: str
+
+class MessageOut(MessageIn):
+    id: int
+    created_at: datetime
+    
 # 全局变量
 hub_ws = None
 online_agents = set()
@@ -23,12 +66,6 @@ def clean_agent_response(text: str) -> str:
     text = re.sub(r'^\s*##\s*$', '', text, flags=re.MULTILINE)
     lines = [line for line in text.splitlines() if line.strip()]
     return '\n'.join(lines)
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    asyncio.create_task(connect_to_hub())
-    yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -269,7 +306,48 @@ async def connect_to_hub():
         except Exception as e:
             print(f"Hub 连接失败: {e}")
             await asyncio.sleep(5)
+    
+@app.post("/chat/history")
+async def save_message(msg: MessageIn):
+    if 'super_user' not in msg.thread_id:
+        return {"status": "ignored"}
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO chat_messages (thread_id, role, content) VALUES (%s, %s, %s)",
+            (msg.thread_id, msg.role, msg.content)
+        )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
+@app.get("/chat/history")
+async def get_history(thread_id: str, limit: int = 100):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, role, content, created_at FROM chat_messages WHERE thread_id = %s ORDER BY created_at LIMIT %s",
+            (thread_id, limit)
+        )
+        rows = cur.fetchall()
+    conn.close()
+    return [
+        {
+            "id": row[0],
+            "role": row[1],
+            "content": row[2],
+            "created_at": row[3].isoformat()
+        }
+        for row in rows
+    ]
+@app.get("/chat/threads")
+async def get_threads():
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT thread_id FROM chat_messages ORDER BY thread_id")
+        rows = cur.fetchall()
+    conn.close()
+    return {"threads": [row[0] for row in rows]}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
