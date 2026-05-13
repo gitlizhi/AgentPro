@@ -72,8 +72,10 @@ class Brain:
         self.agent_msg_timer = {}  # user_id -> asyncio.Task
         
         self._pending_approvals = {}
-        # 用于去重（记录已发送的消息ID）
-        self.sent_msg_ids = []
+        # 用于去重
+        self.sent_msg_ids_by_thread = {}  # thread_id -> set
+        
+        self._termination_cache = {}
 
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
@@ -163,12 +165,14 @@ class Brain:
                 "3. 当你根据某条记忆成功解决问题后，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
                 "4. 记忆库采用渐进式披露：先看摘要，需要细节才加载完整内容。"
                 # f"你当前的运行环境是{self.get_platform()}。"
-                "当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
-                "在调用工具或者skill之前，请先写下你的思考过程。"
-                "如果工具调用出错，请分析错误原因，并尝试其他方法。"
+                # "当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
+                # "在调用工具或者skill之前，请先写下你的思考过程。"
+                # "如果工具调用出错，请分析错误原因，并尝试其他方法。"
                 "当你需要执行多步骤任务时，请将内部推理过程放在 < thinking >...< / thinking > 标签内。"
                 "这些标签内的内容不会被发送给其他 Agent，只有标签外的内容才会被作为回复发送。"
-                "在与其他 Agent 辩论或协作时，直接输出你的观点或反驳，不要输出“让我检索记忆”、“好的，我准备好了”等旁白。"
+                "在与其他 Agent 辩论或协作时，你可自由选择是否要回复对方的消息，避免陷入无限循环交流模式。"
+                "如判断为不需要回复，直接输出[停止交流]即可。"
+                "如需要回复消息，直接输出你的观点或反驳，不要输出“让我检索记忆”、“好的，我准备好了”等旁白。"
                 )
         instructions = """
         注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
@@ -224,6 +228,25 @@ class Brain:
             self.is_busy = False
             self.last_run_time = datetime.now()
     
+    def get_thread_id(self, new_thread, chat_id):
+        if new_thread:
+            # 用户要求新对话：生成新 ID，并更新元数据
+            print(f'new_thread: {new_thread}', flush=True)
+            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+        else:
+            # 尝试从长期记忆恢复上次的 thread_id
+            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
+                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
+                if last_thread:
+                    print(f'加载从长期记忆中的last_thread_id')
+                    self.thread_id = last_thread
+                else:
+                    print(f'首次对话，生成新 ID')
+                    # 首次对话，生成新 ID
+                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+
     async def _detect_reminder_intent(self, user_input: str) -> dict:
         """调用模型判断是否是定时任务，并提取时间和消息"""
         prompt = f"""
@@ -429,14 +452,19 @@ class Brain:
             dt = row['reminder_time'].strftime('%Y-%m-%d %H:%M:%S')
             result += f"- {dt} UTC：{row['message']}\n"
         return result
-    
-    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False, silent: bool = False):
+     
+    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False,
+                                    silent: bool = False):
         # 构建系统提示和消息（与原来保持一致）
         # 如果是 Agent 之间的对话，执行缓存合并逻辑
         if self.user_id != 'super_user':
             # 取消已有的定时器（新消息到来，重新计时）
             if self.user_id in self.agent_msg_timer:
                 self.agent_msg_timer[self.user_id].cancel()
+            
+            strings = ['检索', '记忆', '关于', '经验', '参考']
+            if all(string in user_input for string in strings) and len(user_input) <= 50:     # 废话提取掉
+                return
             
             # 累积消息
             if self.user_id not in self.agent_msg_cache:
@@ -453,32 +481,13 @@ class Brain:
                         await self._process_agent_message(full_input, image_data, new_thread)
                     if self.user_id in self.agent_msg_timer:
                         del self.agent_msg_timer[self.user_id]
+            
             if user_input:
                 self.agent_msg_timer[self.user_id] = asyncio.create_task(delayed_process())
             return  # 等待定时器，不立即处理
         
         chat_id = f'{self.agent_id}_{self.user_id}'
-        if new_thread:
-            # 用户要求新对话：生成新 ID，并更新元数据
-            print(f'new_thread: {new_thread}', flush=True)
-            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        else:
-            # 尝试从长期记忆恢复上次的 thread_id
-            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
-                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
-                if last_thread:
-                    print(f'加载从长期记忆中的last_thread_id')
-                    self.thread_id = last_thread
-                else:
-                    print(f'首次对话，生成新 ID')
-                    # 首次对话，生成新 ID
-                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        if self.thread_id not in self.sent_msg_ids:
-            self.sent_msg_ids.clear()
-            self.sent_msg_ids.insert(0, self.thread_id)
-                    
+        self.get_thread_id(new_thread, chat_id)
         memories = []
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
@@ -491,7 +500,7 @@ class Brain:
             base_prompt += memory_text
         if image_data:
             image_desc = await self._handle_image(image_data)
-            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
+            base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：“{image_desc}”"
         
         messages = [
             {"role": "system", "content": base_prompt},
@@ -500,6 +509,9 @@ class Brain:
         
         # 注意：必须使用同一个 thread_id，不能动态生成
         config = {"configurable": {"thread_id": self.thread_id}}
+        if self.thread_id not in self.sent_msg_ids_by_thread:
+            self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
+        sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
         
         # HITL 循环：初始输入为 messages
         input_state = {"messages": messages}
@@ -510,192 +522,119 @@ class Brain:
             if command:
                 input_state = Command(resume=command)
             
-            async for event in self.agent.astream(
-                    input_state,
-                    config,
-                    stream_mode="values",
-            ):
-                # 检测中断
-                if "__interrupt__" in event:
-                    interrupts = event["__interrupt__"]
-                    # 处理所有中断，收集用户决策
-                    decisions = await self._process_interrupts(interrupts)
-                    # 假设只有一个中断，取第一个决策
+            async for event in self.agent.astream(input_state, config, stream_mode="updates"):
+                # print(f"DEBUG event: {event}")  # 添加这一行
+                # 中断可能在 event 的某个节点值中
+                interrupt_data = None
+                for key, node_output in event.items():
+                    if node_output is None:
+                        continue
+                    if "__interrupt__" == key:
+                        interrupt_data = node_output
+                        break
+                if interrupt_data:
+                    # 处理中断
+                    decisions = await self._process_interrupts(interrupt_data)
                     command = decisions[0] if decisions else None
-                    break  # 退出当前流，进入下一轮循环
+                    break
                 else:
-                    # 正常消息处理
-                    if "messages" in event:
-                        for msg in event["messages"]:
-                            # 处理 AI 消息（思考内容）
-                            if msg.type == "ai" and msg.content:
-                                msg_id = getattr(msg, 'id', None)
-                                if msg_id and msg_id not in self.sent_msg_ids:
-                                    self.sent_msg_ids.append(msg_id)
-                                    # 发送完整消息（类似原代码中的 current_ai_message 累积后发送）
-                                    await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-
-                                elif not msg_id:
-                                    # 无ID时使用内容哈希（备用）
-                                    content_hash = hash(msg.content)
-                                    if content_hash not in self.sent_msg_ids:
-                                        self.sent_msg_ids.append(content_hash)
+                    # 正常消息：遍历所有节点输出中的 messages
+                    for node_output in event.values():
+                        if node_output is None:
+                            continue
+                        if "messages" in node_output:
+                            messages_obj = node_output["messages"]
+                            if messages_obj is None:  # 也检查 messages 是否为 None
+                                continue
+                            # 处理 Overwrite 对象
+                            if hasattr(messages_obj, 'value') and not isinstance(messages_obj, list):
+                                messages_list = messages_obj.value
+                            else:
+                                messages_list = messages_obj
+                            
+                            for msg in messages_list:
+                                msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+                                if msg.type == "ai" and msg.content:
+                                    if msg_id not in sent_ids:
                                         await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                            
-                            # 处理工具调用（去重）
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
-                                for tc in msg.tool_calls:
-                                    tc_id = tc.get('id')
-                                    if tc_id and tc_id not in self.sent_msg_ids:
-                                        self.sent_msg_ids.append(tc_id)
+                                        sent_ids.add(msg_id)
+                                if (hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent
+                                        and msg_id not in sent_ids):
+                                    for tc in msg.tool_calls:
                                         tool_call_info = f"🔧 调用工具: {tc}"
-                                        # 截断过长内容（与原逻辑一致）
-                                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
                                         await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                            
-                            # 处理工具返回消息
-                            elif msg.type == "tool" and self.user_id == 'super_user' and not silent:
-                                msg_id = getattr(msg, 'id', None)
-                                if msg_id and msg_id not in self.sent_msg_ids:
-                                    self.sent_msg_ids.append(msg_id)
+                                    sent_ids.add(msg_id)
+                                elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
                                     tool_result = f"🛠️ 工具返回: {msg.content}"
                                     await self.comm.send_to_agent(self.user_id, {"text": tool_result})
+                                    sent_ids.add(msg_id)
             
             else:
                 # 没有中断，流正常结束
                 break
     
     async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
-        # 这里靠定时任务执行
         chat_id = f'{self.agent_id}_{self.user_id}'
-        if new_thread:
-            # 用户要求新对话：生成新 ID，并更新元数据
-            print(f'new_thread: {new_thread}', flush=True)
-            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        else:
-            # 尝试从长期记忆恢复上次的 thread_id
-            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
-                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
-                if last_thread:
-                    print(f'加载从长期记忆中的last_thread_id')
-                    self.thread_id = last_thread
-                else:
-                    print(f'首次对话，生成新 ID')
-                    # 首次对话，生成新 ID
-                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        if self.thread_id not in self.sent_msg_ids:
-            self.sent_msg_ids.clear()
-            self.sent_msg_ids.insert(0, self.thread_id)
+        self.get_thread_id(new_thread, chat_id)
         
-        memories = []
+        # ---- 新增终止检查 ----
+        if await self._should_terminate_conversation(self.thread_id):
+            print(f"对话 {self.thread_id} 被判定为死循环，终止处理。")
+            # 可选：发送终止通知给对方
+            # await self.comm.send_to_agent(self.user_id, {"text": "我认为我们应该停止交流，我不会再对该话题进行回复"})
+            return
+        # ----------------------
+        
+        config = {"configurable": {"thread_id": self.thread_id}}
+        
+        # 加载已发送消息 ID 集合（可选，用于去重）
+        if self.thread_id not in self.sent_msg_ids_by_thread:
+            self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
+        sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
+        
+        # 构建系统提示（仅超级用户才添加记忆）
+        base_prompt = self._build_system_prompt()
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
-        base_prompt = self._build_system_prompt()
-        if memories:
-            memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
-                f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
-                for m in memories
-            ])
-            base_prompt += memory_text
-        if image_data:
-            image_desc = await self._handle_image(image_data)
-            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
-        
+            if memories:
+                memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join(...)
+                base_prompt += memory_text
+
         messages = [
             {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
         
-        # 注意：必须使用同一个 thread_id，不能动态生成
-        config = {"configurable": {"thread_id": self.thread_id}}
-        
-        # HITL 循环：初始输入为 messages
         input_state = {"messages": messages}
         command = None
         
         while True:
-            # 如果有恢复命令，则使用 Command 作为输入
             if command:
                 input_state = Command(resume=command)
             
-            async for event in self.agent.astream(
-                    input_state,
-                    config,
-                    stream_mode="values",
-            ):
-                # 检测中断
+            async for event in self.agent.astream(input_state, config, stream_mode="values"):
                 if "__interrupt__" in event:
                     interrupts = event["__interrupt__"]
-                    # 处理所有中断，收集用户决策
                     decisions = await self._process_interrupts(interrupts)
-                    # 假设只有一个中断，取第一个决策
                     command = decisions[0] if decisions else None
-                    break  # 退出当前流，进入下一轮循环
+                    break
                 else:
-                    # 正常消息处理
                     if "messages" in event:
                         for msg in event["messages"]:
-                            # 处理 AI 消息（思考内容）
+                            # 只发送新消息（AI 内容）
                             if msg.type == "ai" and msg.content:
-                                msg_id = getattr(msg, 'id', None)
-                                if msg_id and msg_id not in self.sent_msg_ids:
-                                    self.sent_msg_ids.append(msg_id)
-                                    # 发送完整消息（类似原代码中的 current_ai_message 累积后发送）
+                                msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+                                if msg_id not in sent_ids:
+                                    sent_ids.add(msg_id)
+                                    # 发送给目标 Agent（self.user_id 是其他 Agent ID）
                                     await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                                
-                                elif not msg_id:
-                                    # 无ID时使用内容哈希（备用）
-                                    content_hash = hash(msg.content)
-                                    if content_hash not in self.sent_msg_ids:
-                                        self.sent_msg_ids.append(content_hash)
-                                        await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                            
-                            # 处理工具调用（去重）
-                            if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user':
-                                for tc in msg.tool_calls:
-                                    tc_id = tc.get('id')
-                                    if tc_id and tc_id not in self.sent_msg_ids:
-                                        self.sent_msg_ids.append(tc_id)
-                                        tool_call_info = f"🔧 调用工具: {tc}"
-                                        # 截断过长内容（与原逻辑一致）
-                                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
-                                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                            
-                            # 处理工具返回消息
-                            elif msg.type == "tool" and self.user_id == 'super_user':
-                                msg_id = getattr(msg, 'id', None)
-                                if msg_id and msg_id not in self.sent_msg_ids:
-                                    self.sent_msg_ids.append(msg_id)
-                                    tool_result = f"🛠️ 工具返回: {msg.content}"
-                                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
-            
             else:
-                # 没有中断，流正常结束
                 break
-    
+                
     async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False, silent: bool = False):
         """聊天"""
         chat_id = f'{self.agent_id}_{self.user_id}'
-        if new_thread:
-            # 用户要求新对话：生成新 ID，并更新元数据
-            print(f'new_thread: {new_thread}', flush=True)
-            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        else:
-            # 尝试从长期记忆恢复上次的 thread_id
-            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
-                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
-                if last_thread:
-                    print(f'加载从长期记忆中的last_thread_id')
-                    self.thread_id = last_thread
-                else:
-                    print(f'首次对话，生成新 ID')
-                    # 首次对话，生成新 ID
-                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        
+        self.get_thread_id(new_thread, chat_id)
         memories = []
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
@@ -941,11 +880,11 @@ class Brain:
             task.cancel()
     
     def _create_room_tools(self):
-        @tool
-        async def create_room(room_id: str) -> str:
-            """创建一个新群组。"""
-            await self.comm.send({"type": "create_room", "room_id": room_id, "agent_id": self.agent_id})
-            return f"已创建群组 {room_id}"
+        # @tool
+        # async def create_room(room_id: str) -> str:
+        #     """创建一个新群组。"""
+        #     await self.comm.send({"type": "create_room", "room_id": room_id, "agent_id": self.agent_id})
+        #     return f"已创建群组 {room_id}"
         
         @tool
         async def join_room(room_id: str) -> str:
@@ -970,4 +909,116 @@ class Brain:
             })
             return f"消息已发送到群组 {room_id}"
         
-        return [create_room, join_room, leave_room, send_group_message]
+        # return [create_room, join_room, leave_room, send_group_message]
+        return [join_room, leave_room, send_group_message]
+    
+    async def _load_sent_ids_from_checkpoint(self, config):
+        """从 checkpoint 加载已发送的消息 ID 集合"""
+        try:
+            state = await self.agent.aget_state(config)
+            if state and state.values and "messages" in state.values:
+                ids = set()
+                for msg in state.values["messages"]:
+                    msg_id = getattr(msg, 'id', None)
+                    if msg_id:
+                        ids.add(msg_id)
+                    elif hasattr(msg, 'content') and msg.content:
+                        # 备用方案：内容哈希
+                        ids.add(hash(msg.content))
+                return ids
+        except Exception as e:
+            print(f"加载已发送ID失败: {e}")
+        return set()
+    
+    async def _get_conversation_history_for_termination(self, thread_id: str, max_messages: int = 20):
+        """
+        从 checkpoint 中提取对话历史，返回适合终止判断的格式：
+        [{"speaker": "AgentA", "message": "..."}, ...]
+        规则：将 AI 消息视为当前 Agent（self.agent_id），将 Human 消息视为对方 Agent。
+        """
+        configs = {"configurable": {"thread_id": thread_id}}
+        state = await self.agent.aget_state(configs)
+        if not state or not state.values:
+            return []
+        
+        messages = state.values.get("messages", [])
+        if not messages:
+            return []
+        
+        # 从 thread_id 中解析对方 Agent ID（格式：f"{self.agent_id}_{other_agent_id}_{uuid}"）
+        parts = thread_id.split("_")
+        if len(parts) >= 2 and parts[0] == self.agent_id:
+            other_agent_id = parts[1]
+        else:
+            other_agent_id = "unknown"
+        
+        history = []
+        for msg in messages[-max_messages:]:
+            if msg.type == "ai":
+                speaker = self.agent_id
+            elif msg.type == "human":
+                speaker = other_agent_id
+            else:
+                continue  # 忽略 system/tool 消息
+            content = msg.content if msg.content else ""
+            history.append({"speaker": speaker, "message": content})
+        return history
+    
+    async def _should_terminate_conversation(self, thread_id: str) -> bool:
+        """
+        判断指定 thread_id 的对话是否应终止。
+        返回 True 表示应终止，False 表示可继续。
+        """
+        # 限频缓存（在类中增加属性 self._termination_cache: dict）
+        now = time.time()
+        if thread_id in self._termination_cache:
+            result, timestamp = self._termination_cache[thread_id]
+            if now - timestamp < 60:  # 60 秒内复用结果
+                return result
+        
+        history = await self._get_conversation_history_for_termination(thread_id, max_messages=20)
+        if len(history) < 10:  # 对话太短，不判断
+            return False
+        
+        # 构造提示词（使用你之前的设计）
+        prompt = f"""
+            你是一个专业的“对话终止判断器”。分析以下两个智能体之间的对话历史，判断是否应该终止（防止死循环）。
+        
+            终止标准（满足任一即应终止）：
+            1. 内容重复：同样的句子、观点或问题出现两次以上。
+            2. 逻辑循环：对话形成闭环，反复问相同问题。
+            3. 无新信息：连续 3 轮及以上没有引入新信息。
+            4. 目标已达成：上下文隐含目标已实现。
+            5. 无法推进：陷入争论或双方等待对方行动。
+        
+            对话历史（JSON 数组）：
+            {json.dumps(history, ensure_ascii=False, indent=2)}
+        
+            请只输出一个 JSON 对象，格式：
+            {{"should_terminate": true/false, "reason": "简短理由"}}
+            """
+        try:
+            response = await call_big_model_chat(
+                prompt,
+                model=config.model.default_model,
+                temperature=0.2,
+                is_json=True
+            )
+            content = response["choices"][0]["message"]["content"]
+            # 提取 JSON
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+            data = json.loads(content)
+            terminate = data.get("should_terminate", False)
+            # 缓存结果
+            self._termination_cache[thread_id] = (terminate, time.time())
+            return terminate
+        except Exception as e:
+            print(f"终止判断失败: {e}")
+            return False  # 出错时不终止
+

@@ -352,7 +352,7 @@
             align-self: flex-end;
         }
         .message-meta {
-            font-size: 0.65rem;
+            font-size: 0.85rem;
             font-weight: 500;
             margin-bottom: 4px;
             margin-left: 12px;
@@ -788,23 +788,32 @@
 
     function sendMessage() {
         let text = messageInput.value.trim();
-        if(!text && !currentImageBase64) return;
+        if (!text && !currentImageBase64) return;
         let newThread = false;
-        if(text.startsWith('/new')) { newThread = true; text = text.substring(4).trim() || "新对话"; }
+        if (text.startsWith('/new')) { newThread = true; text = text.substring(4).trim() || "新对话"; }
         const time = new Date().toLocaleTimeString();
-        if(text && currentAgent) {
+
+        if (text && currentAgent) {
             saveMessage(`private_${currentAgent}_super_user`, 'user', text);
-            if(!messageHistory[currentAgent]) messageHistory[currentAgent]=[];
-            messageHistory[currentAgent].push({ sender:'我', text, time });
+            if (!messageHistory[currentAgent]) messageHistory[currentAgent] = [];
+            messageHistory[currentAgent].push({ sender: '我', text, time });
             displayMessage('我', text, time);
+            ws.send(JSON.stringify({ type: 'send', to: currentAgent, text, image: currentImageBase64 || null, new_thread: newThread }));
         }
-        if(currentAgent) {
-            ws.send(JSON.stringify({ type:'send', to:currentAgent, text, image: currentImageBase64||null, new_thread: newThread }));
-        } else if(currentRoom) {
-            ws.send(JSON.stringify({ type:'group_message', room_id:currentRoom, text, image: currentImageBase64||null }));
+        else if (currentRoom) {
+            // 群聊：立即显示自己的消息
+            if (!roomMessages[currentRoom]) roomMessages[currentRoom] = [];
+            roomMessages[currentRoom].push({ sender: '我', text, time });
+            displayMessage('我', text, time);
+            ws.send(JSON.stringify({ type: 'group_message', room_id: currentRoom, text: text, image: currentImageBase64 || null }));
         }
-        messageInput.value = ''; currentImageBase64 = null; previewDiv.style.display = 'none'; imageInput.value = '';
+
+        messageInput.value = '';
+        currentImageBase64 = null;
+        previewDiv.style.display = 'none';
+        imageInput.value = '';
         messageInput.style.height = 'auto';
+        messageInput.focus();
     }
 
     function renderRooms() {
@@ -969,12 +978,23 @@
                 messageHistory[from].push({ sender:from, text, time });
                 if(currentAgent===from && (showToolCalls || !isToolMessage(text))) displayMessage(from,text,time);
                 else renderAgents();
-            } else if(data.type === 'group_message') {
-                const rid=data.room_id, from=data.from, text=data.text, time=new Date().toLocaleTimeString();
-                if(!roomMessages[rid]) roomMessages[rid]=[];
-                roomMessages[rid].push({ sender:from, text, time });
-                if(currentRoom===rid && (showToolCalls || !isToolMessage(text))) displayMessage(from,text,time);
-                else if(rooms[rid]) rooms[rid].unread=true;
+            } else if (data.type === 'group_message') {
+                const rid = data.room_id;
+                const from = data.from;
+                // 兼容两种字段：直接 text 或嵌套在 payload 中
+                let text = data.text;
+                if (data.payload && data.payload.text) text = data.payload.text;
+                if (!text) return;  // 无文本内容则忽略
+
+                const time = new Date().toLocaleTimeString();
+                if (!roomMessages[rid]) roomMessages[rid] = [];
+                roomMessages[rid].push({ sender: from, text, time });
+
+                if (currentRoom === rid && (showToolCalls || !isToolMessage(text))) {
+                    displayMessage(from, text, time);
+                } else if (rooms[rid]) {
+                    rooms[rid].unread = true;
+                }
                 renderRooms();
             } else if(data.type === 'room_members_update' || data.type === 'room_members') {  // 统一处理成员更新
                 const rid = data.room_id;

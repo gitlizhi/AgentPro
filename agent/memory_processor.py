@@ -132,7 +132,7 @@ def save_index(index: Dict):
         json.dump(index, f, indent=2, ensure_ascii=False)
 
 
-async def call_llm_to_summarize(raw_log: Dict) -> Dict:
+async def call_llm_to_summarize(raw_log: Dict, retry: int = 0) -> Dict:
     """
     调用 LLM 从原始日志中提取：
     - task_id (如果新任务则生成新ID)
@@ -193,9 +193,14 @@ async def call_llm_to_summarize(raw_log: Dict) -> Dict:
         result = json.loads(json_str)
     except json.JSONDecodeError as e:
         print(f"[ERROR] Failed to parse JSON from LLM: {e}\nRaw output: {content_str}")
+        # 出错后重试
+        if retry <= 2:
+            retry += 1
+            result = await call_llm_to_summarize(raw_log, retry)
         # 返回一个默认结构
-        result = {}
-    
+        else:
+            result = {}
+        
     # 确保必需字段存在（兜底）
     defaults = {
         "task_id": raw_log.get("step_id", f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),

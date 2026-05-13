@@ -56,6 +56,7 @@ class Hub:
                 logger.error(f"Failed to send to {target}: {e}")
         else:
             logger.warning(f"Target agent {target} not found")
+            await self.clients[sender].send(json.dumps({"error": f"Target agent {target} not found"}, ensure_ascii=False))
     
     async def handler(self, websocket: WebSocketServerProtocol):
         """处理每个客户端连接"""
@@ -82,10 +83,15 @@ class Hub:
                 elif data.get("type") == "create_room":
                     room_id = data.get("room_id")
                     creator = data.get("agent_id")
-                    async with self.db_pool.acquire() as conn:
-                        await conn.execute("INSERT INTO rooms (room_id) VALUES ($1) ON CONFLICT DO NOTHING", room_id)
-                        await conn.execute("INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2)", room_id,
-                                           creator)
+                    try:
+                        async with self.db_pool.acquire() as conn:
+                            await conn.execute("INSERT INTO rooms (room_id) VALUES ($1) ON CONFLICT DO NOTHING", room_id)
+                            await conn.execute("INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2)", room_id,
+                                               creator)
+                    except Exception as e:
+                        # 向创建者返回失败
+                        await websocket.send(json.dumps({"type": "room_created", "error": str(e)}))
+                        return
                     if room_id not in self.rooms:
                         self.rooms[room_id] = set()
                     self.rooms[room_id].add(creator)
@@ -195,7 +201,7 @@ class Hub:
                     if target_agent in self.clients:
                         await self.clients[target_agent].send(json.dumps({
                             "type": "message",
-                            "from": "system",
+                            "from": inviter,
                             "payload": {"text": f"你已被邀请加入群聊 {room_id}"}
                         }))
                 

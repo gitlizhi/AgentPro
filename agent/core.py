@@ -144,12 +144,16 @@ class Agent:
             await self.comm.send_to_agent(sender, {"text": f"处理出错: {e}"})
 
     async def _process_group_message(self, room_id, sender, user_input, image_data):
+        """处理群聊消息"""
         group_thread_id = f"group_{room_id}"
         mention = f"@{self.agent_id}"
         silent = mention not in user_input  # 未被点时静默
+        extra = '\n' + (f'[注意：当前消息为群聊消息，不是所有消息都需要进行回复，只回复与自己相关的消息'
+                        f'先判断是否需要回复这条消息，如需要回复，只能使用send_group_message回复这条群消息，'
+                        f'room_id是{room_id}，你已在群内，当前群聊内所有成员如下：{self._room_members.get(room_id, '无')}]')
         response = await self.brain.process(
             user_id=sender,
-            user_input=user_input + '\n' + f'[当前群聊内成员如下：{self._room_members.get(room_id, '无')}]',
+            user_input=user_input + extra,
             image_data=image_data,
             new_thread=False,
             thread_id_override=group_thread_id,
