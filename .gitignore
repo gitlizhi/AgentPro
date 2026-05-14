@@ -10,3 +10,4 @@
 /agent/skills/*
 agent/data/memories/*
 agent/data/pending/*
+/pgdata
