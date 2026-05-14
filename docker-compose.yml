@@ -1,0 +1,13 @@
+services:
+  postgres-with-vector:
+    image: pgvector/pgvector:pg15
+    container_name: my-pgvector-15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: root     # 替换为你的用户名
+      POSTGRES_PASSWORD: password_d5sjkl4jdl4r4ajslkda3jlda  # 替换为你的强密码
+      POSTGRES_DB: AgentPro       # 替换为你的数据库名
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data   # 数据将保存在当前目录下的 pgdata 文件夹

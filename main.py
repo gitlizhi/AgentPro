@@ -13,6 +13,7 @@ from agent.scheduler import init_scheduler
 from agent.communication import Communication
 from agent.tasks import set_reminder_comm
 from agent.tasks import consolidate_all_users
+from agent.skill_version_manager import consolidate_skills_job
 from config import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -59,7 +60,11 @@ async def main():
     # 创建提醒机器人的通讯实例
     async def dummy_handler(data):
         pass
-
+    
+    async def skill_consolidation_loop():
+        while True:
+            await consolidate_skills_job()
+            
     reminder_comm = Communication(
         agent_id="reminder_bot",
         hub_url=f"ws://{config.hub.hub_host}:{config.hub.hub_port}",
@@ -79,8 +84,10 @@ async def main():
 
     # 启动后台反思 Worker
     reflection_task = asyncio.create_task(reflection_worker())
+    # 启动遗忘巩固后台任务
+    consolidation_task = asyncio.create_task(skill_consolidation_loop())
     # 并发运行所有任务
-    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), reflection_task]
+    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), reflection_task, consolidation_task]
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:

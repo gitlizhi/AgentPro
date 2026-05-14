@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from agent.skill_version_manager import create_new_skill_version, update_skill_usage
 
 # 假设你的项目已有这些配置
 from config import config
@@ -146,6 +147,8 @@ async def create_skill_from_reflection(task_data: Dict, reflection: Dict) -> Opt
         )
 
     print(f"[SKILL] Created skill: {skill_name}")
+    # 使用版本管理创建新版本
+    await create_new_skill_version(skill_name, skill_doc, reflection.get("reflection", ""))
     return filename
 
 async def _generate_skill_document(task_description: str, steps: List[Dict],

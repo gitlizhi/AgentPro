@@ -28,8 +28,9 @@ from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
-from agent.reflection import init_chroma, submit_task_for_reflection, reflection_worker
+from agent.reflection import init_chroma, submit_task_for_reflection
 from agent.task_buffer import TaskBuffer
+from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
 from langchain_core.runnables import RunnableConfig
 import chromadb
 
@@ -131,7 +132,7 @@ class Brain:
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         # 自定义工具
         tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents] + room_tools
-        
+        tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
             tools=tools,
@@ -170,6 +171,10 @@ class Brain:
                 "3. 调用 `load_skill(skill_name, detail_level)` 获取技能详情，并按步骤执行。"
                 "执行任务时，每完成一个关键步骤，调用 `log_memory(step_description, result)` 记录。"
                 "当整个任务完成时，调用 `log_memory(final_summary, result, task_complete=True)` 来触发经验沉淀。"
+                "你有能力管理和升级自己的技能库："
+                "- 使用 `skill_stats` 查看技能使用情况。"
+                "- 当你发现某个技能可以改进时，可以使用 `upgrade_skill` 提交新版本。"
+                "- 系统会自动遗忘长期不用的低价值技能。"
                 "当你需要执行多步骤任务时，请将内部推理过程放在 < thinking >...< / thinking > 标签内。"
                 "这些标签内的内容不会被发送给其他 Agent，只有标签外的内容才会被作为回复发送。"
                 "在与其他 Agent 辩论或协作时，你可自由选择是否要回复对方的消息，避免陷入无限循环交流模式。"

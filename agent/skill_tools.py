@@ -6,7 +6,8 @@
 import json
 from pathlib import Path
 from typing import List, Dict
-
+from agent.skill_version_manager import (get_skill_latest_version, get_skill_file_path, create_new_skill_version,
+                                   update_skill_usage, load_manifest, compute_skill_value)
 from langchain.tools import tool
 
 # 假设你的 reflection 模块中已有技能目录和向量集合
@@ -45,22 +46,28 @@ async def list_skills() -> str:
     return "可用的技能列表：\n" + "\n".join(skills)
 
 @tool
-async def load_skill(skill_name: str, detail_level: str = "basic") -> str:
+async def load_skill(skill_name: str, version: str = "latest", detail_level: str = "basic") -> str:
     """
-    加载指定技能的详细信息。detail_level 可选：
-    - basic: 仅名称和描述（约 50 tokens）
-    - intermediate: 描述 + 触发条件 + 注意事项（约 200 tokens）
-    - full: 完整步骤 + 示例代码（约 1000+ tokens）
+    加载指定技能的详细信息。
+    version 可以是 'latest' 或具体版本号如 '2'
+    detail_level 可选：
+        - basic: 仅名称和描述（约 50 tokens）
+        - intermediate: 描述 + 触发条件 + 注意事项（约 200 tokens）
+        - full: 完整步骤 + 示例代码（约 1000+ tokens）
     """
-    skill_file = SKILLS_DIR / f"{skill_name}.md"
-    if not skill_file.exists():
-        # 尝试模糊匹配
-        candidates = list(SKILLS_DIR.glob(f"*{skill_name}*.md"))
-        if not candidates:
-            return f"未找到技能 '{skill_name}'。"
-        skill_file = candidates[0]
-
-    content = skill_file.read_text(encoding="utf-8")
+    if version == "latest":
+        ver = get_skill_latest_version(skill_name)
+    else:
+        ver = int(version)
+    if not ver:
+        return f"技能 {skill_name} 未找到"
+    filepath = get_skill_file_path(skill_name, ver)
+    if not filepath.exists():
+        return f"技能 {skill_name} 版本 {ver} 不存在"
+        
+    # 更新使用统计（假设加载成功）
+    update_skill_usage(skill_name, success=True)  # 这里简单认为加载即成功，更精确可在工具调用后由 Agent 反馈
+    content = filepath.read_text(encoding='utf-8')
 
     if detail_level == "basic":
         # 提取 name 和 description
@@ -99,3 +106,33 @@ async def search_skills(query: str, n: int = 3) -> str:
         output += f"- {skill_name}: {doc[:200]}...\n"
     return output
 
+
+@tool
+async def skill_stats(skill_name: str) -> str:
+    """查看技能的使用统计和版本历史"""
+    manifest = load_manifest()
+    if skill_name not in manifest["skills"]:
+        return f"未找到技能 {skill_name}"
+    data = manifest["skills"][skill_name]
+    return f"""
+        技能: {skill_name}
+        最新版本: v{data['latest_version']}
+        总使用次数: {data.get('total_uses', 0)}
+        成功次数: {data.get('success_count', 0)}
+        失败次数: {data.get('fail_count', 0)}
+        最后使用: {data.get('last_used', '从未')}
+        价值分数: {compute_skill_value(data)}
+        版本历史: {data.get('version_history', [])}
+        """
+
+@tool
+async def upgrade_skill(skill_name: str, new_content: str, changelog: str) -> str:
+    """手动创建新版本技能（由 Agent 或管理员调用）"""
+    new_ver = await create_new_skill_version(skill_name, new_content, changelog)
+    return f"技能 {skill_name} 已升级到 v{new_ver}"
+
+@tool
+async def report_skill_result(skill_name: str, success: bool) -> str:
+    """报告技能执行结果，用于更新统计"""
+    update_skill_usage(skill_name, success)
+    return "已记录"

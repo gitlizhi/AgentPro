@@ -743,7 +743,7 @@
         const threadId = `private_${agentId}_super_user`;
         const history = await loadHistory(threadId);
         if(!messageHistory[agentId]) messageHistory[agentId] = [];
-        for(let msg of history) messageHistory[agentId].push({ sender: msg.role === 'user' ? '我' : agentId, text: msg.content, time: new Date(msg.created_at).toLocaleTimeString() });
+        for(let msg of history) messageHistory[agentId].push({ sender: msg.role === 'user' ? '我' : agentId, text: msg.content, time: new Date(msg.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' }) });
     }
 
     function renderAgents() {
