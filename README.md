@@ -9,6 +9,8 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 - **长期记忆**：使用 ChromaDB 向量数据库存储用户事实，并同步为可读的 Markdown 文件，支持智能去重和整理。
 - **记忆转经验**：复杂任务处理后，可将处理步骤，踩坑经历转为经验，下次处理类似任务，可从经验中提取，显著提升智能体处理速度，让智能体越来越聪明。
 - **意图识别**：利用大模型对用户输入进行分类（聊天、复杂任务、设置提醒、查询提醒等），并提取关键参数，快速响应。
+- **多智能体协作**：智能体可复制多个实例并行运行，且多个实例可通过通信协议进行通信，实现共同协作。
+- **群聊功能**：目前已经可以创建群聊，并将指定智能体拉入群内进行任务派发和协作。
 - **定时提醒**：集成 APScheduler，支持用户设置一次性提醒，到期自动发送通知。
 - **人机协作**：新增人机协作功能，在执行关键的操作时，会主动触发HITL，可以让人类确认后再进行操作，提高安全性。
 - **主动思考与沟通**：后台任务定期生成内在想法，结合记忆和近期对话，可在不繁忙时，偶尔主动与用户互动。
@@ -22,7 +24,7 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 - **数据库**：PostgreSQL（短期记忆、提醒存储）、ChromaDB（长期记忆）、SQLAlchemy（APScheduler 作业存储）
 - **消息通信**：WebSockets（自定义 Hub）
 - **调度器**：APScheduler (AsyncIOExecutor)
-- **模型**：智谱 AI（GLM-4.7, GLM-4.6v, GLM-4-Flash），支持 OpenAI 兼容格式
+- **模型**：DeepSeek-v4-flash  智谱 AI（GLM-4.7, GLM-4.6v, GLM-4-Flash），支持 OpenAI 兼容格式
 - **异步运行时**：Python 3.12+，asyncio
 
 ## 🚀 快速开始
@@ -56,6 +58,8 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
       POSTGRES_URI=postgresql://user:password@localhost:5432/agentpro  
       # 智谱 AI API 密钥
       ZHIPU_API_KEY=your_api_key_here
+      # DEEPSEEK_API_KEY
+      DEEPSEEK_API_KEY=sk-f06c5acb0axxxxxxxxxxx
       # Hub 配置
       HUB_HOST=localhost
       HUB_PORT=8765
@@ -83,25 +87,34 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
    │   ├── communication.py         # WebSocket 通信
    │   ├── db.py                    # 数据库连接池
    │   ├── memory.py                # 长期记忆（ChromaDB + Markdown）
-   │   ├── memory_consolidation.py  # 记忆整理（去重、合并）
+   │   ├── memory_consolidation.py  # 记忆整理（长期记忆去重、合并）
    │   ├── scheduler.py             # APScheduler 调度器
    │   ├── tasks.py                 # 后台任务（发送提醒、记忆整理）
    │   ├── utils.py                 # 工具函数（模型调用）
+   │   ├── reflection.py            # 反思模块 
+   │   ├── sandboxed_backend.py     # docker沙箱环境 
+   │   ├── skill_tools.py           # 技能检索工具
+   │   ├── skill_version_manager.py # 技能版本管理类
+   │   ├── task_buffer.py           # 任务缓存区
    │   ├── intent.py                # 意图枚举和描述
    │   ├── model_config.py          # 模型配置管理
    │   └── skills/                  # 技能目录（按需加载）
    │   └── data/                    # 记忆转经验（按需加载，渐进式披露）
    │       ├── memories/            # 过往经验目录
    │       ├── pengding/            # 待处理经验
+   │       ├── pengding_tasks/      # 待处理任务
+   │       ├── skills/              # 可复用skill
+   │       ├── skills_archive/      # 可复用skill
+   │       ├── reflections/         # 纯反思记录
    ├── hub/                         # 消息 Hub
    │   └── server.py
    ├── agent_memory/                # 长期记忆 Markdown 文件
    ├── chroma_db/                   # ChromaDB 持久化目录
-   ├── client.py                       # 客户端
+   ├── client.py                    # 客户端后端代码
    ├── .env.example                 # 环境变量示例
    ├── main.py                      # 应用入口
-   ├── start_project.bat                  # 一键启动脚本
-   ├── stop_project.bat                  # 停止脚本
+   ├── start_project.bat            # 一键启动脚本（Windows）
+   ├── stop_project.bat             # 一键停止脚本（Windows）
    ├── clean_checkpoints.py         # 清理短期记忆脚本
    ├── requirements.txt             # 依赖列表（可选）
    ├── pyproject.toml               # 项目配置（uv/pip）
@@ -132,13 +145,15 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 - 其他如 deepseek, claude, gemini 等可自行扩展。
 
 
-## 🧠 主动思考与内在自驱力
+## 🧠 主动思考与内在自驱力（暂时关闭了，也可打开）
 智能体每小时会随机生成一个想法，并可能主动向用户发送消息。这模拟了内在的思考能力，让智能体更像一个真正的伙伴。你可以在 brain.py 的 _generate_thought 方法中自定义思考类型和生成逻辑。
 
 ## 🗂️ 记忆系统
 - 短期记忆：由 checkpointer 自动保存每个对话线程的消息历史，支持重启恢复。
 
 - 长期记忆：通过 remember_fact 技能存储用户事实到 ChromaDB，并同步为 Markdown 文件（agent_memory/<user_id>.md）。每日凌晨3点（可在main.py更改时间）自动整理，使用大模型去重和合并相似事实。
+
+- 反思总结提炼经验： 智能体可对过去做过的复杂任务（不是所有任务）进行总结提炼出可复用的skill，减少重复任务的推理步骤。
 
 ## 📦 依赖管理
 
@@ -170,8 +185,21 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 ## 运行清理脚本（删除指定或所有短期记忆）：
 
    ```bash
-   python clean_checkpoints.py --all
-   python clean_checkpoints.py --thread "agent_17_super_user_xxx"
+      # 清除指定的短期记忆线程
+    python clean_checkpoints.py --thread "agent_17_super_user_e2746f03-5136-42b4-9982-0173d4957e87"
+    
+    # 清除所有短期记忆线程
+    python clean_checkpoints.py --all
+    
+    # 清除指定群聊房间及其成员、短期记忆
+    python clean_checkpoints.py --room "room_id"
+    
+    # 清除所有群聊房间、成员及短期记忆
+    python clean_checkpoints.py --clear-rooms
+    
+    # 清除指定智能体的聊天记录
+    python clean_checkpoints.py --agent agent_main
+   
    ```
 
 ## 🤝 贡献指南
@@ -197,7 +225,7 @@ LangChain 团队提供的强大框架
 
 deepagents 项目带来的技能系统灵感
 
-智谱 AI 提供的优秀模型 API
+DeepSeek、智谱 AI 提供的优秀模型 API
 
 
 
