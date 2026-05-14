@@ -27,8 +27,11 @@ from config import config
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
-from agent.tools import (log_memory, retrieve_memory, load_full_memory,
-                         update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents)
+from agent.tools import (launch_agent, stop_agent, stop_all_agents)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
+from agent.reflection import init_chroma, submit_task_for_reflection, reflection_worker
+from agent.task_buffer import TaskBuffer
+from langchain_core.runnables import RunnableConfig
+import chromadb
 
 import logging
 logging.getLogger('langgraph').setLevel(logging.DEBUG)
@@ -57,6 +60,8 @@ class Brain:
         self.recent_active_messages = {}  # AI主动发起的对话记录 格式 {user_id: {"content": str, "timestamp": datetime}}
         
         self.memory = get_memory() if use_long_term_memory else None
+        # # 初始化反思模块的向量库
+        init_chroma(self.memory.client)
         # 检查点
         if db_pool is None:
             from agent.db import get_pool
@@ -76,7 +81,8 @@ class Brain:
         self.sent_msg_ids_by_thread = {}  # thread_id -> set
         
         self._termination_cache = {}
-
+        # 任务缓冲模块
+        self.task_buffer = TaskBuffer()
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
         # root_dir = os.path.expanduser("~")  # 这会得到当前用户的家目录
@@ -124,8 +130,7 @@ class Brain:
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         # 自定义工具
-        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), log_memory, retrieve_memory, load_full_memory,
-                   update_memory_confidence, windows_automation, launch_agent, stop_agent, stop_all_agents] + room_tools
+        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents] + room_tools
         
         self.agent = create_deep_agent(
             model=self.model,
@@ -159,15 +164,12 @@ class Brain:
 
     def _build_system_prompt(self):
         base = (f"你是一个智能体，你的AgentID和名字都是 {self.agent_id}"
-                f"可以调用工具来完成任务,同时拥有长期记忆系统。在执行复杂任务时，请遵循以下规则："
-                "1. 开始新任务前，先调用 `retrieve_memory` 搜索相关经验，根据返回的摘要决定是否加载完整记忆。"
-                "2. 执行每个关键步骤后（工具调用、错误、用户反馈），调用 `log_memory` 记录原始日志。"
-                "3. 当你根据某条记忆成功解决问题后，调用 `update_memory_confidence` 增加该记忆的置信度；如果记忆导致失败，也调用该工具降低置信度。"
-                "4. 记忆库采用渐进式披露：先看摘要，需要细节才加载完整内容。"
-                # f"你当前的运行环境是{self.get_platform()}。"
-                # "当你不知道该如何处理任务时，可以尝试从skill中加载技能来辅助你完成任务。"
-                # "在调用工具或者skill之前，请先写下你的思考过程。"
-                # "如果工具调用出错，请分析错误原因，并尝试其他方法。"
+                "你拥有一个技能库，里面存放了过往成功任务的执行经验。当遇到新任务时，你可以："
+                "1. 调用 `list_skills` 查看有哪些可用技能。"
+                "2. 调用 `search_skills` 根据当前问题检索相关技能。"
+                "3. 调用 `load_skill(skill_name, detail_level)` 获取技能详情，并按步骤执行。"
+                "执行任务时，每完成一个关键步骤，调用 `log_memory(step_description, result)` 记录。"
+                "当整个任务完成时，调用 `log_memory(final_summary, result, task_complete=True)` 来触发经验沉淀。"
                 "当你需要执行多步骤任务时，请将内部推理过程放在 < thinking >...< / thinking > 标签内。"
                 "这些标签内的内容不会被发送给其他 Agent，只有标签外的内容才会被作为回复发送。"
                 "在与其他 Agent 辩论或协作时，你可自由选择是否要回复对方的消息，避免陷入无限循环交流模式。"
@@ -352,12 +354,10 @@ class Brain:
                     return await self._handle_set_reminder(reminders)
                 else:
                     return "未能理解提醒的时间和内容，请重新描述。"
-            elif intent == IntentType.COMPLEX_TASKS.value:
-                return await self._handle_complex_tasks(user_input, image_data, new_thread, silent)
             elif intent == IntentType.QUERY_REMINDER.value:
                 return await self._handle_query_reminder(user_id)
             else:
-                return await self._handle_chat(user_input, image_data, new_thread, silent)
+                return await self._handle_with_agent(user_input, image_data, new_thread, silent)
         finally:
             self.thread_id = original_thread_id
 
@@ -453,7 +453,7 @@ class Brain:
             result += f"- {dt} UTC：{row['message']}\n"
         return result
      
-    async def _handle_complex_tasks(self, user_input: str, image_data: str = None, new_thread: bool = False,
+    async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
                                     silent: bool = False):
         # 构建系统提示和消息（与原来保持一致）
         # 如果是 Agent 之间的对话，执行缓存合并逻辑
@@ -486,8 +486,10 @@ class Brain:
                 self.agent_msg_timer[self.user_id] = asyncio.create_task(delayed_process())
             return  # 等待定时器，不立即处理
         
+        
         chat_id = f'{self.agent_id}_{self.user_id}'
         self.get_thread_id(new_thread, chat_id)
+        self.task_buffer.start_task(self.thread_id, user_input)
         memories = []
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
@@ -912,6 +914,42 @@ class Brain:
         # return [create_room, join_room, leave_room, send_group_message]
         return [join_room, leave_room, send_group_message]
     
+    def _create_log_memory(self):
+        @tool
+        async def log_memory(step_description: str, result: str, task_complete: bool = False, config: RunnableConfig = None) -> str:
+            """
+            记录当前任务的执行步骤。
+            当 task_complete=True 时，将整个任务提交给反思模块进行离线分析。
+
+            :param step_description: 步骤描述
+            :param result: 执行结果
+            :param task_complete: 是否完成任务
+            :return: 提示信息
+            """
+            # 从 config 中提取 thread_id
+            thread_id = config.get("configurable", {}).get("thread_id") if config else None
+            if not thread_id:
+                return "错误：无法获取当前对话 ID。"
+            
+            self.task_buffer.add_step(thread_id, step_description, result)
+            
+            if task_complete:
+                final_result = "success" if "成功" in result else "failure"
+                task_data = self.task_buffer.finish_task(thread_id, final_result)
+                if task_data:
+                    # 启动后台任务（不等待）
+                    asyncio.create_task(self._process_reflection(task_data))
+                return f"步骤已记录，任务结束，将进行经验反思。"
+            else:
+                return "步骤已记录。"
+        
+        return log_memory
+    
+    async def _process_reflection(self, task_data):
+        """异步处理反思（避免在工具内部阻塞）"""
+        from agent.reflection import submit_task_for_reflection
+        await asyncio.to_thread(submit_task_for_reflection, task_data)
+        
     async def _load_sent_ids_from_checkpoint(self, config):
         """从 checkpoint 加载已发送的消息 ID 集合"""
         try:
@@ -973,7 +1011,7 @@ class Brain:
         now = time.time()
         if thread_id in self._termination_cache:
             result, timestamp = self._termination_cache[thread_id]
-            if now - timestamp < 60:  # 60 秒内复用结果
+            if now - timestamp < 30:  # 30 秒内复用结果
                 return result
         
         history = await self._get_conversation_history_for_termination(thread_id, max_messages=20)

@@ -85,8 +85,8 @@ class Hub:
                     creator = data.get("agent_id")
                     try:
                         async with self.db_pool.acquire() as conn:
-                            await conn.execute("INSERT INTO rooms (room_id) VALUES ($1) ON CONFLICT DO NOTHING", room_id)
-                            await conn.execute("INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2)", room_id,
+                            await self._db_execute("INSERT INTO rooms (room_id) VALUES ($1) ON CONFLICT DO NOTHING", room_id)
+                            await self._db_execute("INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2)", room_id,
                                                creator)
                     except Exception as e:
                         # 向创建者返回失败
@@ -108,7 +108,7 @@ class Hub:
                         if not exists:
                             await websocket.send(json.dumps({"type": "error", "msg": "Room not found"}))
                             return
-                        await conn.execute(
+                        await self._db_execute(
                             "INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                             room_id, agent_id)
                     if room_id not in self.rooms:
@@ -129,11 +129,11 @@ class Hub:
                     room_id = data.get("room_id")
                     agent_id = data.get("agent_id")
                     async with self.db_pool.acquire() as conn:
-                        await conn.execute("DELETE FROM room_members WHERE room_id = $1 AND agent_id = $2", room_id,
+                        await self._db_execute("DELETE FROM room_members WHERE room_id = $1 AND agent_id = $2", room_id,
                                            agent_id)
-                        count = await conn.fetchval("SELECT COUNT(*) FROM room_members WHERE room_id = $1", room_id)
+                        count = await self._db_fetchval("SELECT COUNT(*) FROM room_members WHERE room_id = $1", room_id)
                         if count == 0:
-                            await conn.execute("DELETE FROM rooms WHERE room_id = $1", room_id)
+                            await self._db_execute("DELETE FROM rooms WHERE room_id = $1", room_id)
                     if room_id in self.rooms:
                         self.rooms[room_id].discard(agent_id)
                         if not self.rooms[room_id]:
@@ -191,7 +191,7 @@ class Hub:
                         return
                     # 将 target_agent 加入房间（如果尚未在）
                     async with self.db_pool.acquire() as conn:
-                        await conn.execute(
+                        await self._db_execute(
                             "INSERT INTO room_members (room_id, agent_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                             room_id, target_agent)
                     self.rooms[room_id].add(target_agent)
@@ -239,15 +239,27 @@ class Hub:
                 self.observers.discard(ws)
     
     async def init_db(self):
-        self.db_pool = await asyncpg.create_pool(config.db.postgres_uri)
+        self.db_pool = await asyncpg.create_pool(
+            config.db.postgres_uri,
+            min_size=2,                           # 保持少量热连接，避免频繁建连
+            max_size=10,                          # 根据并发量调整
+            max_queries=50000,                    # 每个连接执行 5w 次查询后自动关闭重建
+            max_inactive_connection_lifetime=300, # 空闲超过 5 分钟自动从池中移除
+            command_timeout=30,                   # 命令超时 30 秒
+            server_settings={
+                'tcp_keepalives_idle': '60',      # 60 秒空闲后发送 keepalive 探测
+                'tcp_keepalives_interval': '10',  # 探测间隔 10 秒
+                'tcp_keepalives_count': '6',      # 连续 6 次失败后断开连接
+            }
+        )
         async with self.db_pool.acquire() as conn:
-            await conn.execute("""
+            await self._db_execute("""
                 CREATE TABLE IF NOT EXISTS rooms (
                     room_id VARCHAR(255) PRIMARY KEY,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            await conn.execute("""
+            await self._db_execute("""
                 CREATE TABLE IF NOT EXISTS room_members (
                     room_id VARCHAR(255) REFERENCES rooms(room_id) ON DELETE CASCADE,
                     agent_id VARCHAR(255),
@@ -271,7 +283,42 @@ class Hub:
         for member in members:
             if member in self.clients:
                 await self.clients[member].send(message)
-                
+    
+    async def _db_execute(self, query, *args, retries=2):
+        """带重试的数据库执行，捕获 ConnectionDoesNotExistError"""
+        for attempt in range(retries):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    return await conn.execute(query, *args)
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                if attempt == retries - 1:
+                    raise
+                logger.warning(f"Database connection lost, retrying... (attempt {attempt + 1}/{retries})")
+                await asyncio.sleep(0.5)
+    
+    async def _db_fetch(self, query, *args, retries=2):
+        """带重试的 fetch"""
+        for attempt in range(retries):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    return await conn.fetch(query, *args)
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                if attempt == retries - 1:
+                    raise
+                await asyncio.sleep(0.5)
+    
+    async def _db_fetchval(self, query, *args, retries=2):
+        """带重试的 fetchval"""
+        for attempt in range(retries):
+            try:
+                async with self.db_pool.acquire() as conn:
+                    return await conn.fetchval(query, *args)
+            except asyncpg.exceptions.ConnectionDoesNotExistError as e:
+                if attempt == retries - 1:
+                    raise
+                await asyncio.sleep(0.5)
+    
+    
 async def main():
     hub = Hub()
     await hub.init_db()  # 创建连接池并加载现有群组到内存

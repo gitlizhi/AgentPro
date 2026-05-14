@@ -6,14 +6,13 @@ import sys
 import logging
 import uuid
 import argparse
-
+from agent.reflection import reflection_worker
 from agent.core import Agent
 from agent.db import init_db_pool, close_db_pool
 from agent.scheduler import init_scheduler
 from agent.communication import Communication
 from agent.tasks import set_reminder_comm
 from agent.tasks import consolidate_all_users
-from agent.memory_processor import memory_task
 from config import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -78,22 +77,22 @@ async def main():
         )
         agents.append(agent)
 
-    # 记忆整理任务
-    memory_task_obj = asyncio.create_task(memory_task())
-
+    # 启动后台反思 Worker
+    reflection_task = asyncio.create_task(reflection_worker())
     # 并发运行所有任务
-    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), memory_task_obj]
+    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), reflection_task]
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
+        # 取消后台任务
+        reflection_task.cancel()
+        try:
+            await reflection_task
+        except asyncio.CancelledError:
+            pass
         for agent in agents:
             await agent.stop()
         await reminder_comm.close()
-        memory_task_obj.cancel()
-        try:
-            await memory_task_obj
-        except asyncio.CancelledError:
-            pass
     finally:
         scheduler.shutdown()
         await close_db_pool()
