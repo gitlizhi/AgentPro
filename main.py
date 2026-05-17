@@ -14,6 +14,7 @@ from agent.communication import Communication
 from agent.tasks import set_reminder_comm
 from agent.tasks import consolidate_all_users
 from agent.skill_version_manager import consolidate_skills_job
+from agent.conversation_memory_extractor import conversation_memory_worker
 from config import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -81,20 +82,26 @@ async def main():
             db_pool=pool,
         )
         agents.append(agent)
-
+    # 启动对话记忆提取器（后台任务）
+    memory_extractor_task = asyncio.create_task(conversation_memory_worker())
     # 启动后台反思 Worker
     reflection_task = asyncio.create_task(reflection_worker())
     # 启动遗忘巩固后台任务
     consolidation_task = asyncio.create_task(skill_consolidation_loop())
     # 并发运行所有任务
-    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), reflection_task, consolidation_task]
+    tasks = [agent.run() for agent in agents] + [reminder_comm.connect(), reflection_task, consolidation_task, memory_extractor_task]
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         # 取消后台任务
         reflection_task.cancel()
+        memory_extractor_task.cancel()
         try:
             await reflection_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await memory_extractor_task
         except asyncio.CancelledError:
             pass
         for agent in agents:
