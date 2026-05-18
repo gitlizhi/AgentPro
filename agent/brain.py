@@ -119,14 +119,26 @@ class Brain:
             }
         )
         
-        # research_subagent = {
-        #     "name": "research-agent",
-        #     "description": "Used to research more in depth questions",
-        #     "system_prompt": "You are a great researcher",
-        #     "tools": [TavilySearch(max_results=5)],
-        #     # "model": self.model,  # Optional override, defaults to main agent model
-        # }
-        # subagents = [research_subagent]
+        # ========== 新增：反思子代理定义 ==========
+        REFLECTION_SUBAGENT_PROMPT = """你是一个严格的反思者。分析主代理上一步的执行结果，判断是否存在以下问题：
+        1. 信息不完整（数值缺失、来源不明）
+        2. 逻辑矛盾
+        3. 偏离原始目标
+        4. 需要额外信息才能继续
+
+        如果一切正常，只输出 "OK"。
+        如果发现问题，输出一个 JSON 对象，格式如下：
+        {"issue": "问题描述", "suggestion": "修正建议（应能转化为一个新的待办步骤）"}
+
+        不要输出其他内容。"""
+        
+        reflection_subagent = SubAgent(
+            name="reflector",
+            description="用于反思主代理的上一步执行结果，检查信息完整性、逻辑一致性，并给出修正建议。",
+            system_prompt=REFLECTION_SUBAGENT_PROMPT,
+            tools=[],  # 反思子代理不需要额外工具，只用自身推理
+        )
+        # ========== 反思子代理定义结束 ==========
         
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
@@ -141,7 +153,7 @@ class Brain:
             backend=self.docker_backend,
             skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
-            # subagents=subagents,
+            subagents=[reflection_subagent],  # 在线反思子代理
             interrupt_on={
                 "windows_automation": {"allowed_decisions": ["approve", "reject"]},
                 "launch_agent": {"allowed_decisions": ["approve", "reject"]},
@@ -181,12 +193,26 @@ class Brain:
                 "如判断为不需要回复，直接输出[停止交流]即可。"
                 "如需要回复消息，直接输出你的观点或反驳，不要输出“让我检索记忆”、“好的，我准备好了”等旁白。"
                 )
-        instructions = """
-        注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
-        例如：
-        - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
-        不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
+        # ========== 新增：反思使用指导 ==========
+        reflection_guide = """
+        ##  在线反思机制
+        每当你完成一个**关键工具调用**（如搜索、文件写入、代码执行、窗口操作）并获得结果后，**必须**调用 `task` 工具将结果交给 `reflector` 子代理进行反思。
+
+        调用格式：
+        ```json
+        task(subagent_name="reflector", description="反思上一步动作, 上一步动作：{动作描述}\\n结果：{工具返回内容}\\n请检查是否有问题。")
+        如果子代理返回 "OK"，则继续执行下一个待办步骤。
+
+        如果子代理返回 {"issue": "...", "suggestion": "..."}，则你需要根据 suggestion 修改你的待办列表（例如插入一个新步骤或重试当前步骤），然后再继续。
+        
+        注意：同一个动作最多反思 2 次，避免无限循环。
         """
+        # instructions = """
+        # 注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
+        # 例如：
+        # - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
+        # 不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
+        # """
         # extra = """
         # 当你需要操作电脑上的应用程序时（如打开记事本、点击按钮、输入文字等），请使用 `windows_automation` 工具。
         # 该工具支持以下操作：start, connect, click, double_click, right_click, type, send_keys, select, get_text, set_text, wait, maximize, minimize, restore, close, screenshot, get_property, scroll, drag_drop, menu_select。
@@ -197,7 +223,8 @@ class Brain:
         #     - 点击控件：`windows_automation(action="click", title="微信", auto_id="...")`
         # """
         # return base + instructions + extra
-        return base + instructions
+        # return base + instructions
+        return base + reflection_guide
     
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
