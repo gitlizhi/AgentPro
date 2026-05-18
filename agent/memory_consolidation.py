@@ -68,23 +68,61 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
     except Exception as e:
         # print(f" LLM去重失败: {e}，使用简单去重")
         return list(set(facts))
+    
 
 async def consolidate_user_memory(user_id: str):
-    """异步整理单个用户的记忆"""
+    """
+    增量整理用户的事实记忆（不影响事件记忆）
+    1. 从 Markdown 获取所有原始事实
+    2. LLM 去重合并
+    3. 对比向量库中已有的 type="fact" 文档，增量删除/新增
+    """
     memory = get_memory()
+    coll = memory._get_collection(user_id)
     markdown_path = os.path.join(memory.markdown_dir, f"{user_id}.md")
 
-    facts = await extract_facts_from_markdown(markdown_path)  # 注意 await
-    if not facts:
+    # 1. 从 Markdown 提取所有事实（原始，未去重）
+    raw_facts = await extract_facts_from_markdown(markdown_path)
+    if not raw_facts:
         return
 
-    unique_facts = await deduplicate_facts_with_llm(facts)  # await 异步去重
+    # 2. LLM 去重合并
+    unique_facts = await deduplicate_facts_with_llm(raw_facts)
 
-    memory.clear_user_memory(user_id)
+    # 3. 获取当前向量库中所有 type="fact" 的文档（id, content）
+    existing_facts = {}  # id -> content
+    # 分页获取，避免数据量大时超时
+    limit = 1000
+    offset = 0
+    while True:
+        result = coll.get(
+            where={"type": "fact"},
+            limit=limit,
+            offset=offset,
+            include=["documents", "metadatas"]
+        )
+        if not result['ids']:
+            break
+        for id_, doc in zip(result['ids'], result['documents']):
+            existing_facts[id_] = doc
+        if len(result['ids']) < limit:
+            break
+        offset += limit
 
-    if unique_facts:
-        memory.add_facts_batch(unique_facts, user_id, {"source": "consolidated"})
+    # 4. 计算差异
+    existing_contents = set(existing_facts.values())
+    new_contents = set(unique_facts)
 
-    write_facts_to_markdown(markdown_path, unique_facts)  # 同步写入
+    to_delete_ids = [id_ for id_, content in existing_facts.items() if content not in new_contents]
+    to_add_contents = [c for c in new_contents if c not in existing_contents]
 
-    # print(f" 用户 {user_id} 记忆整理完成：{len(facts)} -> {len(unique_facts)} 条")
+    # 5. 执行增量更新
+    if to_delete_ids:
+        coll.delete(ids=to_delete_ids)
+        print(f"[CONSOLIDATE] Deleted {len(to_delete_ids)} old facts for user {user_id}")
+    if to_add_contents:
+        memory.add_facts_batch(to_add_contents, user_id, {"source": "consolidated"})
+        print(f"[CONSOLIDATE] Added {len(to_add_contents)} new facts for user {user_id}")
+
+    # 6. 重写 Markdown 文件，与最终事实列表保持一致
+    write_facts_to_markdown(markdown_path, unique_facts)

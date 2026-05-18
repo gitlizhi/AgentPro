@@ -39,8 +39,9 @@ class LongTermMemory:
             metadatas=[metadata],
             ids=[doc_id]
         )
-        # 同步到 Markdown
-        self._sync_to_markdown(user_id, content, metadata)
+        # 只有用户的事实信息才同步到 Markdown，event事件存入向量库，但不存markdown文件
+        if metadata.get("type") == "fact":
+            self._sync_to_markdown(user_id, content, metadata)
         return doc_id
 
     def query_relevant(self, query: str, user_id: str, n_results: int = 5) -> List[Dict[str, Any]]:
@@ -154,8 +155,8 @@ class LongTermMemory:
             metadatas=metadatas,
             ids=ids
         )
-        # 同步到 Markdown 文件（可选）
-        self._append_to_markdown(user_id, facts, metadatas)
+        if metadata.get("type") == "fact":
+            self._append_to_markdown(user_id, facts, metadatas)
     
     def _append_to_markdown(self, user_id: str, facts: List[str], metadatas: List[dict]):
         """将批量事实追加到用户的 Markdown 记忆文件中"""
