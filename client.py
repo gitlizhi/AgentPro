@@ -115,8 +115,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 target = message.get("to")
                 decision = message.get("decision")
                 tool = message.get("tool")
+                tool_call_id = message.get("tool_call_id")
                 edited_args = message.get("edited_args")
-                command = f"/{decision} {tool}"
+                command = f"/{decision} {tool_call_id}"
                 if edited_args:
                     command += f" {json.dumps(edited_args)}"
                 await hub_ws.send(json.dumps({
@@ -230,7 +231,8 @@ async def connect_to_hub():
                                     "from": payload.get("from"),
                                     "tool": payload.get("tool"),
                                     "args": payload.get("args"),
-                                    "allowed": payload.get("allowed")
+                                    "allowed": payload.get("allowed"),
+                                    "tool_call_id": payload.get("tool_call_id"),
                                 })
                         else:
                             cleaned = clean_agent_response(text)

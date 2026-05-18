@@ -27,7 +27,7 @@ from config import config
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
-from agent.tools import (launch_agent, stop_agent, stop_all_agents)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
+from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
 from agent.reflection import init_chroma, submit_task_for_reflection
 from agent.task_buffer import TaskBuffer
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
@@ -143,7 +143,7 @@ class Brain:
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         # 自定义工具
-        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents] + room_tools
+        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl] + room_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -569,7 +569,10 @@ class Brain:
                 if interrupt_data:
                     # 处理中断
                     decisions = await self._process_interrupts(interrupt_data)
-                    command = decisions[0] if decisions else None
+                    if decisions:
+                        command = {"decisions": decisions}
+                    else:
+                        command = None
                     break
                 else:
                     # 正常消息：遍历所有节点输出中的 messages
@@ -650,7 +653,7 @@ class Brain:
                 if "__interrupt__" in event:
                     interrupts = event["__interrupt__"]
                     decisions = await self._process_interrupts(interrupts)
-                    command = decisions[0] if decisions else None
+                    command = decisions if decisions else None
                     break
                 else:
                     if "messages" in event:
@@ -863,37 +866,38 @@ class Brain:
                 tool_args = action.get("args")
                 config = next((cfg for cfg in review_configs if cfg["action_name"] == tool_name), {})
                 allowed = config.get("allowed_decisions", ["approve", "reject"])
+                # 为每个工具生成唯一 ID
+                tool_call_id = action.get("id") or f"{tool_name}_{uuid.uuid4()}"
                 # 发送审批请求给前端，带上 from 字段（当前 Agent ID）
                 msg = {
                     "type": "approval_request",
                     "from": self.agent_id,  # 关键：指明发起者
                     "tool": tool_name,
                     "args": tool_args,
-                    "allowed": allowed
+                    "allowed": allowed,
+                    "tool_call_id": tool_call_id,
                 }
                 await self.comm.send_to_agent(self.user_id, msg)
                 # 等待用户决策
-                decision = await self._wait_for_user_decision(tool_name)
+                decision = await self._wait_for_user_decision(tool_call_id)
                 decisions.append(decision)
         return decisions
     
-    async def _wait_for_user_decision(self, tool_name: str):
+    async def _wait_for_user_decision(self, tool_call_id: str):
         future = asyncio.get_event_loop().create_future()
-        self._pending_approvals[tool_name] = future
+        self._pending_approvals[tool_call_id] = future  # 用唯一 ID 存储
         try:
-            decision = await asyncio.wait_for(future, timeout=60)  # 60秒超时
+            decision = await asyncio.wait_for(future, timeout=60)
             return decision
         except asyncio.TimeoutError:
-            print(f"等待审批超时: {tool_name}")
-            return {"type": "reject"}  # 超时默认拒绝
+            return {"type": "reject"}
     
-    async def _complete_approval(self, tool_name: str, decision):
-        # print(f"[DEBUG] Completing approval for {tool_name}, pending keys: {list(self._pending_approvals.keys())}")
-        if tool_name in self._pending_approvals:
-            self._pending_approvals[tool_name].set_result(decision)
-            del self._pending_approvals[tool_name]
+    async def _complete_approval(self, tool_call_id: str, decision):
+        if tool_call_id in self._pending_approvals:
+            self._pending_approvals[tool_call_id].set_result(decision)
+            del self._pending_approvals[tool_call_id]
         else:
-            print(f"[WARN] No pending approval for {tool_name}")
+            print(f"[WARN] No pending approval for {tool_call_id}")
     
     def _create_send_to_agent_tool(self):
         @tool
@@ -905,6 +909,8 @@ class Brain:
             :return: 发送成功的标志
             示例: send_to_agent(target_agent_id='debater', message='现在请开始反驳。')
             """
+            if message and '[停止交流]' in message:
+                return f'已和 {target_agent_id} 停止交流'
             await self.comm.send_to_agent(target_agent_id, {"text": message})
             return f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
         return send_to_agent

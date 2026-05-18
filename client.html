@@ -1151,7 +1151,7 @@
                 renderRooms();
                 if(currentRoom === data.room_id) ws.send(JSON.stringify({ type:'get_room_members', room_id: data.room_id }));
             } else if(data.type === 'approval_request') {
-                pendingApproval = { tool:data.tool, args:data.args, allowed:data.allowed, fromAgent:data.from };
+                pendingApproval = { tool:data.tool, args:data.args, allowed:data.allowed, fromAgent:data.from, tool_call_id: data.tool_call_id };
                 approvalContentDiv.innerHTML = `<strong>🔐 工具调用需要审批</strong><br>工具: ${escapeHtml(data.tool)}<br>参数: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>允许操作: ${data.allowed.join(', ')}`;
                 modalOverlay.classList.add('active');
             }
@@ -1160,10 +1160,10 @@
     }
 
     function closeApprovalModal() { modalOverlay.classList.remove('active'); editArgsInput.style.display='none'; submitEditBtn.style.display='none'; editBtn.style.display='inline-block'; pendingApproval=null; }
-    approveBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'approve' })); closeApprovalModal(); } };
-    rejectBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'reject' })); closeApprovalModal(); } };
+    approveBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'approve', tool_call_id: pendingApproval.tool_call_id})); closeApprovalModal(); } };
+    rejectBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'reject', tool_call_id: pendingApproval.tool_call_id })); closeApprovalModal(); } };
     editBtn.onclick = () => { editArgsInput.style.display='block'; submitEditBtn.style.display='inline-block'; editBtn.style.display='none'; editArgsInput.value = JSON.stringify(pendingApproval.args, null, 2); };
-    submitEditBtn.onclick = () => { try{ const edited = JSON.parse(editArgsInput.value); ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'edit', edited_args:edited })); closeApprovalModal(); } catch(e){ alert('JSON 格式错误'); } };
+    submitEditBtn.onclick = () => { try{ const edited = JSON.parse(editArgsInput.value); ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'edit', edited_args:edited, tool_call_id: pendingApproval.tool_call_id })); closeApprovalModal(); } catch(e){ alert('JSON 格式错误'); } };
     closeApprovalBtn.onclick = closeApprovalModal;
 
     createRoomBtn.onclick = () => { const rid=createRoomInput.value.trim(); if(rid){ ws.send(JSON.stringify({ type:'create_room', room_id:rid, target_agent:'super_user' })); createRoomInput.value=''; } };

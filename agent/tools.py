@@ -623,14 +623,15 @@ async def stop_agent(agent_name: str) -> str:
     except Exception as e:
         return f"终止失败: {e}"
 
-@tool
-async def stop_all_agents() -> str:
+@tool(name_or_callable='stop_all_agents', description="终止所有已启动的子 Agent。")
+async def stop_all_agents_impl() -> str:
     """终止所有已启动的子 Agent。"""
     stopped = []
     for name in list(_spawned_agents.keys()):
         result = await stop_agent(name)
         stopped.append(name)
     return f"已终止以下 Agent: {', '.join(stopped)}"
+
 
 # 全局记录由 launch_agent 启动的子进程
 _spawned_agents = {}  # {agent_name: {"pid": int, "process": subprocess.Popen}}

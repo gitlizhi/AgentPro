@@ -112,4 +112,4 @@ async def main():
         await close_db_pool()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())# 启动2个智能体，1个负责搜索资料，整理文件，1个负责针对资料生成可视化报告。

@@ -49,33 +49,30 @@ class Agent:
                     asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
                     return
                 if user_input.startswith("/approve"):
-                    tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
-                    decision = {"decisions": [{"type": "approve"}]}
-                    await self.brain._complete_approval(tool_name, decision)
+                    tool_call_id = user_input.split()[1] if len(user_input.split()) > 1 else None
+                    decision = {"type": "approve"}
+                    await self.brain._complete_approval(tool_call_id, decision)
                     return
                 
                 elif user_input.startswith("/reject"):
-                    tool_name = user_input.split()[1] if len(user_input.split()) > 1 else None
-                    decision = {"decisions": [{"type": "reject"}]}
-                    await self.brain._complete_approval(tool_name, decision)
+                    tool_call_id = user_input.split()[1] if len(user_input.split()) > 1 else None
+                    decision = {"type": "reject"}
+                    await self.brain._complete_approval(tool_call_id, decision)
                     return
                 
                 elif user_input.startswith("/edit"):
                     parts = user_input.split(maxsplit=2)
-                    tool_name = parts[1] if len(parts) > 1 else None
+                    tool_call_id = parts[1] if len(parts) > 1 else None
                     edited_args = json.loads(parts[2]) if len(parts) > 2 else None
                     decision = {
-                        "decisions": [
-                            {
                                 "type": "edit",
                                 "edited_action": {
-                                    "name": tool_name,
+                                    "name": tool_call_id,
                                     "args": edited_args
                                 }
                             }
-                        ]
-                    }
-                    await self.brain._complete_approval(tool_name, decision)
+
+                    await self.brain._complete_approval(tool_call_id, decision)
                     return
                 # 普通消息：后台处理，不阻塞
                 asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))

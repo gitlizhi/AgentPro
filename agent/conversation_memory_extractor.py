@@ -16,8 +16,7 @@ from config import config
 
 # ---------- 配置 ----------
 EXTRACT_INTERVAL_SECONDS = 300       # 每5分钟扫描一次
-MIN_MESSAGES_BEFORE_EXTRACT = 6      # 至少积累6条消息才触发提取（避免频繁调用LLM）
-LOOKBACK_DAYS = 1                    # 只处理最近1天内有活动的线程
+MIN_MESSAGES_BEFORE_EXTRACT = 20     # 至少积累20条消息才触发提取（避免频繁调用LLM）
 
 # 全局状态：记录每个 (user_id, thread_id) 上次提取的消息数量或时间
 _last_extract_info = {}  # key: (user_id, thread_id) -> {"last_msg_count": int, "last_extract_time": datetime}
@@ -77,7 +76,7 @@ async def extract_memories_from_conversation(messages: List[Dict]) -> Dict[str, 
     prompt = f"""
 你是一个智能记忆提取器。请分析以下对话，提取两种信息：
 
-1. **语义事实**：用户的长期偏好、个人信息、重要约定等。每条用简短句子描述。
+1. **语义事实**：用户的长期偏好、个人信息、重要约定等，只记录关于用户的信息，每条用简短句子描述。
 2. **事件记忆**：智能体执行的重要任务、动作、结果以及用户的反馈。每条应包含：做了什么、结果如何（成功/失败）、用户是否满意。
 
 输出格式为 JSON 对象：
