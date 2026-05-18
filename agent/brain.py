@@ -207,12 +207,12 @@ class Brain:
         
         注意：同一个动作最多反思 2 次，避免无限循环。
         """
-        # instructions = """
-        # 注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
-        # 例如：
-        # - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
-        # 不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
-        # """
+        instructions = """
+        注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
+        例如：
+        - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
+        不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
+        """
         # extra = """
         # 当你需要操作电脑上的应用程序时（如打开记事本、点击按钮、输入文字等），请使用 `windows_automation` 工具。
         # 该工具支持以下操作：start, connect, click, double_click, right_click, type, send_keys, select, get_text, set_text, wait, maximize, minimize, restore, close, screenshot, get_property, scroll, drag_drop, menu_select。
@@ -224,7 +224,7 @@ class Brain:
         # """
         # return base + instructions + extra
         # return base + instructions
-        return base + reflection_guide
+        return base + reflection_guide + instructions
     
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""

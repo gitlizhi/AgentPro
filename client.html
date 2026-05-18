@@ -345,37 +345,149 @@
         .message {
             display: flex;
             flex-direction: column;
-            max-width: 80%;
+            max-width: 85%;
             animation: messageSlide 0.3s ease-out;
         }
         .message.self {
             align-self: flex-end;
         }
         .message-meta {
-            font-size: 0.85rem;
+            font-size: 0.7rem;
             font-weight: 500;
             margin-bottom: 4px;
             margin-left: 12px;
             color: #A5B4FC;
+            letter-spacing: 0.3px;
         }
         .message.self .message-meta {
             text-align: right;
             margin-right: 12px;
         }
         .bubble {
-            padding: 10px 18px;
-            border-radius: 20px;
-            background: rgba(30, 41, 59, 0.7);
+            padding: 12px 20px;
+            border-radius: 24px;
+            background: rgba(30, 41, 59, 0.8);
             backdrop-filter: blur(4px);
-            border: 1px solid rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.08);
             color: #E0E7FF;
             word-wrap: break-word;
             font-size: 0.9rem;
-            line-height: 1.45;
+            line-height: 1.5;
+            transition: 0.1s;
         }
         .message.self .bubble {
             background: linear-gradient(135deg, #8B5CF6, #06B6D4);
             border: none;
+            box-shadow: 0 2px 8px rgba(139,92,246,0.3);
+        }
+        
+        /* ========= 统一 Markdown 渲染样式，解决字体大小不一致问题 ========= */
+        .bubble * {
+            font-size: inherit;
+            line-height: inherit;
+        }
+        .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
+            margin: 0.6em 0 0.3em;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+        .bubble h1 { font-size: 1.3rem; }
+        .bubble h2 { font-size: 1.2rem; }
+        .bubble h3 { font-size: 1.1rem; }
+        .bubble h4, .bubble h5, .bubble h6 { font-size: 1rem; }
+        .bubble p {
+            margin: 0.5em 0;
+        }
+        .bubble ul, .bubble ol {
+            margin: 0.4em 0 0.6em 1.5em;
+            padding-left: 0;
+        }
+        .bubble li {
+            margin: 0.2em 0;
+            line-height: 1.45;
+        }
+        .bubble code {
+            font-family: 'SF Mono', 'Monaco', 'Cascadia Code', monospace;
+            background: rgba(0, 0, 0, 0.4);
+            padding: 0.2rem 0.4rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            color: #F0E6FF;
+            word-break: break-word;
+        }
+        .bubble pre {
+            background: #0A0E27;
+            padding: 0.75rem 1rem;
+            border-radius: 16px;
+            overflow-x: auto;
+            margin: 0.7em 0;
+            border: 1px solid rgba(139,92,246,0.3);
+        }
+        .bubble pre code {
+            background: none;
+            padding: 0;
+            font-size: 0.85rem;
+            color: #D4D6FF;
+            display: block;
+            line-height: 1.5;
+        }
+        .bubble blockquote {
+            border-left: 3px solid #8B5CF6;
+            margin: 0.6em 0;
+            padding-left: 1rem;
+            color: #C4D0FF;
+            font-style: normal;
+            background: rgba(139,92,246,0.05);
+            border-radius: 0 12px 12px 0;
+        }
+        .bubble a {
+            color: #06B6D4;
+            text-decoration: underline;
+            font-weight: 500;
+        }
+        .bubble img {
+            max-width: 100%;
+            border-radius: 16px;
+            margin: 0.5rem 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .bubble table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 0.6rem 0;
+            font-size: 0.85rem;
+            background: rgba(0,0,0,0.2);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        .bubble th, .bubble td {
+            border: 1px solid rgba(139,92,246,0.3);
+            padding: 8px 12px;
+            text-align: left;
+        }
+        .bubble th {
+            background: rgba(139,92,246,0.2);
+            font-weight: 600;
+        }
+        .bubble hr {
+            margin: 0.8em 0;
+            border: none;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, #8B5CF6, #06B6D4, transparent);
+        }
+        .bubble strong {
+            font-weight: 600;
+            color: #FFFFFF;
+        }
+        .bubble em {
+            font-style: italic;
+            color: #C9D6FF;
+        }
+        /* 优化工具消息视觉效果 */
+        .bubble:has(> strong:first-child:contains("🔧")), 
+        .bubble:has(> p:first-child:contains("🔧")) {
+            background: rgba(236,72,153,0.15);
+            border-left: 3px solid #EC4899;
         }
 
         .input-zone {
@@ -395,6 +507,7 @@
             background: rgba(0,0,0,0.35);
             border-radius: 32px;
             border: 1px solid rgba(255,255,255,0.1);
+            transition: 0.1s;
         }
         .input-box:focus-within {
             border-color: #8B5CF6;
@@ -409,7 +522,7 @@
             font-size: 0.85rem;
             outline: none;
             resize: none;
-            font-family: inherit;
+            font-family: 'Exo 2', monospace;
         }
         .btn-group {
             display: flex;
@@ -424,15 +537,26 @@
             font-size: 1.1rem;
             cursor: pointer;
             color: #A5B4FC;
+            transition: 0.1s;
+        }
+        .icon-btn:hover {
+            background: rgba(139,92,246,0.3);
+            color: white;
         }
         #sendBtn {
             background: linear-gradient(135deg, #8B5CF6, #06B6D4);
             border: none;
-            padding: 0 20px;
+            padding: 0 24px;
             border-radius: 40px;
-            font-weight: 500;
+            font-weight: 600;
             color: white;
             cursor: pointer;
+            font-size: 0.85rem;
+            transition: 0.1s;
+        }
+        #sendBtn:hover {
+            transform: scale(0.98);
+            box-shadow: 0 0 10px rgba(139,92,246,0.6);
         }
         .preview-bar {
             display: flex;
@@ -453,9 +577,10 @@
             font-size: 0.65rem;
             color: #A5B4FC;
             margin-top: 10px;
+            letter-spacing: 0.5px;
         }
 
-        /* 审批弹窗优化（滚动） */
+        /* 审批弹窗优化 */
         .modal-overlay {
             position: fixed;
             top: 0;
@@ -518,7 +643,7 @@
             color: #E0E7FF;
             border-left: 3px solid #8B5CF6;
             max-height: 300px;
-            overflow-y: auto;    /* 关键: 参数过多滚动 */
+            overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-word;
         }
@@ -563,7 +688,7 @@
         }
 
         /* 快捷输入浮层 */
-        .suggest-dropdown {
+        .suggest-dropdown, .invite-dropdown {
             position: absolute;
             bottom: 70px;
             left: 30px;
@@ -575,6 +700,12 @@
             width: 220px;
             z-index: 300;
             box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+        }
+        .invite-dropdown {
+            left: auto;
+            right: 20px;
+            bottom: auto;
+            top: 70px;
         }
         .suggest-item {
             padding: 8px 16px;
@@ -589,6 +720,32 @@
         @keyframes messageSlide {
             from { opacity: 0; transform: translateY(10px); }
             to { opacity: 1; transform: translateY(0); }
+        }
+        /* 代码块复制按钮 */
+        .bubble pre {
+            position: relative;
+            overflow: visible;
+        }
+        .copy-code-btn {
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            background: rgba(139, 92, 246, 0.7);
+            border: none;
+            color: white;
+            font-size: 0.7rem;
+            padding: 4px 10px;
+            border-radius: 20px;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+            font-weight: 500;
+            transition: 0.1s;
+            z-index: 5;
+            font-family: 'Exo 2', monospace;
+        }
+        .copy-code-btn:hover {
+            background: #8B5CF6;
+            transform: scale(0.96);
         }
     </style>
 </head>
@@ -654,7 +811,7 @@
         </div>
     </div>
 
-    <!-- 右侧成员面板（仅群聊显示） -->
+    <!-- 右侧成员面板 -->
     <div class="members-panel" id="membersPanel" style="display: none;">
         <div class="members-panel-header">
             👥 群成员
@@ -736,7 +893,6 @@
     function escapeHtml(str) { if(!str) return ''; return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
     function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
 
-    // 历史记录 (保留原逻辑)
     async function saveMessage(threadId, role, content) { try { await fetch('/chat/history', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ thread_id:threadId, role, content }) }); } catch(e){} }
     async function loadHistory(threadId) { try { const resp = await fetch(`/chat/history?thread_id=${encodeURIComponent(threadId)}&limit=200`); return await resp.json(); } catch(e){ return []; } }
     async function loadAgentHistory(agentId) {
@@ -773,6 +929,7 @@
     function loadMessages(agentId) {
         messagesDiv.innerHTML = '';
         (messageHistory[agentId] || []).forEach(msg => { if(!showToolCalls && isToolMessage(msg.text)) return; displayMessage(msg.sender, msg.text, msg.time); });
+        addCopyButtonsToCodeBlocks();
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
@@ -783,6 +940,7 @@
         const rendered = marked.parse(text);
         msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(isSelf ? '我' : sender)} · ${escapeHtml(time || new Date().toLocaleTimeString())}</div><div class="bubble">${rendered}</div>`;
         messagesDiv.appendChild(msgDiv);
+        addCopyButtonsToCodeBlocks();
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
@@ -801,7 +959,6 @@
             ws.send(JSON.stringify({ type: 'send', to: currentAgent, text, image: currentImageBase64 || null, new_thread: newThread }));
         }
         else if (currentRoom) {
-            // 群聊：立即显示自己的消息
             if (!roomMessages[currentRoom]) roomMessages[currentRoom] = [];
             roomMessages[currentRoom].push({ sender: '我', text, time });
             displayMessage('我', text, time);
@@ -843,10 +1000,10 @@
     function loadRoomMessages(roomId) {
         messagesDiv.innerHTML = '';
         (roomMessages[roomId] || []).forEach(msg => { if(!showToolCalls && isToolMessage(msg.text)) return; displayMessage(msg.sender, msg.text, msg.time); });
+        addCopyButtonsToCodeBlocks();
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
-    // 成员面板更新函数，对 super_user 特殊处理
     function updateMembersPanel(members) {
         membersListDiv.innerHTML = '';
         if (!members || members.length === 0) {
@@ -859,7 +1016,6 @@
             let displayName = m;
             let avatar = '🤖';
             if (m === 'super_user') {
-                // 用户自己：WebSocket 连接正常即在线
                 isOnline = isWsConnected;
                 displayName = '我';
                 avatar = '👤';
@@ -882,7 +1038,6 @@
     function showMembersPanel() { membersPanel.style.display = 'flex'; }
     function hideMembersPanel() { membersPanel.style.display = 'none'; }
 
-    // 邀请Agent下拉
     function showInviteDropdown() {
         if(!currentRoom) return;
         const existing = rooms[currentRoom]?.members || [];
@@ -892,7 +1047,6 @@
         if(dropdown) dropdown.remove();
         const div = document.createElement('div');
         div.className = 'invite-dropdown';
-        div.style.position = 'absolute'; div.style.top = '70px'; div.style.right = '20px';
         div.innerHTML = `<h4 style="padding:8px 12px; color:#06B6D4;">邀请加入</h4>`;
         available.forEach(ag => {
             const item = document.createElement('div');
@@ -909,13 +1063,11 @@
         setTimeout(() => document.addEventListener('click', function remove(e){ if(!div.contains(e.target) && e.target !== inviteAgentBtn) { div.remove(); document.removeEventListener('click', remove); } }), 10);
     }
 
-    // 快捷输入 @ 和 /
     let suggestDropdown = null;
     function closeSuggest() { if(suggestDropdown) { suggestDropdown.remove(); suggestDropdown = null; } }
     function showSuggest(items, onSelect) {
         closeSuggest();
         const rect = messageInput.getBoundingClientRect();
-        const containerRect = document.querySelector('.input-zone').getBoundingClientRect();
         const div = document.createElement('div');
         div.className = 'suggest-dropdown';
         items.forEach(item => {
@@ -938,7 +1090,6 @@
         const lastAtIndex = beforeCursor.lastIndexOf('@');
         const lastSlash = beforeCursor.lastIndexOf('/');
         if(lastAtIndex !== -1 && lastAtIndex === beforeCursor.length - 1) {
-            const query = '';
             const availableAgents = agents.filter(a => a !== 'super_user');
             showSuggest(availableAgents, (selected) => {
                 const newVal = val.slice(0, lastAtIndex) + '@' + selected + ' ' + val.slice(cursorPos);
@@ -956,7 +1107,6 @@
     });
     messageInput.addEventListener('blur', () => setTimeout(closeSuggest, 200));
 
-    // WebSocket
     function connect() {
         ws = new WebSocket(`ws://${window.location.host}/ws`);
         ws.onopen = () => { connStatusSpan.innerText = '● 已连接'; connStatusSpan.style.color = '#06B6D4'; ws.send(JSON.stringify({ type:'list_rooms' })); updateMembersPanel(rooms[currentRoom]?.members || []);};
@@ -967,10 +1117,7 @@
                 onlineAgentsSet.clear();
                 agents.forEach(a => onlineAgentsSet.add(a));
                 renderAgents();
-                // 刷新当前群聊的成员面板
-                if (currentRoom && rooms[currentRoom]) {
-                    updateMembersPanel(rooms[currentRoom].members);
-                }
+                if (currentRoom && rooms[currentRoom]) updateMembersPanel(rooms[currentRoom].members);
             } else if(data.type === 'message') {
                 const from=data.from, text=data.text, time=new Date().toLocaleTimeString();
                 saveMessage(`private_${from}_super_user`, 'assistant', text);
@@ -981,22 +1128,15 @@
             } else if (data.type === 'group_message') {
                 const rid = data.room_id;
                 const from = data.from;
-                // 兼容两种字段：直接 text 或嵌套在 payload 中
-                let text = data.text;
-                if (data.payload && data.payload.text) text = data.payload.text;
-                if (!text) return;  // 无文本内容则忽略
-
+                let text = data.text || (data.payload?.text);
+                if (!text) return;
                 const time = new Date().toLocaleTimeString();
                 if (!roomMessages[rid]) roomMessages[rid] = [];
                 roomMessages[rid].push({ sender: from, text, time });
-
-                if (currentRoom === rid && (showToolCalls || !isToolMessage(text))) {
-                    displayMessage(from, text, time);
-                } else if (rooms[rid]) {
-                    rooms[rid].unread = true;
-                }
+                if (currentRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time);
+                else if (rooms[rid]) rooms[rid].unread = true;
                 renderRooms();
-            } else if(data.type === 'room_members_update' || data.type === 'room_members') {  // 统一处理成员更新
+            } else if(data.type === 'room_members_update' || data.type === 'room_members') {
                 const rid = data.room_id;
                 const members = data.members;
                 if(!rooms[rid]) rooms[rid] = { members: [], unread: false };
@@ -1016,7 +1156,7 @@
                 modalOverlay.classList.add('active');
             }
         };
-        ws.onclose = () => { connStatusSpan.innerText = '● 断开重连'; connStatusSpan.style.color='#EC4899'; setTimeout(connect,3000); if (currentRoom) {updateMembersPanel(rooms[currentRoom]?.members || []);}};
+        ws.onclose = () => { connStatusSpan.innerText = '● 断开重连'; connStatusSpan.style.color='#EC4899'; setTimeout(connect,3000); if (currentRoom) updateMembersPanel(rooms[currentRoom]?.members || []);};
     }
 
     function closeApprovalModal() { modalOverlay.classList.remove('active'); editArgsInput.style.display='none'; submitEditBtn.style.display='none'; editBtn.style.display='inline-block'; pendingApproval=null; }
@@ -1037,6 +1177,41 @@
     messageInput.addEventListener('input', function() { this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,100)+'px'; });
     inviteAgentBtn.onclick = showInviteDropdown;
 
+    // 为所有代码块添加复制按钮
+    function addCopyButtonsToCodeBlocks() {
+        const messageContainers = document.querySelectorAll('.message .bubble');
+        messageContainers.forEach(container => {
+            const pres = container.querySelectorAll('pre');
+            pres.forEach(pre => {
+                // 避免重复添加按钮
+                if (pre.querySelector('.copy-code-btn')) return;
+                // 只对包含 code 的 pre 添加
+                const codeElem = pre.querySelector('code');
+                if (!codeElem) return;
+
+                const btn = document.createElement('button');
+                btn.className = 'copy-code-btn';
+                btn.innerText = '复制';
+                btn.onclick = async (e) => {
+                    e.stopPropagation();
+                    const code = codeElem.innerText;
+                    try {
+                        await navigator.clipboard.writeText(code);
+                        btn.innerText = '已复制!';
+                        setTimeout(() => { btn.innerText = '复制'; }, 1500);
+                    } catch (err) {
+                        btn.innerText = '失败';
+                        setTimeout(() => { btn.innerText = '复制'; }, 1500);
+                    }
+                };
+                // 确保 pre 定位方式支持绝对定位子元素
+                if (getComputedStyle(pre).position === 'static') {
+                    pre.style.position = 'relative';
+                }
+                pre.appendChild(btn);
+            });
+        });
+    }
     connect();
 </script>
 </body>
