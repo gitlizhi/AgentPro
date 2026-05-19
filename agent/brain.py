@@ -487,7 +487,6 @@ class Brain:
      
     async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
                                     silent: bool = False):
-        # 构建系统提示和消息（与原来保持一致）
         # 如果是 Agent 之间的对话，执行缓存合并逻辑
         if self.user_id != 'super_user':
             # 取消已有的定时器（新消息到来，重新计时）
@@ -521,7 +520,14 @@ class Brain:
         
         chat_id = f'{self.agent_id}_{self.user_id}'
         self.get_thread_id(new_thread, chat_id)
-        self.task_buffer.start_task(self.thread_id, user_input)
+        
+        # ========== 修改：智能创建/更新任务 ==========
+        existing_task = self.task_buffer.get_current_task(self.thread_id)
+        if existing_task is None:
+            self.task_buffer.start_task(self.thread_id, user_input)
+        else:
+            # 已有任务，只记录步骤并刷新活跃时间
+            self.task_buffer.add_step(self.thread_id, "用户继续输入（补充信息或修正指令）", user_input[:500])
         memories = []
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
@@ -605,6 +611,13 @@ class Brain:
                                     tool_result = f"🛠️ 工具返回: {msg.content}"
                                     await self.comm.send_to_agent(self.user_id, {"text": tool_result})
                                     sent_ids.add(msg_id)
+                                    # 获取工具名称（可以从 msg.name 或 context 中，这里简单从 sent_ids 推断）
+                                    tool_name = getattr(msg, 'name', 'unknown_tool')
+                                    self.task_buffer.add_step(
+                                        self.thread_id,
+                                        f"调用工具： {tool_name}",
+                                        msg.content[:500],  # 截断过长结果
+                                    )
             
             else:
                 # 没有中断，流正常结束
@@ -614,6 +627,14 @@ class Brain:
         chat_id = f'{self.agent_id}_{self.user_id}'
         self.get_thread_id(new_thread, chat_id)
         
+        # ===== 新增：记录收到的消息（有助于任务活跃检测） =====
+        if hasattr(self, 'task_buffer') and self.thread_id:
+            self.task_buffer.add_step(
+                self.thread_id,
+                f"收到来自 {self.user_id} 的消息",
+                user_input[:500]
+            )
+            
         # ---- 新增终止检查 ----
         if await self._should_terminate_conversation(self.thread_id):
             print(f"对话 {self.thread_id} 被判定为死循环，终止处理。")
@@ -665,6 +686,12 @@ class Brain:
                                     sent_ids.add(msg_id)
                                     # 发送给目标 Agent（self.user_id 是其他 Agent ID）
                                     await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                                    # ===== 新增：记录本 Agent 发送的消息 =====
+                                    self.task_buffer.add_step(
+                                        self.thread_id,
+                                        f"向 {self.user_id} 发送消息",
+                                        msg.content[:500]
+                                    )
             else:
                 break
                 
@@ -918,6 +945,11 @@ class Brain:
     async def close(self):
         for task in self.agent_msg_timer.values():
             task.cancel()
+        for thread_id, task in list(self.task_buffer.buffers.items()):
+            if task.get("status") == "in_progress":
+                idle = time.time() - task.get("last_active_time", 0)
+                if idle > 3600:  # 1小时无活动
+                    self.task_buffer.finish_task(thread_id, "timeout", user_feedback="任务因长时间无活动而终止")
     
     def _create_room_tools(self):
         # @tool
@@ -1045,6 +1077,11 @@ class Brain:
         判断指定 thread_id 的对话是否应终止。
         返回 True 表示应终止，False 表示可继续。
         """
+        # ===== 新增：如果有进行中且未超时的任务，不允许终止 =====
+        if hasattr(self, 'task_buffer') and self.task_buffer.has_active_task(thread_id, min_rounds=8, max_idle_seconds=600):
+            logger.debug(f"Thread {thread_id} has active task, skip termination")
+            return False
+        
         # 限频缓存（在类中增加属性 self._termination_cache: dict）
         now = time.time()
         if thread_id in self._termination_cache:
@@ -1055,10 +1092,23 @@ class Brain:
         history = await self._get_conversation_history_for_termination(thread_id, max_messages=20)
         if len(history) < 10:  # 对话太短，不判断
             return False
+            
+        # 获取任务信息
+        task = self.task_buffer.get_current_task(thread_id)
+        task_context = ""
+        if task:
+            steps = task.get("steps", [])
+            completed = len(steps)
+            description = task.get("task_description", "未知")
+            task_context = (f"当前进行中的任务：{description}，已执行 {completed} 步。"
+                            f"请根据对话历史判断任务是否仍在有序推进，或者已经陷入无意义的重复循环。"
+                            f"如果对话明显重复、无新信息，即使任务未完成也应该终止。")
         
         # 构造提示词（使用你之前的设计）
         prompt = f"""
             你是一个专业的“对话终止判断器”。分析以下两个智能体之间的对话历史，判断是否应该终止（防止死循环）。
+
+            {task_context}
         
             终止标准（满足任一即应终止）：
             1. 内容重复：同样的句子、观点或问题出现两次以上。

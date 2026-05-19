@@ -158,6 +158,11 @@ class Agent:
         )
         if not silent and response:
             await self.comm.send_to_room(room_id,{"text": response})
+            self.brain.task_buffer.add_step(
+                group_thread_id,
+                f"在群聊 {room_id} 中回复了 {sender}",
+                response[:500]
+            )
     
     async def _periodic_think(self):
         while self._running:
