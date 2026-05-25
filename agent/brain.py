@@ -29,6 +29,7 @@ from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
 from agent.reflection import init_chroma, submit_task_for_reflection
+from agent.browser_tools import browser, close_browser_session
 from agent.task_buffer import TaskBuffer
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
 from langchain_core.runnables import RunnableConfig
@@ -143,7 +144,7 @@ class Brain:
         # 2. 指定技能目录路径 (相对于 backend 的根目录)
         skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
         # 自定义工具
-        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl] + room_tools
+        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -157,6 +158,7 @@ class Brain:
             interrupt_on={
                 "windows_automation": {"allowed_decisions": ["approve", "reject"]},
                 "launch_agent": {"allowed_decisions": ["approve", "reject"]},
+                # "browser": {"allowed_decisions": ["approve", "reject"]},
             },
             middleware=[
                     SummarizationMiddleware(
@@ -181,8 +183,8 @@ class Brain:
                 "1. 调用 `list_skills` 查看有哪些可用技能。"
                 "2. 调用 `search_skills` 根据当前问题检索相关技能。"
                 "3. 调用 `load_skill(skill_name, detail_level)` 获取技能详情，并按步骤执行。"
-                "执行任务时，每完成一个关键步骤，调用 `log_memory(step_description, result)` 记录。"
-                "当整个任务完成时，调用 `log_memory(final_summary, result, task_complete=True)` 来触发经验沉淀。"
+                "执行任务时，每完成一个关键步骤，调用 `log_memory(description, result)` 记录。"
+                "当整个任务完成时，调用 `log_memory(description, result, task_complete=True)` 来触发经验沉淀。"
                 "你有能力管理和升级自己的技能库："
                 "- 使用 `skill_stats` 查看技能使用情况。"
                 "- 当你发现某个技能可以改进时，可以使用 `upgrade_skill` 提交新版本。"
@@ -207,6 +209,39 @@ class Brain:
         
         注意：同一个动作最多反思 2 次，避免无限循环。
         """
+        browser_guide = """
+        ##  内置浏览器
+        你拥有一个内置浏览器工具 `browser`，可以控制 Chromium 浏览器进行网页操作。
+        支持以下操作：
+        - `browser(action="navigate", url="...")` — 打开网页
+        - `browser(action="click", selector="...")` — 点击元素
+        - `browser(action="type", selector="...", text="...")` — 输入文本
+        - `browser(action="screenshot")` — 截图查看当前页面
+        - `browser(action="get_content")` — 获取页面 HTML
+        - `browser(action="get_text", selector="...")` — 获取可见文本
+        - `browser(action="execute_js", code="...")` — 执行 JavaScript
+        - `browser(action="scroll", direction="down")` — 滚动页面
+        - `browser(action="go_back")` / `browser(action="go_forward")` — 前进后退
+        - `browser(action="refresh")` — 刷新页面
+        - `browser(action="wait", selector="...")` — 等待元素
+        - `browser(action="get_url")` / `browser(action="get_title")` — 获取 URL/标题
+        - `browser(action="get_elements", selector="...")` — 列出匹配元素
+        - `browser(action="press_key", key="Enter")` — 按键
+        - `browser(action="hover", selector="...")` — 悬停
+        - `browser(action="select_option", selector="...", value="...")` — 下拉选择
+
+        选择器支持 CSS（"#id", ".class"）、文本（"text=登录"）、role（"role=button[name='提交']"）、XPath（"//button"）。
+        浏览器状态（cookie、登录态）在操作之间会自动保持。
+        当网页内容复杂时，先用 screenshot 查看页面，再用 get_elements 查找可交互元素。
+
+        ##  验证码处理
+        浏览器窗口对用户可见。如果页面标题或内容包含「验证码」「captcha」「滑块」「verify」等关键词，说明触发了反爬验证。
+        此时你应该：
+        1. 告知用户遇到了验证码，请用户在浏览器窗口中手动完成验证
+        2. 等待几秒后调用 screenshot 检查是否通过
+        3. 验证通过后（cookie 已持久化），后续访问同一网站通常不会再触发
+        不要反复尝试绕过验证码（如换 URL、移动端等），这只会浪费步骤。直接请用户帮忙最快。
+        """
         instructions = """
         注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
         例如：
@@ -224,7 +259,7 @@ class Brain:
         # """
         # return base + instructions + extra
         # return base + instructions
-        return base + reflection_guide + instructions
+        return base + reflection_guide + browser_guide + instructions
     
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
@@ -950,6 +985,7 @@ class Brain:
                 idle = time.time() - task.get("last_active_time", 0)
                 if idle > 3600:  # 1小时无活动
                     self.task_buffer.finish_task(thread_id, "timeout", user_feedback="任务因长时间无活动而终止")
+        await close_browser_session()
     
     def _create_room_tools(self):
         # @tool
@@ -986,12 +1022,12 @@ class Brain:
     
     def _create_log_memory(self):
         @tool
-        async def log_memory(step_description: str, result: str, task_complete: bool = False, config: RunnableConfig = None) -> str:
+        async def log_memory(description: str, result: str, task_complete: bool = False, config: RunnableConfig = None) -> str:
             """
-            记录当前任务的执行步骤。
+            记录当前任务的执行步骤或最终总结。
             当 task_complete=True 时，将整个任务提交给反思模块进行离线分析。
 
-            :param step_description: 步骤描述
+            :param description: 步骤描述或任务总结
             :param result: 执行结果
             :param task_complete: 是否完成任务
             :return: 提示信息
@@ -1000,8 +1036,8 @@ class Brain:
             thread_id = config.get("configurable", {}).get("thread_id") if config else None
             if not thread_id:
                 return "错误：无法获取当前对话 ID。"
-            
-            self.task_buffer.add_step(thread_id, step_description, result)
+
+            self.task_buffer.add_step(thread_id, description, result)
             
             if task_complete:
                 final_result = "success" if "成功" in result else "failure"
@@ -1111,7 +1147,7 @@ class Brain:
             {task_context}
         
             终止标准（满足任一即应终止）：
-            1. 内容重复：同样的句子、观点或问题出现两次以上。
+            1. 内容重复：某一个人同样的句子、观点或问题出现两次以上。
             2. 逻辑循环：对话形成闭环，反复问相同问题。
             3. 无新信息：连续 3 轮及以上没有引入新信息。
             4. 目标已达成：上下文隐含目标已实现。

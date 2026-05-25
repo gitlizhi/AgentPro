@@ -1,5 +1,6 @@
 .env
 .venv
+.claude
 /tmp
 /agent_memory
 /backendDir
@@ -11,3 +12,5 @@
 /agent/data/*
 /agent/chroma_db/*
 /pgdata
+/screenshots
+/browser_data
