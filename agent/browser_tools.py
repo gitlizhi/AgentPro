@@ -36,7 +36,7 @@ SCREENSHOT_DIR = Path(__file__).parent.parent / "screenshots"
 
 
 def _install_chromium():
-    """自动安装 Playwright Chromium 浏览器（已有则跳过）。"""
+    """自动安装 Playwright Chromium 浏览器（已有则跳过）。返回 True 表示安装成功。"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -46,14 +46,18 @@ def _install_chromium():
         )
         if result.returncode == 0:
             logger.info("Chromium 浏览器已就绪")
+            return True
         else:
             logger.warning(
                 f"Chromium 安装可能失败 (code={result.returncode}): {result.stderr.strip()}"
             )
+            return False
     except subprocess.TimeoutExpired:
         logger.warning("Chromium 安装超时，将尝试继续启动")
+        return False
     except Exception as e:
         logger.warning(f"自动安装 Chromium 时出错: {e}，将尝试继续启动")
+        return False
 
 
 def _cleanup_old_screenshots(days: int = 7):
@@ -97,8 +101,8 @@ class BrowserSession:
             # 首次使用时自动安装 Chromium
             global _chromium_checked
             if not _chromium_checked:
-                _install_chromium()
-                _chromium_checked = True
+                if _install_chromium():
+                    _chromium_checked = True
 
             try:
                 from playwright.sync_api import sync_playwright
@@ -434,32 +438,12 @@ async def browser(
     wait_until: str = "domcontentloaded",
 ) -> str:
     """
-    内置浏览器操作工具。支持网页导航、点击、输入、截图、读取内容、执行JS等。
-    浏览器会话在首次调用时自动启动，状态（cookie等）在工具调用之间保持。
+    内置浏览器工具，基于 Chromium 持久化会话，支持 17 种网页操作。
+    首次使用前请调用 load_skill("browser-automation") 获取完整说明和选择器指南。
 
-    常用操作:
-    - navigate: 导航到URL。参数: url (必需), wait_until (可选, 默认"domcontentloaded")
-    - click: 点击元素。参数: selector (必需, 支持CSS/text=/xpath=/role=选择器)
-    - type: 输入文本。参数: selector, text (必需), clear_first (可选, 默认True)
-    - screenshot: 截图。参数: full_page (可选, 默认False)
-    - get_content: 获取完整HTML。无额外参数
-    - get_text: 获取可见文本。参数: selector (可选, 不传则获取全部)
-    - execute_js: 执行JS。参数: code (必需, JS代码字符串)
-    - scroll: 滚动页面。参数: direction (up/down/top/bottom), amount (像素)
-    - go_back / go_forward: 浏览器前进后退
-    - refresh: 刷新页面
-    - wait: 等待。参数: selector (等待元素) 或 timeout (等待毫秒)
-    - select_option: 下拉选择。参数: selector, value
-    - press_key: 按键。参数: key (如"Enter", "Escape", "Tab")
-    - hover: 悬停。参数: selector
-    - get_url / get_title: 获取当前URL/标题
-    - get_elements: 列出匹配元素。参数: selector, limit (默认20)
-
-    选择器写法示例:
-    - CSS: "#id", ".class", "button.submit", "input[name='q']"
-    - 文本: "text=登录", "text=搜索"
-    - role: "role=button[name='提交']"
-    - XPath: "//button[@type='submit']"
+    操作(action): navigate/click/type/screenshot/get_content/get_text/execute_js/
+                  scroll/go_back/go_forward/refresh/wait/select_option/press_key/
+                  hover/get_url/get_title/get_elements
     """
     session = _get_browser_session()
 

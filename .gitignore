@@ -8,7 +8,6 @@
 *.log
 *.json
 *.md
-/agent/skills/*
 /agent/data/*
 /agent/chroma_db/*
 /pgdata

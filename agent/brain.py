@@ -136,9 +136,7 @@ class Brain:
             tools=[],  # 反思子代理不需要额外工具，只用自身推理
         )
         # ========== 反思子代理定义结束 ==========
-        
-        # 2. 指定技能目录路径 (相对于 backend 的根目录)
-        skills_dir = "/agent/skills/"  # 注意：路径以 "/" 开头，相对于 backend 的 root_dir
+
         # 自定义工具
         tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
@@ -148,7 +146,6 @@ class Brain:
             system_prompt=self._build_system_prompt() if custom_system_prompt is None else custom_system_prompt,
             # backend=backend,
             backend=self.docker_backend,
-            skills=[str(skills_dir)],
             checkpointer=self.checkpointer,
             subagents=[reflection_subagent],  # 在线反思子代理
             interrupt_on={

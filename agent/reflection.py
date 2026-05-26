@@ -38,7 +38,7 @@ _chroma_client = None
 _skill_collection = None
 
 def init_chroma(client):
-    """初始化向量库（在应用启动时调用一次）"""
+    """初始化向量库（在应用启动时调用一次），并将内置技能索引到向量库。"""
     global _chroma_client, _skill_collection
     if not _chroma_client or not _skill_collection:
         _chroma_client = client
@@ -46,6 +46,75 @@ def init_chroma(client):
         _skill_collection = _chroma_client.get_or_create_collection(
             name="agent_skills",
             metadata={"hnsw:space": "cosine"}
+        )
+        _index_builtin_skills()
+
+
+def _index_builtin_skills():
+    """将内置技能（agent/skills/）索引到 ChromaDB，使 search_skills 能搜到所有技能。"""
+    import json as _json
+    builtin_dir = Path(__file__).parent / "skills"
+    if not builtin_dir.exists():
+        return
+    for skill_dir in builtin_dir.iterdir():
+        if not skill_dir.is_dir():
+            continue
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            continue
+        content = skill_md.read_text(encoding='utf-8')
+        if not content.startswith("---"):
+            continue
+        parts = content.split("---", 2)
+        if len(parts) < 2:
+            continue
+        frontmatter = parts[1]
+        name = ""
+        description = ""
+        triggers = []
+        lines = frontmatter.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if line.startswith("name:"):
+                name = line.split(":", 1)[1].strip()
+            elif line.startswith("description:"):
+                description = line.split(":", 1)[1].strip()
+            elif line.startswith("triggers:"):
+                triggers_str = line.split(":", 1)[1].strip()
+                if triggers_str:
+                    try:
+                        triggers = _json.loads(triggers_str)
+                    except (_json.JSONDecodeError, TypeError):
+                        triggers = [triggers_str.strip("[]'\"")]
+                else:
+                    i += 1
+                    while i < len(lines):
+                        item_line = lines[i].strip()
+                        if item_line.startswith("- "):
+                            triggers.append(item_line[2:].strip().strip("'\""))
+                            i += 1
+                        elif item_line == "" or item_line.startswith(("#", "version:", "license:")):
+                            break
+                        else:
+                            break
+                    continue
+            i += 1
+
+        if not name:
+            continue
+
+        doc_id = f"builtin_{name}"
+        embed_text = f"技能名称：{name}\n触发词：{', '.join(triggers)}\n描述：{description}"
+        _skill_collection.upsert(
+            documents=[embed_text],
+            metadatas=[{
+                "type": "skill",
+                "skill_name": name,
+                "source": "builtin",
+                "trigger_phrases": _json.dumps(triggers),
+            }],
+            ids=[doc_id]
         )
 
 def get_skill_collection():
