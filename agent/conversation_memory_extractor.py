@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
 
 from agent.utils import call_big_model_chat
+from agent.prompts import build_memory_extraction_prompt
 from agent.memory import get_memory
 from agent.db import get_pool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -73,26 +74,7 @@ async def extract_memories_from_conversation(messages: List[Dict]) -> Dict[str, 
         return {"facts": [], "events": []}
     if len(messages) > 30:
         messages = messages[-30:]
-    prompt = f"""
-你是一个智能记忆提取器。请分析以下对话，提取两种信息：
-
-1. **语义事实**：用户的长期偏好、个人信息、重要约定等，只记录关于用户的信息，每条用简短句子描述。
-2. **事件记忆**：智能体执行的重要任务、动作、结果以及用户的反馈。每条应包含：做了什么、结果如何（成功/失败）、用户是否满意。
-
-输出格式为 JSON 对象：
-{{
-  "facts": ["事实1", "事实2"],
-  "events": [
-    {{"summary": "事件描述", "outcome": "success/failure/neutral"}},
-    ...
-  ]
-}}
-
-如果没有某类信息，对应数组为空。
-
-对话：
-{json.dumps(messages, ensure_ascii=False, indent=2)}
-"""
+    prompt = build_memory_extraction_prompt(messages)
     response = await call_big_model_chat(prompt, model=config.model.default_model,
                                          temperature=0.2, is_json=True)
     content = response["choices"][0]["message"]["content"]

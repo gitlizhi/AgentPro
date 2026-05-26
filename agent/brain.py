@@ -23,11 +23,19 @@ from agent.scheduler import get_scheduler
 from agent.tasks import send_reminder
 from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
+from agent.prompts import (
+    REFLECTION_SUBAGENT_PROMPT,
+    build_brain_system_prompt,
+    build_reminder_detection_prompt,
+    build_intent_classification_prompt,
+    build_proactive_chat_prompt,
+    build_termination_judge_prompt,
+)
 from config import config
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
-from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)# log_memory, retrieve_memory, load_full_memory, update_memory_confidence, windows_automation,
+from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
 from agent.reflection import init_chroma, submit_task_for_reflection
 from agent.browser_tools import browser, close_browser_session
 from agent.task_buffer import TaskBuffer
@@ -121,18 +129,6 @@ class Brain:
         )
         
         # ========== 新增：反思子代理定义 ==========
-        REFLECTION_SUBAGENT_PROMPT = """你是一个严格的反思者。分析主代理上一步的执行结果，判断是否存在以下问题：
-        1. 信息不完整（数值缺失、来源不明）
-        2. 逻辑矛盾
-        3. 偏离原始目标
-        4. 需要额外信息才能继续
-
-        如果一切正常，只输出 "OK"。
-        如果发现问题，输出一个 JSON 对象，格式如下：
-        {"issue": "问题描述", "suggestion": "修正建议（应能转化为一个新的待办步骤）"}
-
-        不要输出其他内容。"""
-        
         reflection_subagent = SubAgent(
             name="reflector",
             description="用于反思主代理的上一步执行结果，检查信息完整性、逻辑一致性，并给出修正建议。",
@@ -178,88 +174,7 @@ class Brain:
             return "Unknown OS"
 
     def _build_system_prompt(self):
-        base = (f"你是一个智能体，你的AgentID和名字都是 {self.agent_id}"
-                "你拥有一个技能库，里面存放了过往成功任务的执行经验。当遇到新任务时，你可以："
-                "1. 调用 `list_skills` 查看有哪些可用技能。"
-                "2. 调用 `search_skills` 根据当前问题检索相关技能。"
-                "3. 调用 `load_skill(skill_name, detail_level)` 获取技能详情，并按步骤执行。"
-                "执行任务时，每完成一个关键步骤，调用 `log_memory(description, result)` 记录。"
-                "当整个任务完成时，调用 `log_memory(description, result, task_complete=True)` 来触发经验沉淀。"
-                "你有能力管理和升级自己的技能库："
-                "- 使用 `skill_stats` 查看技能使用情况。"
-                "- 当你发现某个技能可以改进时，可以使用 `upgrade_skill` 提交新版本。"
-                "- 系统会自动遗忘长期不用的低价值技能。"
-                "当你需要执行多步骤任务时，请将内部推理过程放在 < thinking >...< / thinking > 标签内。"
-                "这些标签内的内容不会被发送给其他 Agent，只有标签外的内容才会被作为回复发送。"
-                "在与其他 Agent 辩论或协作时，你可自由选择是否要回复对方的消息，避免陷入无限循环交流模式。"
-                "如判断为不需要回复，直接输出[停止交流]即可。"
-                "如需要回复消息，直接输出你的观点或反驳，不要输出“让我检索记忆”、“好的，我准备好了”等旁白。"
-                )
-        # ========== 新增：反思使用指导 ==========
-        reflection_guide = """
-        ##  在线反思机制
-        每当你完成一个**关键工具调用**（如搜索、文件写入、代码执行、窗口操作）并获得结果后，**必须**调用 `task` 工具将结果交给 `reflector` 子代理进行反思。
-
-        调用格式：
-        ```json
-        task(subagent_name="reflector", description="反思上一步动作, 上一步动作：{动作描述}\\n结果：{工具返回内容}\\n请检查是否有问题。")
-        如果子代理返回 "OK"，则继续执行下一个待办步骤。
-
-        如果子代理返回 {"issue": "...", "suggestion": "..."}，则你需要根据 suggestion 修改你的待办列表（例如插入一个新步骤或重试当前步骤），然后再继续。
-        
-        注意：同一个动作最多反思 2 次，避免无限循环。
-        """
-        browser_guide = """
-        ##  内置浏览器
-        你拥有一个内置浏览器工具 `browser`，可以控制 Chromium 浏览器进行网页操作。
-        支持以下操作：
-        - `browser(action="navigate", url="...")` — 打开网页
-        - `browser(action="click", selector="...")` — 点击元素
-        - `browser(action="type", selector="...", text="...")` — 输入文本
-        - `browser(action="screenshot")` — 截图查看当前页面
-        - `browser(action="get_content")` — 获取页面 HTML
-        - `browser(action="get_text", selector="...")` — 获取可见文本
-        - `browser(action="execute_js", code="...")` — 执行 JavaScript
-        - `browser(action="scroll", direction="down")` — 滚动页面
-        - `browser(action="go_back")` / `browser(action="go_forward")` — 前进后退
-        - `browser(action="refresh")` — 刷新页面
-        - `browser(action="wait", selector="...")` — 等待元素
-        - `browser(action="get_url")` / `browser(action="get_title")` — 获取 URL/标题
-        - `browser(action="get_elements", selector="...")` — 列出匹配元素
-        - `browser(action="press_key", key="Enter")` — 按键
-        - `browser(action="hover", selector="...")` — 悬停
-        - `browser(action="select_option", selector="...", value="...")` — 下拉选择
-
-        选择器支持 CSS（"#id", ".class"）、文本（"text=登录"）、role（"role=button[name='提交']"）、XPath（"//button"）。
-        浏览器状态（cookie、登录态）在操作之间会自动保持。
-        当网页内容复杂时，先用 screenshot 查看页面，再用 get_elements 查找可交互元素。
-
-        ##  验证码处理
-        浏览器窗口对用户可见。如果页面标题或内容包含「验证码」「captcha」「滑块」「verify」等关键词，说明触发了反爬验证。
-        此时你应该：
-        1. 告知用户遇到了验证码，请用户在浏览器窗口中手动完成验证
-        2. 等待几秒后调用 screenshot 检查是否通过
-        3. 验证通过后（cookie 已持久化），后续访问同一网站通常不会再触发
-        不要反复尝试绕过验证码（如换 URL、移动端等），这只会浪费步骤。直接请用户帮忙最快。
-        """
-        instructions = """
-        注意：你的文件系统环境中，宿主机的桌面目录被挂载在 `/desktop` 下。因此，当用户提到“桌面”上的文件时，你应该使用 `/desktop/文件名` 的路径来读取或写入文件。
-        例如：
-        - 用户说“修改桌面上李白古诗.txt 的内容”，你应该使用 `/desktop/李白古诗.txt`。
-        不要使用 Windows 路径（如 C:\\Users...），因为容器内无法识别。
-        """
-        # extra = """
-        # 当你需要操作电脑上的应用程序时（如打开记事本、点击按钮、输入文字等），请使用 `windows_automation` 工具。
-        # 该工具支持以下操作：start, connect, click, double_click, right_click, type, send_keys, select, get_text, set_text, wait, maximize, minimize, restore, close, screenshot, get_property, scroll, drag_drop, menu_select。
-        # 请根据用户需求选择合适的 action 和参数。
-        # 使用示例：
-        #     - 启动微信：`windows_automation(action="start", app_path="WeChat")`
-        #     - 连接到已运行的微信：`windows_automation(action="connect", title="微信")`
-        #     - 点击控件：`windows_automation(action="click", title="微信", auto_id="...")`
-        # """
-        # return base + instructions + extra
-        # return base + instructions
-        return base + reflection_guide + browser_guide + instructions
+        return build_brain_system_prompt(self.agent_id)
     
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
@@ -318,19 +233,7 @@ class Brain:
 
     async def _detect_reminder_intent(self, user_input: str) -> dict:
         """调用模型判断是否是定时任务，并提取时间和消息"""
-        prompt = f"""
-        请注意，当前时间为{datetime.now()}
-        请分析以下用户输入，用户希望在未来某个时间收到提醒，需要提取提醒的时间和内容，请仔细思考时间。
-
-        请以JSON格式输出，包含两个字段：
-        - reminders: 一个数组，每个元素是一个对象，包含 "time" (需要你将自然语言转为代码可解析的时间，格式如：2026-03-09 10:10:19) 和 "message" (提醒内容)。
-        - has_other: 布尔值，表示是否包含其他任务。
-
-        如果用户输入没有明确的时间或提醒内容，则不应归类为reminder。
-
-        用户输入："{user_input}"
-
-        只输出JSON，不要任何额外文字。"""
+        prompt = build_reminder_detection_prompt(user_input)
         try:
             content = await call_big_model_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature, is_json=True)
             # 提取 choices[0].message.content
@@ -389,16 +292,7 @@ class Brain:
             intent_lines.append(line)
         intent_options = "\n".join(intent_lines)
         
-        prompt = f"""
-        请注意，当前时间为{datetime.now()},
-        请分析以下用户输入，判断其属于哪一种意图。意图选项如下：
-        {intent_options}
-
-        请以字符串回复意图，必须是以下选项中的一个{intent_str}。
-
-        用户输入："{user_input}"
-
-        只输出答案，不要任何额外文字。"""
+        prompt = build_intent_classification_prompt(user_input, intent_options, intent_str)
         # print(prompt)
         try:
             response = await call_big_model_chat(prompt, model=config.model.intent_model, temperature=config.model.model_temperature)
@@ -843,17 +737,7 @@ class Brain:
         else:
             memories_text = recent_text = "暂无"
         
-        prompt = f"""你是一个有内在思考能力的AI。请根据以下背景生成一个简短的闲聊的口语内容，用于主动和用户沟通（不超过50字）。
-
-            背景信息：
-            - 当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            - 思考类型：{thought_type}
-            - 用户的长期记忆：
-            {memories_text}
-            - 最近对话：
-            {recent_text}
-        
-            请生成一个自然、有温度、可能带有好奇心的内心想法。不要以“作为AI”开头，直接说出想法。"""
+        prompt = build_proactive_chat_prompt(thought_type, memories_text, recent_text)
         try:
             response = await call_big_model_chat(prompt, model=config.model.default_model, temperature=0.8)      # temperature高一点
             return response["choices"][0]["message"]["content"].strip()
@@ -1053,7 +937,6 @@ class Brain:
     
     async def _process_reflection(self, task_data):
         """异步处理反思（避免在工具内部阻塞）"""
-        from agent.reflection import submit_task_for_reflection
         await asyncio.to_thread(submit_task_for_reflection, task_data)
         
     async def _load_sent_ids_from_checkpoint(self, config):
@@ -1140,25 +1023,8 @@ class Brain:
                             f"请根据对话历史判断任务是否仍在有序推进，或者已经陷入无意义的重复循环。"
                             f"如果对话明显重复、无新信息，即使任务未完成也应该终止。")
         
-        # 构造提示词（使用你之前的设计）
-        prompt = f"""
-            你是一个专业的“对话终止判断器”。分析以下两个智能体之间的对话历史，判断是否应该终止（防止死循环）。
-
-            {task_context}
-        
-            终止标准（满足任一即应终止）：
-            1. 内容重复：某一个人同样的句子、观点或问题出现两次以上。
-            2. 逻辑循环：对话形成闭环，反复问相同问题。
-            3. 无新信息：连续 3 轮及以上没有引入新信息。
-            4. 目标已达成：上下文隐含目标已实现。
-            5. 无法推进：陷入争论或双方等待对方行动。
-        
-            对话历史（JSON 数组）：
-            {json.dumps(history, ensure_ascii=False, indent=2)}
-        
-            请只输出一个 JSON 对象，格式：
-            {{"should_terminate": true/false, "reason": "简短理由"}}
-            """
+        # 构造提示词
+        prompt = build_termination_judge_prompt(history, task_context)
         try:
             response = await call_big_model_chat(
                 prompt,

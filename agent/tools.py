@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Literal, Tuple, Any, List
 from langchain.tools import tool
+from agent.prompts import build_launch_agent_prompt
 from pywinauto import Application, Desktop
 from pywinauto.findwindows import ElementNotFoundError
 
@@ -591,7 +592,7 @@ async def launch_agent(agent_name: str, expertise: str) -> str:
     cmd = [
         sys.executable, "main.py",
         "--agent-id", agent_name,
-        "--system-prompt", f"你是一个{expertise}的AI助手。你的专长是{expertise}。请根据用户请求提供帮助。**重要约束**：**绝对禁止使用 `task` 工具**。所有任务都必须自己完成，不得委托给其他子智能体。你可以使用其他可用工具（如搜索、记忆检索等），但必须直接处理用户请求。"
+        "--system-prompt", build_launch_agent_prompt(expertise)
     ]
     try:
         # 启动新进程（后台运行，不等待）

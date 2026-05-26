@@ -6,7 +6,8 @@ import json
 import asyncio
 from datetime import datetime
 from agent.memory import get_memory
-from agent.utils import call_big_model_chat  # 注意：使用异步版本
+from agent.utils import call_big_model_chat  # 使用异步版本
+from agent.prompts import build_memory_dedup_prompt
 from config import config
 
 async def extract_facts_from_markdown(file_path: str) -> list:
@@ -36,18 +37,7 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
     if not facts:
         return facts
 
-    prompt = f"""你是一个智能的记忆整理助手。我将给你一系列用户提供的事实，这些事实可能重复、相似或互相包含。请你去除重复，合并相似的事实，返回一个简洁、无冗余的事实列表。
-
-            要求：
-            - 完全相同的文本只保留一个。
-            - 语义相似的事实，例如“我喜欢吃苹果”和“我喜欢苹果”，可以合并成更通用的表述，或者保留其中一个。
-            - 如果事实之间存在包含关系，保留更完整的那条。
-            - 输出格式：一个 JSON 数组，每个元素是一条事实字符串。
-            
-            事实列表：
-            {json.dumps(facts, ensure_ascii=False, indent=2)}
-            
-            只输出 JSON，不要任何额外文字。"""
+    prompt = build_memory_dedup_prompt(facts)
     try:
         response = await call_big_model_chat(prompt, model=config.model.default_model, temperature=config.model.model_temperature, is_json=True)
         content = response["choices"][0]["message"]["content"]

@@ -18,6 +18,7 @@ from agent.skill_version_manager import create_new_skill_version, update_skill_u
 # 假设你的项目已有这些配置
 from config import config
 from agent.utils import call_big_model_chat  # 异步大模型调用函数
+from agent.prompts import build_task_reflection_prompt, build_skill_document_prompt
 
 # ---------- 目录配置 ----------
 BASE_DIR = Path(__file__).parent.absolute()
@@ -63,29 +64,7 @@ async def reflect_on_task(task_data: Dict[str, Any]) -> Dict[str, Any]:
         "user_feedback": "可选的用户反馈"
     }
     """
-    prompt = f"""
-你是一个经验学习智能体。根据以下任务执行过程，分析成败原因，并输出 JSON。
-
-任务描述：{task_data.get('task_description', '无描述')}
-
-步骤轨迹：
-{json.dumps(task_data['steps'], indent=2, ensure_ascii=False)}
-
-最终结果：{task_data.get('final_result', 'unknown')}
-用户反馈：{task_data.get('user_feedback', '无')}
-
-请输出如下 JSON 格式：
-{{
-  "outcome": "success" 或 "failure",
-  "reflection": "总结成功的关键动作或失败的根本原因（不超过 150 字）",
-  "should_create_skill": true/false,   // 建议：成功 && 步骤数>=2 且不重复已有技能
-  "skill_name": "建议的技能名称（snake_case）",
-  "skill_trigger_phrases": ["触发短语1", "触发短语2"],
-  "key_lessons": "可复用的经验教训（一句话）"
-}}
-
-只输出 JSON，不要额外解释。
-"""
+    prompt = build_task_reflection_prompt(task_data)
     response = await call_big_model_chat(prompt, model=config.model.default_model,
                                          temperature=0.3, is_json=True)
     content = response["choices"][0]["message"]["content"]
@@ -155,40 +134,9 @@ async def _generate_skill_document(task_description: str, steps: List[Dict],
                                    reflection: str, key_lessons: str,
                                    trigger_phrases: List[str]) -> str:
     """调用 LLM 生成格式化的技能 Markdown 文档"""
-    prompt = f"""
-你是一个技能文档编写器。根据以下任务执行过程和反思，创建一个可复用的技能文档。
-
-任务描述：{task_description}
-
-执行步骤：
-{json.dumps(steps, indent=2, ensure_ascii=False)}
-
-反思总结：{reflection}
-经验教训：{key_lessons}
-建议触发短语：{', '.join(trigger_phrases)}
-
-请输出 Markdown 格式的技能文档，结构如下：
-
----
-name: <技能名称（英文下划线）>
-description: <一句话描述技能作用>
-triggers: [<触发短语列表>]
-version: 1.0
----
-
-## 技能描述
-详细说明技能适用的场景和解决的问题。
-
-## 执行步骤
-1. ...
-2. ...
-
-## 注意事项
-- ...
-
-## 反思与优化
-{reflection}
-"""
+    prompt = build_skill_document_prompt(
+        task_description, steps, reflection, key_lessons, trigger_phrases
+    )
     response = await call_big_model_chat(prompt, model=config.model.default_model,
                                          temperature=0.4, is_json=False)
     return response["choices"][0]["message"]["content"]
