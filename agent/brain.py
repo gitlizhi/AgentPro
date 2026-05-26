@@ -59,6 +59,7 @@ class Brain:
     ):
         
         self.agent_id = agent_id
+        self.online_agents = None  # 由 core.Agent 注入，Set[str]
         self.user_id = None
         # 获取模型
         self.model = model_config.get_model(config.model.default_provider)  # model_config 仍需按需
@@ -138,7 +139,7 @@ class Brain:
         # ========== 反思子代理定义结束 ==========
 
         # 自定义工具
-        tools = [self.send_to_agent_tool, TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools
+        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -462,8 +463,10 @@ class Brain:
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
         base_prompt = self._build_system_prompt()
+        # 告知 AI 当前在和谁对话
+        base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
         if memories:
-            memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
+            memory_text = "\n\n## 关于他的长期记忆：\n" + "\n".join([
                 f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
                 for m in memories
             ])
@@ -583,6 +586,12 @@ class Brain:
         
         # 构建系统提示（仅超级用户才添加记忆）
         base_prompt = self._build_system_prompt()
+        # 告知 AI 当前在和谁对话
+        if self.user_id == 'super_user':
+            base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
+        else:
+            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
+            base_prompt += f"\n\n[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
             if memories:
@@ -640,6 +649,12 @@ class Brain:
         
         # 2. 构建系统提示（基础提示 + 长期记忆信息）
         base_prompt = self._build_system_prompt()
+        # 告知 AI 当前在和谁对话
+        if self.user_id == 'super_user':
+            base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
+        else:
+            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
+            base_prompt += f"\n\n[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
         if memories and self.user_id == 'super_user':
             memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
                 f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
@@ -850,11 +865,29 @@ class Brain:
         else:
             print(f"[WARN] No pending approval for {tool_call_id}")
     
+    def _create_list_online_agents_tool(self):
+        """创建查询在线智能体的工具"""
+        brain_ref = self  # 闭包持有 Brain 实例引用
+        @tool
+        def list_online_agents() -> str:
+            """
+            查询当前在线的 Agent 列表。
+            用于在和其他 Agent 协作前判断对方是否在线，避免向离线的 Agent 发送消息。
+            :return: JSON 格式的在线 Agent 列表
+            """
+            agents = brain_ref.online_agents
+            if agents is None:
+                return '{"error": "在线列表未初始化", "agents": []}'
+            import json as _json
+            return _json.dumps({"agents": sorted(list(agents)), "count": len(agents)}, ensure_ascii=False)
+        return list_online_agents
+
     def _create_send_to_agent_tool(self):
         @tool
         async def send_to_agent(target_agent_id: str, message: str) -> str:
             """
             向指定的 Agent 发送消息，不等待对方回复。
+            建议在发送前先调用 list_online_agents 检查目标 Agent 是否在线。
             :param target_agent_id: 目标 Agent 的 ID，例如 'debater' 或 'researcher'。
             :param message: 要发送的消息内容，例如 '请反驳我的观点'。
             :return: 发送成功的标志
@@ -862,7 +895,13 @@ class Brain:
             """
             if message and '[停止交流]' in message:
                 return f'已和 {target_agent_id} 停止交流'
+            online = self.online_agents
+            if online is not None and target_agent_id not in online:
+                logger.warning(f"向离线 Agent 发送消息: {target_agent_id}")
             await self.comm.send_to_agent(target_agent_id, {"text": message})
+            hint = "" if (online is None or target_agent_id in online) else f"（注意：{target_agent_id} 当前可能离线）"
+            if hint:
+                return f'消息发送失败，{hint}'
             return f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
         return send_to_agent
     

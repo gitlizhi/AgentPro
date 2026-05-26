@@ -65,7 +65,7 @@
         [data-theme="dark"] .skeleton-line {
             background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
         }
-        [data-theme="dark"] .agent-select option { background: #1f2937; }
+        [data-theme="dark"] .agent-item:hover { background: #1f2937; }
         [data-theme="dark"] .invite-btn { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.25); }
         [data-theme="dark"] .suggest-dropdown,
         [data-theme="dark"] .invite-dropdown { box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
@@ -109,35 +109,86 @@
             letter-spacing: 0.2px;
         }
 
-        /* Agent selector */
+        /* Agent list */
         .agent-select-area {
-            padding: 0 12px 12px;
+            padding: 0 12px 10px;
             flex-shrink: 0;
         }
-        .agent-select {
-            width: 100%;
-            padding: 9px 12px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            color: var(--text);
-            font-size: 0.84rem;
-            outline: none;
-            cursor: pointer;
-            font-family: inherit;
-            appearance: none;
-            -webkit-appearance: none;
-            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%238e8e93' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2 5l6 6 6-6'/%3e%3c/svg%3e");
-            background-repeat: no-repeat;
-            background-position: right 10px center;
-            background-size: 14px;
-            padding-right: 32px;
-            box-shadow: var(--shadow-sm);
-            transition: border-color 0.15s, box-shadow 0.15s;
+        .agent-section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 2px 5px;
         }
-        .agent-select:hover { border-color: #d0d0d5; }
-        .agent-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.1); }
-        .agent-select option { background: #fff; color: var(--text); }
+        .agent-section-label {
+            font-size: 0.68rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+        }
+        .agent-count {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            background: var(--surface);
+            border-radius: 9px;
+            padding: 1px 7px;
+            line-height: 1.4;
+        }
+        .agent-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .agent-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: background 0.12s;
+            font-size: 0.82rem;
+            color: var(--text);
+            position: relative;
+        }
+        .agent-item:hover { background: var(--surface); }
+        .agent-item.active { background: var(--accent-light); font-weight: 500; }
+        .agent-dot {
+            width: 7px; height: 7px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            transition: background 0.2s;
+        }
+        .agent-dot.online { background: #10b981; box-shadow: 0 0 4px rgba(16,185,129,0.4); }
+        .agent-dot.offline { background: var(--text-muted); }
+        .agent-item .agent-icon {
+            font-size: 0.85rem;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .agent-item .agent-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .agent-item .agent-unread {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--accent);
+            flex-shrink: 0;
+            display: none;
+        }
+        .agent-item.has-unread .agent-unread { display: block; }
+        .agent-empty {
+            font-size: 0.76rem;
+            color: var(--text-muted);
+            text-align: center;
+            padding: 10px 0;
+        }
 
         /* New Chat button */
         .new-chat-btn {
@@ -981,9 +1032,13 @@
     </div>
 
     <div class="agent-select-area">
-        <select class="agent-select" id="agentSelect">
-            <option value="">-- Select Agent --</option>
-        </select>
+        <div class="agent-section-header">
+            <span class="agent-section-label">Agents</span>
+            <span class="agent-count" id="agentCount">0</span>
+        </div>
+        <div class="agent-list" id="agentList">
+            <div class="agent-empty">No agents online</div>
+        </div>
     </div>
 
     <button class="new-chat-btn" id="newChatBtn" disabled>+ New Chat</button>
@@ -1111,6 +1166,7 @@ let roomMessages = {};
 let currentImageBase64 = null;
 let pendingApproval = null;
 let showToolCalls = true;
+let unreadAgents = new Set();
 
 // conversations: { agentId: [{ thread_id, title, created_at, updated_at, is_archived }] }
 let conversations = {};
@@ -1118,7 +1174,8 @@ let conversations = {};
 let messageCache = {};
 
 // ──────────────── DOM refs ────────────────
-const agentSelect = document.getElementById('agentSelect');
+const agentList = document.getElementById('agentList');
+const agentCount = document.getElementById('agentCount');
 const convList = document.getElementById('convList');
 const newChatBtn = document.getElementById('newChatBtn');
 const messagesDiv = document.getElementById('messages');
@@ -1386,7 +1443,7 @@ async function switchConversation(agentId, threadId) {
 
     renderMessages(threadId);
     renderConvList();
-    updateAgentSelect();
+    renderAgentList();
     messageInput.disabled = false;
     sendBtn.disabled = false;
     newChatBtn.disabled = false;
@@ -1475,34 +1532,49 @@ async function saveMessage(threadId, role, content) {
 }
 
 // ──────────────── Agent selector ────────────────
-function updateAgentSelect() {
-    agentSelect.innerHTML = '<option value="">-- Select Agent --</option>';
-    agents.forEach(a => {
-        const opt = document.createElement('option');
-        opt.value = a;
-        opt.textContent = a;
-        if (a === activeAgent && !activeRoom) opt.selected = true;
-        agentSelect.appendChild(opt);
+function renderAgentList() {
+    if (!agentList) return;
+    if (agents.length === 0) {
+        agentList.innerHTML = '<div class="agent-empty">No agents yet</div>';
+        agentCount.textContent = '0';
+        return;
+    }
+    agentCount.textContent = onlineAgentsSet.size;
+    agentList.innerHTML = '';
+    const sorted = [...agents].sort();
+    sorted.forEach(a => {
+        const isOnline = onlineAgentsSet.has(a);
+        const isActive = a === activeAgent && !activeRoom;
+        const item = document.createElement('div');
+        const hasUnread = unreadAgents.has(a);
+        item.className = `agent-item${isActive ? ' active' : ''}${hasUnread ? ' has-unread' : ''}`;
+        item.dataset.agent = a;
+        item.innerHTML = `
+            <span class="agent-dot ${isOnline ? 'online' : 'offline'}"></span>
+            <span class="agent-icon">🤖</span>
+            <span class="agent-name">${escapeHtml(a)}</span>
+            <span class="agent-unread"></span>
+        `;
+        item.title = `${a} (${isOnline ? 'online' : 'offline'})`;
+        item.onclick = () => {
+            if (activeRoom) { activeRoom = null; updateRoomsUI(); hideMembersDrawer(); }
+            selectAgent(a);
+        };
+        agentList.appendChild(item);
     });
 }
-
-agentSelect.addEventListener('change', function () {
-    const val = this.value;
-    if (!val) return;
-    if (activeRoom) { activeRoom = null; updateRoomsUI(); hideMembersDrawer(); }
-    selectAgent(val);
-});
 
 async function selectAgent(agentId) {
     activeAgent = agentId;
     activeRoom = null;
+    // Clear unread indicator for this agent
+    unreadAgents.delete(agentId);
+    renderAgentList();
     newChatBtn.disabled = false;
     messageInput.disabled = false;
     sendBtn.disabled = false;
     inviteAgentBtn.style.display = 'none';
     membersToggleBtn.style.display = 'none';
-
-    updateAgentSelect();
 
     // Load conversations if not loaded
     if (!conversations[agentId]) {
@@ -1604,7 +1676,7 @@ function renderRooms() {
 }
 
 function selectRoom(roomId) {
-    if (activeAgent) { activeAgent = null; activeThreadId = null; updateAgentSelect(); renderConvList(); }
+    if (activeAgent) { activeAgent = null; activeThreadId = null; renderAgentList(); renderConvList(); }
     activeRoom = roomId;
     currentChatNameSpan.innerText = roomId;
     currentChatMetaSpan.innerText = 'Group Chat';
@@ -1764,14 +1836,29 @@ function connect() {
         ws.send(JSON.stringify({ type: 'list_rooms' }));
         updateMembersPanel(rooms[activeRoom]?.members || []);
     };
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
         const data = JSON.parse(event.data);
         if (data.type === 'agents') {
             agents = (data.agents || []).filter(a => a !== 'super_user');
             onlineAgentsSet.clear();
             agents.forEach(a => onlineAgentsSet.add(a));
-            updateAgentSelect();
+            renderAgentList();
             if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
+        } else if (data.type === 'agent_online') {
+            const aid = data.agent_id;
+            if (aid && aid !== 'super_user') {
+                onlineAgentsSet.add(aid);
+                if (!agents.includes(aid)) agents.push(aid);
+                renderAgentList();
+                if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
+            }
+        } else if (data.type === 'agent_offline') {
+            const aid = data.agent_id;
+            if (aid) {
+                onlineAgentsSet.delete(aid);
+                renderAgentList();
+                if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
+            }
         } else if (data.type === 'message') {
             const from = data.from, text = data.text;
             const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
@@ -1782,9 +1869,19 @@ function connect() {
                 const convs = conversations[from] || [];
                 targetThreadId = convs.length > 0 ? convs[0].thread_id : null;
                 if (!targetThreadId) {
-                    // No existing conversation, message will be missed for now
-                    // (Could auto-create, but simpler to only track active)
+                    // Auto-create a conversation for messages from previously unknown agents
+                    targetThreadId = generateThreadId(from);
+                    await api('POST', '/chat/conversations', { agent_id: from, thread_id: targetThreadId });
+                    if (!conversations[from]) conversations[from] = [];
+                    conversations[from].unshift({
+                        thread_id: targetThreadId, agent_id: from, title: 'New Chat',
+                        created_at: new Date().toISOString(), updated_at: new Date().toISOString(), is_archived: false
+                    });
+                    messageCache[targetThreadId] = [];
                 }
+                // Mark agent as having unread messages
+                unreadAgents.add(from);
+                renderAgentList();
             }
             if (targetThreadId) {
                 saveMessage(targetThreadId, 'assistant', text);

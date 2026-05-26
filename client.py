@@ -287,7 +287,19 @@ async def connect_to_hub():
                             online_agents.remove(my_agent_id)
                         for conn in frontend_connections:
                             await conn.send_json({"type": "agents", "agents": list(online_agents)})
-                    
+
+                    elif msg_type == "agent_online":
+                        agent = data.get("agent_id")
+                        if agent and agent != my_agent_id:
+                            for conn in frontend_connections:
+                                await conn.send_json({"type": "agent_online", "agent_id": agent})
+
+                    elif msg_type == "agent_offline":
+                        agent = data.get("agent_id")
+                        if agent:
+                            for conn in frontend_connections:
+                                await conn.send_json({"type": "agent_offline", "agent_id": agent})
+
                     elif msg_type == "message":
                         sender = data.get("from")
                         payload = data.get("payload", {})

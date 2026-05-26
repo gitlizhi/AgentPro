@@ -29,6 +29,9 @@ class Agent:
             custom_system_prompt=custom_system_prompt  # 传递
         )
         self._running = False
+        # 在线智能体列表（共享引用，brain 可读取）
+        self._online_agents = set()
+        self.brain.online_agents = self._online_agents
         # 本地缓存房间成员信息 (可选)
         self._room_members = {}
 
@@ -114,6 +117,28 @@ class Agent:
                         
             elif msg_type == "register_ack":
                 logger.info("Registration acknowledged by hub")
+                # 启动后主动请求当前在线智能体列表
+                await self.comm.send({"type": "get_agents"})
+
+            elif msg_type == "agents_list":
+                agents = set(data.get("agents", []))
+                agents.discard(self.agent_id)
+                self._online_agents.clear()
+                self._online_agents.update(agents)
+                logger.info(f"Online agents updated: {self._online_agents}")
+
+            elif msg_type == "agent_online":
+                agent = data.get("agent_id")
+                if agent and agent != self.agent_id:
+                    self._online_agents.add(agent)
+                    logger.info(f"Agent online: {agent} (total: {len(self._online_agents)})")
+
+            elif msg_type == "agent_offline":
+                agent = data.get("agent_id")
+                if agent:
+                    self._online_agents.discard(agent)
+                    logger.info(f"Agent offline: {agent} (total: {len(self._online_agents)})")
+
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
         except Exception as e:

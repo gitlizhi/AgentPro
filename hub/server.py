@@ -26,6 +26,8 @@ class Hub:
         # 发送确认
         await websocket.send(json.dumps({"type": "register_ack"}))
         await self.broadcast_agents()
+        # 广播上线事件给所有已连接的智能体
+        await self._broadcast_to_all({"type": "agent_online", "agent_id": agent_id}, exclude=agent_id)
 
     async def unregister(self, agent_id: str):
         if agent_id in self.clients:
@@ -34,6 +36,18 @@ class Hub:
                 self.observers.discard(ws)
             logger.info(f"Agent {agent_id} unregistered")
         await self.broadcast_agents()
+        # 广播离线事件给所有剩余的智能体
+        await self._broadcast_to_all({"type": "agent_offline", "agent_id": agent_id})
+
+    async def _broadcast_to_all(self, message: dict, exclude: str = None):
+        """向所有已连接客户端广播消息，可排除指定 agent_id"""
+        data = json.dumps(message, ensure_ascii=False)
+        for aid, ws in list(self.clients.items()):
+            if aid != exclude:
+                try:
+                    await ws.send(data)
+                except Exception:
+                    pass
     
     async def route_message(self, data: dict):
         """根据 data['to'] 转发消息"""
