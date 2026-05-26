@@ -322,7 +322,7 @@ class Hub:
 async def main():
     hub = Hub()
     await hub.init_db()  # 创建连接池并加载现有群组到内存
-    async with websockets.serve(hub.handler, config.hub.hub_host, config.hub.hub_port):
+    async with websockets.serve(hub.handler, config.hub.hub_host, config.hub.hub_port, max_size=20 * 1024 * 1024):
         logger.info(f"Hub started on ws://{config.hub.hub_host}:{config.hub.hub_port}")
         await asyncio.Future()  # 运行 forever
 

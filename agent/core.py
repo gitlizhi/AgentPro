@@ -42,11 +42,12 @@ class Agent:
                 payload = data.get("payload", {})
                 user_input = payload.get("text", "")
                 new_thread = payload.get("new_thread", False)
+                thread_id = payload.get("thread_id")
                 image_data = payload.get("image")
                 sender = data.get("from")
                 # 如果是来自其他 Agent 的消息（非自身），也作为新消息处理
                 if user_input and sender not in [self.agent_id, 'super_user']:
-                    asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
+                    asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
                     return
                 if user_input.startswith("/approve"):
                     tool_call_id = user_input.split()[1] if len(user_input.split()) > 1 else None
@@ -75,7 +76,7 @@ class Agent:
                     await self.brain._complete_approval(tool_call_id, decision)
                     return
                 # 普通消息：后台处理，不阻塞
-                asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread))
+                asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
                 # 可选：立即回复“已收到”
                 # await self.comm.send_to_agent(sender, {"text": "✅ 已收到，正在处理..."})
             
@@ -118,16 +119,17 @@ class Agent:
         except Exception as e:
             logger.error(f"Unhandled exception in _handle_message: {e}", exc_info=True)
 
-    async def _process_message(self, sender, user_input, image_data, new_thread):
+    async def _process_message(self, sender, user_input, image_data, new_thread, thread_id=None):
         """后台处理普通消息（包括可能触发 HITL 的任务）"""
-        private_thread_id = f"private_{self.agent_id}_{sender}"
+        # 优先使用前端传来的 thread_id，没有则用旧格式兜底
+        effective_thread_id = thread_id if thread_id else f"private_{self.agent_id}_{sender}"
         try:
             response = await self.brain.process(
                 user_id=sender,
                 user_input=user_input,
                 image_data=image_data,
                 new_thread=new_thread,
-                thread_id_override=private_thread_id,
+                thread_id_override=effective_thread_id,
                 silent=False
             )
             if response:

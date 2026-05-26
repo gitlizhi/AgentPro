@@ -3,1216 +3,1975 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>AgentPro · 智能体空间</title>
+    <title>AgentPro</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Exo+2:wght@300;400;500;600&display=swap');
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html { font-size: calc(16px * var(--font-scale, 1)); }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root {
+            --bg: #f8f9fa;
+            --sidebar-bg: #f0f1f3;
+            --surface: #ffffff;
+            --border: #e5e5ea;
+            --border-light: #f0f0f3;
+            --accent: #4f46e5;
+            --accent-hover: #4338ca;
+            --accent-light: #eef2ff;
+            --text: #1a1a1a;
+            --text-muted: #8e8e93;
+            --text-secondary: #6b7280;
+            --danger: #dc2626;
+            --danger-light: #fef2f2;
+            --success: #059669;
+            --radius: 10px;
+            --radius-sm: 8px;
+            --radius-lg: 16px;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+            --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-md: 0 4px 6px rgba(0,0,0,0.05), 0 2px 4px rgba(0,0,0,0.04);
+            --font-scale: 1;
         }
+
+        /* ── Dark theme ── */
+        [data-theme="dark"] {
+            --bg: #111827;
+            --sidebar-bg: #161922;
+            --surface: #1f2937;
+            --border: #374151;
+            --border-light: #2a3340;
+            --accent: #6366f1;
+            --accent-hover: #818cf8;
+            --accent-light: rgba(99,102,241,0.12);
+            --text: #e5e7eb;
+            --text-muted: #9ca3af;
+            --text-secondary: #d1d5db;
+            --danger: #ef4444;
+            --danger-light: rgba(239,68,68,0.12);
+            --success: #10b981;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+            --shadow: 0 1px 3px rgba(0,0,0,0.5), 0 1px 2px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 6px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.3);
+        }
+        [data-theme="dark"] .chat-header,
+        [data-theme="dark"] .input-zone { background: rgba(31,41,55,0.6); }
+        [data-theme="dark"] .bubble pre { background: rgba(0,0,0,0.3); border-color: transparent; }
+        [data-theme="dark"] .bubble code { background: rgba(255,255,255,0.08); color: #f87171; }
+        [data-theme="dark"] .bubble blockquote { background: rgba(99,102,241,0.08); }
+        [data-theme="dark"] .bubble th { background: rgba(99,102,241,0.15); }
+        [data-theme="dark"] .approval-content { background: #111827; }
+        [data-theme="dark"] .edit-args-input { background: #111827; }
+        [data-theme="dark"] .member-item { background: #1f2937; }
+        [data-theme="dark"] .skeleton-line {
+            background: linear-gradient(90deg, #1f2937 25%, #374151 50%, #1f2937 75%);
+        }
+        [data-theme="dark"] .agent-select option { background: #1f2937; }
+        [data-theme="dark"] .invite-btn { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.25); }
+        [data-theme="dark"] .suggest-dropdown,
+        [data-theme="dark"] .invite-dropdown { box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+        [data-theme="dark"] .copy-code-btn { background: rgba(99,102,241,0.2); border-color: rgba(99,102,241,0.3); }
 
         body {
-            font-family: 'Exo 2', sans-serif;
-            background: radial-gradient(circle at 20% 50%, rgba(139, 92, 246, 0.1) 0%, transparent 50%),
-                        radial-gradient(circle at 80% 20%, rgba(6, 182, 212, 0.1) 0%, transparent 50%),
-                        radial-gradient(circle at 40% 80%, rgba(236, 72, 153, 0.05) 0%, transparent 50%),
-                        #0A0E27;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
             height: 100vh;
-            overflow: hidden;
-            position: relative;
-        }
-
-        .grid-background {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background-image:
-                linear-gradient(rgba(139, 92, 246, 0.1) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(139, 92, 246, 0.1) 1px, transparent 1px);
-            background-size: 50px 50px;
-            animation: grid-move 20s linear infinite;
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        @keyframes grid-move {
-            0% { transform: translate(0, 0); }
-            100% { transform: translate(50px, 50px); }
-        }
-
-        .agent-container {
-            width: 1400px;
-            max-width: 95vw;
-            height: 90vh;
-            background: rgba(15, 23, 42, 0.8);
-            backdrop-filter: blur(20px);
-            border-radius: 24px;
-            border: 1px solid rgba(139, 92, 246, 0.3);
-            box-shadow: 0 0 20px rgba(139, 92, 246, 0.4), 0 25px 50px -12px rgba(0, 0, 0, 0.5);
             display: flex;
             overflow: hidden;
-            position: relative;
-            z-index: 10;
-            margin: auto;
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
-        /* 左侧边栏 */
+        /* ── Sidebar ── */
         .sidebar {
             width: 280px;
             flex-shrink: 0;
-            background: linear-gradient(180deg, rgba(10, 14, 39, 0.9) 0%, rgba(15, 23, 42, 0.8) 100%);
-            backdrop-filter: blur(16px);
-            border-right: 1px solid rgba(139, 92, 246, 0.2);
+            background: var(--sidebar-bg);
+            border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
-            overflow-y: auto;
+            overflow: hidden;
+        }
+        .sidebar-header {
+            padding: 22px 16px 14px;
+            flex-shrink: 0;
+        }
+        .sidebar-header .logo {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text);
+            letter-spacing: -0.4px;
+        }
+        .sidebar-header .subtitle {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 1px;
+            letter-spacing: 0.2px;
         }
 
-        /* 聊天主区域 */
+        /* Agent selector */
+        .agent-select-area {
+            padding: 0 12px 12px;
+            flex-shrink: 0;
+        }
+        .agent-select {
+            width: 100%;
+            padding: 9px 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font-size: 0.84rem;
+            outline: none;
+            cursor: pointer;
+            font-family: inherit;
+            appearance: none;
+            -webkit-appearance: none;
+            background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%238e8e93' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M2 5l6 6 6-6'/%3e%3c/svg%3e");
+            background-repeat: no-repeat;
+            background-position: right 10px center;
+            background-size: 14px;
+            padding-right: 32px;
+            box-shadow: var(--shadow-sm);
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .agent-select:hover { border-color: #d0d0d5; }
+        .agent-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.1); }
+        .agent-select option { background: #fff; color: var(--text); }
+
+        /* New Chat button */
+        .new-chat-btn {
+            margin: 0 12px 10px;
+            padding: 9px 0;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 0.84rem;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: 500;
+            transition: background 0.15s, box-shadow 0.15s;
+            flex-shrink: 0;
+            box-shadow: 0 1px 2px rgba(79,70,229,0.3);
+        }
+        .new-chat-btn:hover { background: var(--accent-hover); box-shadow: 0 2px 4px rgba(79,70,229,0.35); }
+        .new-chat-btn:disabled { opacity: 0.4; cursor: default; box-shadow: none; }
+
+        /* Conversation list */
+        .conv-list-label {
+            padding: 6px 16px 4px;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            letter-spacing: 0.4px;
+            flex-shrink: 0;
+        }
+        .conv-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2px 8px 8px;
+        }
+        .conv-list::-webkit-scrollbar { width: 4px; }
+        .conv-list::-webkit-scrollbar-track { background: transparent; }
+        .conv-list::-webkit-scrollbar-thumb { background: #d0d0d5; border-radius: 2px; }
+
+        .conv-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 10px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: background 0.12s;
+            margin-bottom: 1px;
+            position: relative;
+            gap: 8px;
+        }
+        .conv-item:hover { background: rgba(79,70,229,0.05); }
+        .conv-item.active { background: var(--accent-light); }
+        .conv-item .conv-title {
+            flex: 1;
+            font-size: 0.83rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            color: var(--text);
+            line-height: 1.3;
+        }
+        .conv-item.active .conv-title { color: var(--accent); font-weight: 500; }
+        .conv-item .conv-time {
+            font-size: 0.66rem;
+            color: var(--text-muted);
+            flex-shrink: 0;
+            letter-spacing: 0.1px;
+        }
+        .conv-item .conv-delete {
+            position: absolute;
+            right: 6px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.8rem;
+            padding: 2px 5px;
+            border-radius: 5px;
+            transition: opacity 0.15s, color 0.12s, background 0.12s;
+            line-height: 1;
+        }
+        .conv-item .conv-edit {
+            position: absolute;
+            right: 30px;
+            top: 50%;
+            transform: translateY(-50%);
+            opacity: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.75rem;
+            padding: 2px 5px;
+            border-radius: 5px;
+            transition: opacity 0.15s, color 0.12s, background 0.12s;
+            line-height: 1;
+        }
+        .conv-item:hover .conv-delete,
+        .conv-item:hover .conv-edit { opacity: 1; }
+        .conv-item .conv-delete:hover { color: var(--danger); background: var(--danger-light); border-color: #fecaca; }
+        .conv-item .conv-edit:hover { color: var(--accent); background: var(--accent-light); border-color: rgba(79,70,229,0.25); }
+        [data-theme="dark"] .conv-item .conv-delete:hover { border-color: rgba(239,68,68,0.3); }
+        [data-theme="dark"] .conv-item .conv-edit:hover { border-color: rgba(99,102,241,0.3); }
+
+        /* Empty conv state */
+        .conv-empty {
+            padding: 32px 16px;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+        }
+
+        /* Sidebar footer */
+        .sidebar-footer {
+            padding: 8px 16px;
+            border-top: 1px solid var(--border);
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .sidebar-footer .dot {
+            width: 6px; height: 6px;
+            background: var(--success);
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .sidebar-footer .rooms-toggle {
+            margin-left: auto;
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 0.72rem;
+            font-family: inherit;
+            padding: 2px 8px;
+            border-radius: 4px;
+            transition: color 0.12s, background 0.12s;
+        }
+        .sidebar-footer .rooms-toggle:hover { color: var(--text); background: rgba(0,0,0,0.04); }
+        [data-theme="dark"] .sidebar-footer .rooms-toggle:hover { background: rgba(255,255,255,0.06); }
+
+        /* Settings row */
+        .settings-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 6px 16px;
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .settings-btn {
+            width: 28px; height: 28px;
+            border-radius: 6px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.12s;
+            font-family: inherit;
+        }
+        .settings-btn:hover { background: rgba(0,0,0,0.06); color: var(--text); }
+        [data-theme="dark"] .settings-btn:hover { background: rgba(255,255,255,0.06); }
+        .settings-btn.active { color: var(--accent); }
+        .settings-divider { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
+        .font-size-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin: 0 2px;
+            user-select: none;
+        }
+
+        /* Rooms section (collapsible with vertical animation) */
+        .rooms-section {
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .rooms-section.open { max-height: 320px; overflow-y: auto; }
+        .rooms-section .section-title {
+            padding: 8px 16px 4px;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+        .room-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 16px;
+            cursor: pointer;
+            font-size: 0.82rem;
+            transition: background 0.12s;
+        }
+        .room-item:hover { background: rgba(79,70,229,0.05); }
+        .room-item.active { background: var(--accent-light); }
+        .room-item .unread-dot {
+            width: 7px; height: 7px;
+            background: var(--accent);
+            border-radius: 50%;
+            margin-left: auto;
+            flex-shrink: 0;
+        }
+        .room-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            padding: 6px 12px 10px;
+        }
+        .room-action-row {
+            display: flex;
+            gap: 6px;
+        }
+        .room-action-row input {
+            width: 180px;
+            flex-shrink: 0;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 6px 8px;
+            color: var(--text);
+            font-size: 0.72rem;
+            outline: none;
+            font-family: inherit;
+            transition: border-color 0.15s;
+        }
+        .room-action-row input:focus { border-color: var(--accent); }
+        .room-action-row button {
+            width: 56px;
+            flex-shrink: 0;
+            background: var(--accent);
+            border: none;
+            padding: 6px 0;
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            font-size: 0.72rem;
+            font-family: inherit;
+            white-space: nowrap;
+            font-weight: 500;
+            transition: background 0.12s;
+            text-align: center;
+        }
+        .room-action-row button:hover { background: var(--accent-hover); }
+
+        /* ── Main Chat ── */
         .chat-main {
             flex: 1;
             min-width: 0;
             display: flex;
             flex-direction: column;
-            background: linear-gradient(180deg, rgba(10, 14, 39, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%);
-            position: relative;
+            background: var(--bg);
         }
-
-        /* 右侧成员面板 */
-        .members-panel {
-            width: 260px;
-            flex-shrink: 0;
-            background: rgba(10, 14, 39, 0.7);
-            backdrop-filter: blur(12px);
-            border-left: 1px solid rgba(139, 92, 246, 0.2);
-            display: flex;
-            flex-direction: column;
-            overflow-y: auto;
-            transition: 0.2s;
-        }
-        .members-panel-header {
-            padding: 20px 16px 12px;
-            border-bottom: 1px solid rgba(139,92,246,0.2);
-            font-family: 'Orbitron', monospace;
-            font-size: 0.9rem;
-            color: #06B6D4;
-            letter-spacing: 1px;
-        }
-        .members-list {
-            padding: 12px 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .member-item {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 8px 12px;
-            background: rgba(139,92,246,0.1);
-            border-radius: 28px;
-            border: 1px solid transparent;
-            transition: 0.1s;
-        }
-        .member-avatar {
-            width: 32px;
-            height: 32px;
-            background: linear-gradient(145deg, #8B5CF6, #06B6D4);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1rem;
-        }
-        .member-name {
-            font-size: 0.85rem;
-            color: #E0E7FF;
-            font-weight: 500;
-        }
-        .member-status {
-            font-size: 0.65rem;
-            color: #10B981;
-            margin-left: auto;
-        }
-        .empty-members {
-            color: #A5B4FC;
-            font-size: 0.8rem;
-            text-align: center;
-            padding: 20px;
-        }
-
-        .sidebar-header {
-            padding: 32px 20px 20px;
-            border-bottom: 1px solid rgba(139, 92, 246, 0.1);
-        }
-        .sidebar-header h1 {
-            font-family: 'Orbitron', monospace;
-            font-size: 1.8rem;
-            font-weight: 900;
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4, #EC4899);
-            background-clip: text;
-            -webkit-background-clip: text;
-            color: transparent;
-        }
-        .section-title {
-            padding: 16px 20px 8px;
-            font-size: 0.75rem;
-            color: #06B6D4;
-            letter-spacing: 1px;
-            font-weight: 600;
-        }
-        .agents-list, .rooms-list {
-            padding: 0 12px 16px;
-        }
-        .agent-card, .room-card {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 14px;
-            margin-bottom: 8px;
-            background: linear-gradient(135deg, rgba(139,92,246,0.1), rgba(6,182,212,0.1));
-            border-radius: 20px;
-            cursor: pointer;
-            transition: all 0.2s;
-            border: 1px solid transparent;
-        }
-        .agent-card.active, .room-card.active {
-            background: linear-gradient(135deg, rgba(139,92,246,0.3), rgba(6,182,212,0.3));
-            border-color: #8B5CF6;
-            box-shadow: 0 0 15px rgba(139,92,246,0.3);
-        }
-        .agent-avatar, .room-avatar {
-            width: 38px;
-            height: 38px;
-            background: linear-gradient(145deg, #8B5CF6, #06B6D4);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.1rem;
-        }
-        .agent-info, .room-info {
-            flex: 1;
-        }
-        .agent-name, .room-name {
-            font-weight: 600;
-            font-size: 0.85rem;
-            color: #E0E7FF;
-        }
-        .agent-status, .room-members {
-            font-size: 0.65rem;
-            color: #06B6D4;
-        }
-        .unread-dot {
-            width: 8px;
-            height: 8px;
-            background: #EC4899;
-            border-radius: 50%;
-            box-shadow: 0 0 8px #EC4899;
-        }
-        .room-actions {
-            padding: 16px;
-            border-top: 1px solid rgba(139,92,246,0.2);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            margin-top: auto;
-        }
-        .room-action-item {
-            display: flex;
-            gap: 8px;
-        }
-        .room-action-item input {
-            flex: 1;
-            background: rgba(0,0,0,0.4);
-            border: 1px solid rgba(139,92,246,0.3);
-            border-radius: 20px;
-            padding: 8px 12px;
-            color: #E0E7FF;
-            font-size: 0.75rem;
-            outline: none;
-        }
-        .room-action-item button {
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
-            border: none;
-            padding: 6px 12px;
-            border-radius: 20px;
-            color: white;
-            cursor: pointer;
-            font-size: 0.7rem;
-        }
-
         .chat-header {
-            padding: 16px 24px;
-            background: linear-gradient(180deg, rgba(10,14,39,0.9), transparent);
-            backdrop-filter: blur(12px);
-            border-bottom: 1px solid rgba(139,92,246,0.2);
+            padding: 14px 24px;
+            border-bottom: 1px solid var(--border);
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+            background: rgba(255,255,255,0.6);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
         }
         .chat-header-left h2 {
-            font-family: 'Orbitron', monospace;
-            font-size: 1.2rem;
-            font-weight: 700;
-            color: #E0E7FF;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            letter-spacing: -0.2px;
+            cursor: pointer;
+            padding: 2px 8px;
+            border-radius: 6px;
+            transition: background 0.12s;
+            margin: -2px -8px;
+        }
+        .chat-header-left h2:hover { background: rgba(0,0,0,0.04); }
+        [data-theme="dark"] .chat-header-left h2:hover { background: rgba(255,255,255,0.04); }
+        .chat-header-left h2.editing { background: transparent; cursor: text; }
+        .title-edit-input {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            border-radius: 6px;
+            padding: 3px 8px;
+            font-family: inherit;
+            outline: none;
+            letter-spacing: -0.2px;
+            box-shadow: 0 0 0 3px rgba(79,70,229,0.1);
         }
         .chat-header-left span {
             font-size: 0.7rem;
-            color: #A5B4FC;
+            color: var(--text-muted);
         }
         .header-actions {
             display: flex;
-            gap: 12px;
+            gap: 8px;
             align-items: center;
         }
         .invite-btn {
-            background: rgba(139,92,246,0.2);
-            border: 1px solid rgba(139,92,246,0.5);
-            padding: 6px 14px;
-            border-radius: 40px;
-            font-size: 0.75rem;
-            color: #E0E7FF;
+            background: var(--accent-light);
+            border: 1px solid rgba(79,70,229,0.2);
+            padding: 5px 12px;
+            border-radius: var(--radius-sm);
+            font-size: 0.76rem;
+            color: var(--accent);
             cursor: pointer;
+            font-family: inherit;
+            font-weight: 500;
+            display: none;
+            transition: background 0.12s;
+        }
+        .invite-btn:hover { background: rgba(79,70,229,0.1); }
+
+        /* Tool calls toggle */
+        .toggle-row {
             display: flex;
             align-items: center;
             gap: 6px;
-        }
-        .toggle-switch {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background: rgba(139,92,246,0.2);
-            padding: 5px 12px;
-            border-radius: 40px;
-        }
-        .toggle-switch span {
-            font-size: 0.7rem;
-            color: #A5B4FC;
+            font-size: 0.73rem;
+            color: var(--text-muted);
         }
         .switch {
             position: relative;
             display: inline-block;
-            width: 44px;
-            height: 22px;
+            width: 34px;
+            height: 20px;
         }
-        .switch input { opacity:0; width:0; height:0; }
-        .slider {
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .switch .slider {
             position: absolute;
             cursor: pointer;
-            top:0; left:0; right:0; bottom:0;
-            background-color: #2d3748;
-            transition: .4s;
-            border-radius: 34px;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #d1d1d6;
+            border-radius: 20px;
+            transition: 0.2s;
         }
-        .slider:before {
+        .switch .slider:before {
             position: absolute;
             content: "";
-            height: 16px;
-            width: 16px;
-            left: 3px;
-            bottom: 3px;
-            background-color: white;
-            transition: .4s;
+            height: 16px; width: 16px;
+            left: 2px; bottom: 2px;
+            background: #fff;
             border-radius: 50%;
+            transition: 0.2s;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.15);
         }
-        input:checked + .slider {
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
-        }
-        input:checked + .slider:before { transform: translateX(22px); }
+        .switch input:checked + .slider { background: var(--accent); }
+        .switch input:checked + .slider:before { transform: translateX(14px); }
 
+        /* Messages */
         .messages {
             flex: 1;
             overflow-y: auto;
-            padding: 20px 24px;
+            padding: 24px 28px;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 22px;
         }
         .messages::-webkit-scrollbar { width: 5px; }
-        .messages::-webkit-scrollbar-track { background: rgba(139,92,246,0.1); border-radius: 3px; }
-        .messages::-webkit-scrollbar-thumb { background: linear-gradient(180deg, #8B5CF6, #06B6D4); border-radius: 3px; }
+        .messages::-webkit-scrollbar-track { background: transparent; }
+        .messages::-webkit-scrollbar-thumb { background: #d0d0d5; border-radius: 3px; }
+
+        .empty-chat {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            user-select: none;
+        }
 
         .message {
             display: flex;
             flex-direction: column;
-            max-width: 85%;
-            animation: messageSlide 0.3s ease-out;
+            max-width: 78%;
+            animation: fadeInUp 0.25s ease-out;
         }
-        .message.self {
-            align-self: flex-end;
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
+        .message.self { align-self: flex-end; }
         .message-meta {
-            font-size: 0.7rem;
-            font-weight: 500;
-            margin-bottom: 4px;
-            margin-left: 12px;
-            color: #A5B4FC;
-            letter-spacing: 0.3px;
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+            margin-left: 8px;
+            letter-spacing: 0.1px;
         }
         .message.self .message-meta {
             text-align: right;
-            margin-right: 12px;
+            margin-left: 0;
+            margin-right: 8px;
         }
         .bubble {
-            padding: 12px 20px;
-            border-radius: 24px;
-            background: rgba(30, 41, 59, 0.8);
-            backdrop-filter: blur(4px);
-            border: 1px solid rgba(255,255,255,0.08);
-            color: #E0E7FF;
+            padding: 10px 16px;
+            border-radius: 14px 14px 14px 3px;
+            background: var(--surface);
+            border: 1px solid var(--border-light);
+            color: var(--text);
             word-wrap: break-word;
-            font-size: 0.9rem;
-            line-height: 1.5;
-            transition: 0.1s;
+            font-size: 0.88rem;
+            line-height: 1.55;
+            box-shadow: var(--shadow-sm);
         }
         .message.self .bubble {
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
+            border-radius: 14px 14px 3px 14px;
+            background: var(--accent);
             border: none;
-            box-shadow: 0 2px 8px rgba(139,92,246,0.3);
+            color: #fff;
+            box-shadow: 0 2px 6px rgba(79,70,229,0.25);
         }
-        
-        /* ========= 统一 Markdown 渲染样式，解决字体大小不一致问题 ========= */
-        .bubble * {
-            font-size: inherit;
-            line-height: inherit;
-        }
+
+        /* Markdown styles inside bubble */
+        .bubble * { font-size: inherit; line-height: inherit; }
         .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 {
-            margin: 0.6em 0 0.3em;
+            margin: 0.5em 0 0.2em;
             font-weight: 600;
             line-height: 1.3;
         }
-        .bubble h1 { font-size: 1.3rem; }
-        .bubble h2 { font-size: 1.2rem; }
-        .bubble h3 { font-size: 1.1rem; }
-        .bubble h4, .bubble h5, .bubble h6 { font-size: 1rem; }
-        .bubble p {
-            margin: 0.5em 0;
-        }
-        .bubble ul, .bubble ol {
-            margin: 0.4em 0 0.6em 1.5em;
-            padding-left: 0;
-        }
-        .bubble li {
-            margin: 0.2em 0;
-            line-height: 1.45;
-        }
+        .bubble h1 { font-size: 1.25rem; }
+        .bubble h2 { font-size: 1.15rem; }
+        .bubble h3 { font-size: 1.05rem; }
+        .bubble h4, .bubble h5, .bubble h6 { font-size: 0.95rem; }
+        .bubble p { margin: 0.4em 0; }
+        .bubble ul, .bubble ol { margin: 0.3em 0 0.5em 1.5em; padding-left: 0; }
+        .bubble li { margin: 0.15em 0; line-height: 1.45; }
         .bubble code {
-            font-family: 'SF Mono', 'Monaco', 'Cascadia Code', monospace;
-            background: rgba(0, 0, 0, 0.4);
-            padding: 0.2rem 0.4rem;
-            border-radius: 8px;
-            font-size: 0.85rem;
-            color: #F0E6FF;
+            font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+            background: rgba(0, 0, 0, 0.05);
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.82rem;
             word-break: break-word;
+            color: #d9466b;
+        }
+        .message.self .bubble code {
+            background: rgba(255,255,255,0.2);
+            color: rgba(255,255,255,0.95);
         }
         .bubble pre {
-            background: #0A0E27;
-            padding: 0.75rem 1rem;
-            border-radius: 16px;
+            background: #f5f5f7;
+            padding: 0.7rem 0.9rem;
+            border-radius: var(--radius-sm);
             overflow-x: auto;
-            margin: 0.7em 0;
-            border: 1px solid rgba(139,92,246,0.3);
+            margin: 0.5em 0;
+            position: relative;
+            border: 1px solid var(--border-light);
         }
+        .message.self .bubble pre { background: rgba(0,0,0,0.15); border-color: transparent; }
         .bubble pre code {
             background: none;
             padding: 0;
-            font-size: 0.85rem;
-            color: #D4D6FF;
+            font-size: 0.82rem;
             display: block;
             line-height: 1.5;
+            color: var(--text);
         }
+        .message.self .bubble pre code { color: rgba(255,255,255,0.95); }
         .bubble blockquote {
-            border-left: 3px solid #8B5CF6;
-            margin: 0.6em 0;
-            padding-left: 1rem;
-            color: #C4D0FF;
-            font-style: normal;
-            background: rgba(139,92,246,0.05);
-            border-radius: 0 12px 12px 0;
+            border-left: 3px solid var(--accent);
+            margin: 0.4em 0;
+            padding-left: 0.8rem;
+            color: var(--text-secondary);
+            background: var(--accent-light);
+            border-radius: 0 6px 6px 0;
         }
-        .bubble a {
-            color: #06B6D4;
-            text-decoration: underline;
-            font-weight: 500;
-        }
-        .bubble img {
-            max-width: 100%;
-            border-radius: 16px;
-            margin: 0.5rem 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        }
+        .bubble a { color: var(--accent); text-decoration: underline; font-weight: 500; }
+        .bubble img { max-width: 100%; border-radius: var(--radius-sm); margin: 0.4rem 0; }
         .bubble table {
             border-collapse: collapse;
             width: 100%;
-            margin: 0.6rem 0;
-            font-size: 0.85rem;
-            background: rgba(0,0,0,0.2);
-            border-radius: 12px;
-            overflow: hidden;
+            margin: 0.5rem 0;
+            font-size: 0.82rem;
         }
         .bubble th, .bubble td {
-            border: 1px solid rgba(139,92,246,0.3);
-            padding: 8px 12px;
+            border: 1px solid var(--border-light);
+            padding: 6px 10px;
             text-align: left;
         }
-        .bubble th {
-            background: rgba(139,92,246,0.2);
-            font-weight: 600;
-        }
-        .bubble hr {
-            margin: 0.8em 0;
-            border: none;
-            height: 1px;
-            background: linear-gradient(90deg, transparent, #8B5CF6, #06B6D4, transparent);
-        }
-        .bubble strong {
-            font-weight: 600;
-            color: #FFFFFF;
-        }
-        .bubble em {
-            font-style: italic;
-            color: #C9D6FF;
-        }
-        /* 优化工具消息视觉效果 */
-        .bubble:has(> strong:first-child:contains("🔧")), 
-        .bubble:has(> p:first-child:contains("🔧")) {
-            background: rgba(236,72,153,0.15);
-            border-left: 3px solid #EC4899;
-        }
+        .bubble th { background: #f8f9fa; font-weight: 600; }
+        .bubble hr { margin: 0.6em 0; border: none; height: 1px; background: var(--border-light); }
+        .bubble strong { font-weight: 600; color: var(--text); }
+        .message.self .bubble strong { color: #fff; }
 
+        /* Copy code button */
+        .copy-code-btn {
+            position: absolute;
+            top: 5px;
+            right: 6px;
+            background: rgba(79,70,229,0.08);
+            border: 1px solid rgba(79,70,229,0.15);
+            color: var(--accent);
+            font-size: 0.66rem;
+            padding: 3px 8px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.12s;
+            z-index: 5;
+        }
+        .message.self .copy-code-btn { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: rgba(255,255,255,0.9); }
+        .copy-code-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+        /* Input zone */
         .input-zone {
-            padding: 16px 24px 24px;
-            background: linear-gradient(180deg, rgba(10,14,39,0.9), transparent);
-            backdrop-filter: blur(16px);
-            border-top: 1px solid rgba(139,92,246,0.2);
-            position: relative;
+            padding: 12px 24px 20px;
+            border-top: 1px solid var(--border);
+            flex-shrink: 0;
+            background: rgba(255,255,255,0.5);
         }
         .input-flex {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: flex-end;
         }
         .input-box {
             flex: 1;
-            background: rgba(0,0,0,0.35);
-            border-radius: 32px;
-            border: 1px solid rgba(255,255,255,0.1);
-            transition: 0.1s;
+            background: var(--surface);
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            transition: border-color 0.15s, box-shadow 0.15s;
+            box-shadow: var(--shadow-sm);
         }
         .input-box:focus-within {
-            border-color: #8B5CF6;
-            box-shadow: 0 0 0 2px rgba(139,92,246,0.3);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(79,70,229,0.08);
         }
         #messageInput {
             width: 100%;
             background: transparent;
             border: none;
-            padding: 12px 20px;
-            color: #E0E7FF;
+            padding: 11px 16px;
+            color: var(--text);
             font-size: 0.85rem;
             outline: none;
             resize: none;
-            font-family: 'Exo 2', monospace;
+            font-family: inherit;
+            line-height: 1.45;
         }
-        .btn-group {
-            display: flex;
-            gap: 8px;
-        }
+        #messageInput::placeholder { color: #999; }
+        .btn-group { display: flex; gap: 6px; }
         .icon-btn {
-            background: rgba(255,255,255,0.05);
-            border: none;
+            background: var(--surface);
+            border: 1px solid var(--border);
             width: 42px;
             height: 42px;
-            border-radius: 42px;
-            font-size: 1.1rem;
+            border-radius: 12px;
+            font-size: 1rem;
             cursor: pointer;
-            color: #A5B4FC;
-            transition: 0.1s;
+            color: var(--text-muted);
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: var(--shadow-sm);
         }
-        .icon-btn:hover {
-            background: rgba(139,92,246,0.3);
-            color: white;
-        }
+        .icon-btn:hover { background: var(--accent-light); color: var(--accent); border-color: rgba(79,70,229,0.2); }
         #sendBtn {
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4);
+            background: var(--accent);
             border: none;
-            padding: 0 24px;
-            border-radius: 40px;
-            font-weight: 600;
-            color: white;
+            padding: 0 22px;
+            border-radius: 12px;
+            font-weight: 500;
+            color: #fff;
             cursor: pointer;
             font-size: 0.85rem;
-            transition: 0.1s;
+            font-family: inherit;
+            transition: background 0.15s, box-shadow 0.15s;
+            box-shadow: 0 1px 2px rgba(79,70,229,0.3);
         }
-        #sendBtn:hover {
-            transform: scale(0.98);
-            box-shadow: 0 0 10px rgba(139,92,246,0.6);
+        #sendBtn:hover { background: var(--accent-hover); box-shadow: 0 2px 4px rgba(79,70,229,0.35); }
+        #sendBtn:disabled { opacity: 0.35; cursor: default; box-shadow: none; }
+        .status {
+            text-align: center;
+            font-size: 0.68rem;
+            color: var(--text-muted);
+            margin-top: 8px;
         }
+
+        /* Image preview */
         .preview-bar {
             display: flex;
             align-items: center;
-            gap: 12px;
-            margin: 6px 24px 0;
-            background: rgba(0,0,0,0.4);
-            border-radius: 32px;
-            padding: 5px 16px;
+            gap: 10px;
+            margin: 0 24px 8px;
+            background: var(--surface);
+            border-radius: var(--radius-sm);
+            padding: 4px 12px;
             width: fit-content;
+            box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border-light);
         }
-        .preview-img {
-            max-height: 40px;
-            border-radius: 12px;
-        }
-        .status {
-            text-align: center;
-            font-size: 0.65rem;
-            color: #A5B4FC;
-            margin-top: 10px;
-            letter-spacing: 0.5px;
-        }
+        .preview-img { max-height: 36px; border-radius: 6px; }
+        .remove-img { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 0.9rem; padding: 0 4px; }
+        .remove-img:hover { color: var(--danger); }
 
-        /* 审批弹窗优化 */
+        /* Approval modal */
         .modal-overlay {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.7);
-            backdrop-filter: blur(12px);
+            inset: 0;
+            background: rgba(0, 0, 0, 0.4);
             z-index: 2000;
             display: flex;
             align-items: center;
             justify-content: center;
             visibility: hidden;
             opacity: 0;
-            transition: all 0.3s ease;
+            transition: all 0.2s;
+            backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
         }
-        .modal-overlay.active {
-            visibility: visible;
-            opacity: 1;
-        }
+        .modal-overlay.active { visibility: visible; opacity: 1; }
         .approval-panel {
-            background: linear-gradient(145deg, rgba(15, 23, 42, 0.96), rgba(10, 14, 39, 0.98));
-            border: 1px solid rgba(139, 92, 246, 0.6);
-            border-radius: 28px;
-            padding: 24px 28px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
             width: 500px;
             max-width: 90vw;
             max-height: 80vh;
             display: flex;
             flex-direction: column;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.12);
         }
         .approval-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
-            padding-bottom: 8px;
-            border-bottom: 1px solid rgba(139,92,246,0.3);
+            margin-bottom: 14px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-light);
         }
-        .approval-header h3 {
-            font-family: 'Orbitron', monospace;
-            color: #EC4899;
-            font-size: 1.2rem;
-        }
-        .close-approval {
-            background: none;
-            border: none;
-            color: #A5B4FC;
-            font-size: 1.6rem;
-            cursor: pointer;
-        }
+        .approval-header h3 { font-size: 1rem; color: var(--text); font-weight: 600; }
+        .close-approval { background: none; border: none; color: var(--text-muted); font-size: 1.3rem; cursor: pointer; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; }
+        .close-approval:hover { background: #f0f0f0; }
         .approval-content {
-            background: rgba(0,0,0,0.4);
-            border-radius: 16px;
-            padding: 16px;
-            margin: 12px 0;
-            font-family: monospace;
+            background: #f8f9fa;
+            border-radius: var(--radius-sm);
+            padding: 14px;
+            margin: 10px 0;
+            font-family: "SF Mono", "Fira Code", monospace;
             font-size: 0.8rem;
-            color: #E0E7FF;
-            border-left: 3px solid #8B5CF6;
+            color: var(--text);
+            border-left: 3px solid var(--accent);
             max-height: 300px;
             overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-word;
         }
-        .approval-buttons {
-            display: flex;
-            gap: 10px;
-            margin-top: 16px;
-            justify-content: flex-end;
-        }
+        .approval-buttons { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
         .approval-btn {
-            padding: 6px 20px;
-            border-radius: 40px;
-            font-weight: 600;
+            padding: 7px 16px;
+            border-radius: var(--radius-sm);
+            font-weight: 500;
             cursor: pointer;
             font-size: 0.8rem;
             border: none;
+            font-family: inherit;
+            transition: box-shadow 0.12s;
         }
-        .approve-btn { background: linear-gradient(135deg, #10B981, #059669); color: white; }
-        .reject-btn { background: linear-gradient(135deg, #EF4444, #B91C1C); color: white; }
-        .edit-btn { background: linear-gradient(135deg, #F59E0B, #D97706); color: white; }
+        .approve-btn { background: var(--success); color: #fff; }
+        .approve-btn:hover { box-shadow: 0 2px 4px rgba(5,150,105,0.3); }
+        .reject-btn { background: var(--danger); color: #fff; }
+        .reject-btn:hover { box-shadow: 0 2px 4px rgba(220,38,38,0.3); }
+        .edit-btn { background: #f59e0b; color: #fff; }
+        .edit-btn:hover { box-shadow: 0 2px 4px rgba(245,158,11,0.3); }
         .edit-args-input {
             width: 100%;
-            background: #0A0E27;
-            border: 1px solid rgba(139,92,246,0.4);
-            border-radius: 16px;
+            background: #f8f9fa;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
             padding: 10px;
-            color: #E0E7FF;
-            font-family: monospace;
+            color: var(--text);
+            font-family: "SF Mono", "Fira Code", monospace;
             font-size: 0.75rem;
-            margin-top: 12px;
+            margin-top: 10px;
             resize: vertical;
         }
+        .edit-args-input:focus { outline: none; border-color: var(--accent); }
         .submit-edit {
-            background: #8B5CF6;
+            background: var(--accent);
             margin-top: 8px;
             width: 100%;
-            padding: 6px;
-            border-radius: 40px;
+            padding: 7px;
+            border-radius: var(--radius-sm);
             border: none;
-            color: white;
+            color: #fff;
             cursor: pointer;
+            font-family: inherit;
+            font-weight: 500;
         }
 
-        /* 快捷输入浮层 */
+        /* Suggest / Invite dropdown */
         .suggest-dropdown, .invite-dropdown {
             position: absolute;
-            bottom: 70px;
-            left: 30px;
-            background: rgba(15, 23, 42, 0.98);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(139,92,246,0.5);
-            border-radius: 20px;
-            padding: 8px 0;
+            bottom: 80px;
+            left: 20px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 4px 0;
             width: 220px;
             z-index: 300;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.08);
         }
-        .invite-dropdown {
-            left: auto;
-            right: 20px;
-            bottom: auto;
-            top: 70px;
-        }
+        .invite-dropdown { left: auto; right: 20px; bottom: auto; top: 60px; }
         .suggest-item {
-            padding: 8px 16px;
+            padding: 8px 14px;
             cursor: pointer;
-            color: #E0E7FF;
-            font-size: 0.85rem;
-            transition: 0.1s;
+            color: var(--text);
+            font-size: 0.83rem;
+            transition: background 0.1s;
         }
-        .suggest-item:hover {
-            background: rgba(139,92,246,0.3);
+        .suggest-item:hover { background: var(--accent-light); }
+
+        /* Members drawer */
+        .members-drawer {
+            position: fixed;
+            right: 0;
+            top: 0;
+            height: 100vh;
+            width: 280px;
+            background: var(--surface);
+            border-left: 1px solid var(--border);
+            z-index: 500;
+            transform: translateX(100%);
+            transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            flex-direction: column;
+            box-shadow: -4px 0 20px rgba(0,0,0,0.06);
         }
-        @keyframes messageSlide {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
+        .members-drawer.open { transform: translateX(0); }
+        .drawer-header {
+            padding: 18px 16px 12px;
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-weight: 600;
+            font-size: 0.9rem;
         }
-        /* 代码块复制按钮 */
-        .bubble pre {
-            position: relative;
-            overflow: visible;
-        }
-        .copy-code-btn {
-            position: absolute;
-            top: 8px;
-            right: 12px;
-            background: rgba(139, 92, 246, 0.7);
+        .drawer-close {
+            background: none;
             border: none;
-            color: white;
-            font-size: 0.7rem;
-            padding: 4px 10px;
-            border-radius: 20px;
+            color: var(--text-muted);
+            font-size: 1.2rem;
             cursor: pointer;
-            backdrop-filter: blur(4px);
-            font-weight: 500;
-            transition: 0.1s;
-            z-index: 5;
-            font-family: 'Exo 2', monospace;
+            width: 28px; height: 28px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
-        .copy-code-btn:hover {
-            background: #8B5CF6;
-            transform: scale(0.96);
+        .drawer-close:hover { background: #f0f0f0; }
+        .drawer-members {
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            overflow-y: auto;
+        }
+        .member-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: #f8f9fa;
+            border-radius: var(--radius-sm);
+        }
+        .member-avatar {
+            width: 30px; height: 30px;
+            background: var(--accent);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            flex-shrink: 0;
+            color: #fff;
+        }
+        .member-name { font-size: 0.82rem; flex: 1; font-weight: 500; }
+        .member-status { font-size: 0.65rem; margin-left: auto; }
+        .drawer-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.2);
+            z-index: 499;
+            opacity: 0;
+            transition: opacity 0.25s;
+            pointer-events: none;
+        }
+        .drawer-backdrop.show { opacity: 1; pointer-events: auto; }
+
+        /* Skeleton loading */
+        .skeleton-line {
+            height: 14px;
+            background: #e8e8ec;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            animation: shimmer 1.2s infinite;
+            background: linear-gradient(90deg, #e8e8ec 25%, #f0f0f3 50%, #e8e8ec 75%);
+            background-size: 200% 100%;
+        }
+        @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+        /* Rename input inline */
+        .conv-rename-input {
+            flex: 1;
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            border-radius: 4px;
+            padding: 2px 6px;
+            color: var(--text);
+            font-size: 0.82rem;
+            font-family: inherit;
+            outline: none;
         }
     </style>
 </head>
 <body>
-<div class="grid-background"></div>
-<div class="agent-container">
-    <!-- 左侧边栏 -->
-    <div class="sidebar">
-        <div class="sidebar-header">
-            <h1>AgentPro</h1>
-            <p style="font-size:0.7rem; color:#A5B4FC;">intelligent swarm</p>
-        </div>
-        <div class="section-title">🤖 智能体伙伴</div>
-        <div class="agents-list" id="agentsList"></div>
-        <div class="section-title">🏠 群聊房间</div>
-        <div class="rooms-list" id="roomsList"></div>
+
+<!-- ── Sidebar ── -->
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <div class="logo">AgentPro</div>
+        <div class="subtitle">Multi-Agent Console</div>
+    </div>
+
+    <div class="agent-select-area">
+        <select class="agent-select" id="agentSelect">
+            <option value="">-- Select Agent --</option>
+        </select>
+    </div>
+
+    <button class="new-chat-btn" id="newChatBtn" disabled>+ New Chat</button>
+
+    <div class="conv-list-label">Conversations</div>
+    <div class="conv-list" id="convList">
+        <div class="conv-empty">Select an agent to start</div>
+    </div>
+
+    <!-- Rooms (collapsible) -->
+    <div class="rooms-section" id="roomsSection">
+        <div class="section-title">Group Rooms</div>
+        <div id="roomsList"></div>
         <div class="room-actions">
-            <div class="room-action-item">
-                <input type="text" id="createRoomInput" placeholder="房间ID">
-                <button id="createRoomBtn">创建</button>
+            <div class="room-action-row">
+                <input type="text" id="createRoomInput" placeholder="Room ID...">
+                <button id="createRoomBtn">Create</button>
             </div>
-            <div class="room-action-item">
-                <input type="text" id="joinRoomInput" placeholder="房间ID">
-                <button id="joinRoomBtn">加入</button>
+            <div class="room-action-row">
+                <input type="text" id="joinRoomInput" placeholder="Room ID...">
+                <button id="joinRoomBtn">Join</button>
             </div>
         </div>
     </div>
 
-    <!-- 中间聊天区域 -->
-    <div class="chat-main">
-        <div class="chat-header">
-            <div class="chat-header-left">
-                <h2 id="currentChatName">未选择</h2>
-                <span id="currentChatMeta">就绪</span>
-            </div>
-            <div class="header-actions">
-                <button id="inviteAgentBtn" class="invite-btn" style="display: none;">➕ 邀请Agent</button>
-                <div class="toggle-switch">
-                    <span>工具调用</span>
-                    <label class="switch">
-                        <input type="checkbox" id="toggleToolCalls" checked>
-                        <span class="slider"></span>
-                    </label>
-                </div>
-            </div>
+    <div class="settings-row">
+        <button class="settings-btn" id="themeToggle" title="Toggle theme">☀️</button>
+        <span class="settings-divider"></span>
+        <button class="settings-btn" id="fontDown" title="Smaller text">A-</button>
+        <span class="font-size-label" id="fontSizeLabel">M</span>
+        <button class="settings-btn" id="fontUp" title="Larger text">A+</button>
+        <span class="settings-divider"></span>
+        <button class="settings-btn" id="roomsToggle" title="Rooms">🏠</button>
+    </div>
+    <div class="sidebar-footer">
+        <span class="dot"></span> super_user
+    </div>
+</aside>
+
+<!-- ── Main Chat ── -->
+<main class="chat-main">
+    <div class="chat-header">
+        <div class="chat-header-left">
+            <h2 id="currentChatName" title="Click to rename">AgentPro</h2>
+            <span id="currentChatMeta">Ready</span>
         </div>
-        <div class="messages" id="messages"></div>
-        <div id="imagePreview" class="preview-bar" style="display: none;">
-            <img id="previewImg" class="preview-img">
-            <button id="removeImageBtn" class="remove-img" style="background:none; border:none; color:#EC4899;">✖</button>
-        </div>
-        <div class="input-zone" id="inputZone">
-            <div class="input-flex">
-                <div class="input-box">
-                    <textarea id="messageInput" rows="1" placeholder="输入消息... @提及Agent  /new 新话题" disabled></textarea>
-                </div>
-                <div class="btn-group">
-                    <button id="imageBtn" class="icon-btn" title="发送图片">📷</button>
-                    <button id="sendBtn" disabled>发送</button>
-                </div>
+        <div class="header-actions">
+            <button class="invite-btn" id="inviteAgentBtn">+ Invite</button>
+            <button class="icon-btn" id="membersToggleBtn" style="display:none; width:auto; padding:0 10px; font-size:0.78rem;">Members</button>
+            <div class="toggle-row">
+                <span>Tools</span>
+                <label class="switch">
+                    <input type="checkbox" id="toggleToolCalls" checked>
+                    <span class="slider"></span>
+                </label>
             </div>
-            <div class="status" id="connectionStatus">⚡ 初始化</div>
         </div>
     </div>
 
-    <!-- 右侧成员面板 -->
-    <div class="members-panel" id="membersPanel" style="display: none;">
-        <div class="members-panel-header">
-            👥 群成员
+    <div class="messages" id="messages">
+        <div class="empty-chat">Select an agent and start a conversation</div>
+    </div>
+
+    <div id="imagePreview" class="preview-bar" style="display:none;">
+        <img id="previewImg" class="preview-img">
+        <button id="removeImageBtn" class="remove-img">&times;</button>
+    </div>
+
+    <div class="input-zone" id="inputZone">
+        <div class="input-flex">
+            <div class="input-box">
+                <textarea id="messageInput" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter new line)" disabled></textarea>
+            </div>
+            <div class="btn-group">
+                <button id="imageBtn" class="icon-btn" title="Attach image">&#128247;</button>
+                <button id="sendBtn" disabled>Send</button>
+            </div>
         </div>
-        <div class="members-list" id="membersList">
-            <div class="empty-members">暂无成员</div>
-        </div>
+        <div class="status" id="connectionStatus">Connecting...</div>
+    </div>
+</main>
+
+<!-- ── Members Drawer ── -->
+<div class="drawer-backdrop" id="drawerBackdrop"></div>
+<div class="members-drawer" id="membersDrawer">
+    <div class="drawer-header">
+        Members
+        <button class="drawer-close" id="closeDrawerBtn">&times;</button>
+    </div>
+    <div class="drawer-members" id="membersList">
+        <div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">No members yet</div>
     </div>
 </div>
 
-<input type="file" id="imageInput" accept="image/*" style="display: none;">
+<input type="file" id="imageInput" accept="image/*" style="display:none;">
 
-<!-- 审批遮罩 -->
+<!-- ── Approval Modal ── -->
 <div id="approvalModalOverlay" class="modal-overlay">
     <div class="approval-panel">
         <div class="approval-header">
-            <h3>🔐 工具调用审批</h3>
+            <h3>Tool Call Approval</h3>
             <button class="close-approval" id="closeApprovalBtn">&times;</button>
         </div>
         <div id="approvalContent" class="approval-content"></div>
         <div class="approval-buttons">
-            <button id="approveBtn" class="approval-btn approve-btn">✅ 批准</button>
-            <button id="rejectBtn" class="approval-btn reject-btn">❌ 拒绝</button>
-            <button id="editBtn" class="approval-btn edit-btn">✏️ 修改参数</button>
+            <button id="approveBtn" class="approval-btn approve-btn">Approve</button>
+            <button id="rejectBtn" class="approval-btn reject-btn">Reject</button>
+            <button id="editBtn" class="approval-btn edit-btn">Edit Args</button>
         </div>
-        <input type="text" id="editArgsInput" class="edit-args-input" placeholder='修改后的参数 (JSON格式)' style="display:none;">
-        <button id="submitEditBtn" class="submit-edit" style="display:none;">提交修改</button>
+        <input type="text" id="editArgsInput" class="edit-args-input" placeholder='Edited args (JSON)' style="display:none;">
+        <button id="submitEditBtn" class="submit-edit" style="display:none;">Submit Edit</button>
     </div>
 </div>
 
 <script>
-    let ws = null;
-    let currentAgent = null;
-    let currentRoom = null;
-    let agents = [];
-    let rooms = {};
-    let messageHistory = {};
-    let roomMessages = {};
-    let currentImageBase64 = null;
-    let pendingApproval = null;
-    let showToolCalls = true;
-    let onlineAgentsSet = new Set();
+// ──────────────── State ────────────────
+let ws = null;
+let activeAgent = null;
+let activeThreadId = null;
+let activeRoom = null;
+let agents = [];
+let onlineAgentsSet = new Set();
+let rooms = {};
+let roomMessages = {};
+let currentImageBase64 = null;
+let pendingApproval = null;
+let showToolCalls = true;
 
-    // DOM
-    const agentsContainer = document.getElementById('agentsList');
-    const roomsContainer = document.getElementById('roomsList');
-    const messagesDiv = document.getElementById('messages');
-    const messageInput = document.getElementById('messageInput');
-    const sendBtn = document.getElementById('sendBtn');
-    const currentChatNameSpan = document.getElementById('currentChatName');
-    const currentChatMetaSpan = document.getElementById('currentChatMeta');
-    const connStatusSpan = document.getElementById('connectionStatus');
-    const previewDiv = document.getElementById('imagePreview');
-    const previewImg = document.getElementById('previewImg');
-    const removeImgBtn = document.getElementById('removeImageBtn');
-    const imageInput = document.getElementById('imageInput');
-    const imageBtn = document.getElementById('imageBtn');
-    const toggleSwitch = document.getElementById('toggleToolCalls');
-    const createRoomBtn = document.getElementById('createRoomBtn');
-    const joinRoomBtn = document.getElementById('joinRoomBtn');
-    const createRoomInput = document.getElementById('createRoomInput');
-    const joinRoomInput = document.getElementById('joinRoomInput');
-    const inviteAgentBtn = document.getElementById('inviteAgentBtn');
-    const membersPanel = document.getElementById('membersPanel');
-    const membersListDiv = document.getElementById('membersList');
+// conversations: { agentId: [{ thread_id, title, created_at, updated_at, is_archived }] }
+let conversations = {};
+// messageCache: { threadId: [{ role, content, created_at }] }
+let messageCache = {};
 
-    // approval
-    const modalOverlay = document.getElementById('approvalModalOverlay');
-    const approvalContentDiv = document.getElementById('approvalContent');
-    const approveBtn = document.getElementById('approveBtn');
-    const rejectBtn = document.getElementById('rejectBtn');
-    const editBtn = document.getElementById('editBtn');
-    const editArgsInput = document.getElementById('editArgsInput');
-    const submitEditBtn = document.getElementById('submitEditBtn');
-    const closeApprovalBtn = document.getElementById('closeApprovalBtn');
+// ──────────────── DOM refs ────────────────
+const agentSelect = document.getElementById('agentSelect');
+const convList = document.getElementById('convList');
+const newChatBtn = document.getElementById('newChatBtn');
+const messagesDiv = document.getElementById('messages');
+const messageInput = document.getElementById('messageInput');
+const sendBtn = document.getElementById('sendBtn');
+const currentChatNameSpan = document.getElementById('currentChatName');
+const currentChatMetaSpan = document.getElementById('currentChatMeta');
+const connStatusSpan = document.getElementById('connectionStatus');
+const previewDiv = document.getElementById('imagePreview');
+const previewImg = document.getElementById('previewImg');
+const removeImgBtn = document.getElementById('removeImageBtn');
+const imageInput = document.getElementById('imageInput');
+const imageBtn = document.getElementById('imageBtn');
+const toggleSwitch = document.getElementById('toggleToolCalls');
+const inviteAgentBtn = document.getElementById('inviteAgentBtn');
+const membersToggleBtn = document.getElementById('membersToggleBtn');
+const membersDrawer = document.getElementById('membersDrawer');
+const drawerBackdrop = document.getElementById('drawerBackdrop');
+const closeDrawerBtn = document.getElementById('closeDrawerBtn');
+const membersListDiv = document.getElementById('membersList');
+const roomsListDiv = document.getElementById('roomsList');
+const roomsSection = document.getElementById('roomsSection');
+const roomsToggle = document.getElementById('roomsToggle');
+const themeToggle = document.getElementById('themeToggle');
+const fontDown = document.getElementById('fontDown');
+const fontUp = document.getElementById('fontUp');
+const fontSizeLabel = document.getElementById('fontSizeLabel');
+const createRoomBtn = document.getElementById('createRoomBtn');
+const joinRoomBtn = document.getElementById('joinRoomBtn');
+const createRoomInput = document.getElementById('createRoomInput');
+const joinRoomInput = document.getElementById('joinRoomInput');
+const modalOverlay = document.getElementById('approvalModalOverlay');
+const approvalContentDiv = document.getElementById('approvalContent');
+const approveBtn = document.getElementById('approveBtn');
+const rejectBtn = document.getElementById('rejectBtn');
+const editBtn = document.getElementById('editBtn');
+const editArgsInput = document.getElementById('editArgsInput');
+const submitEditBtn = document.getElementById('submitEditBtn');
+const closeApprovalBtn = document.getElementById('closeApprovalBtn');
 
-    marked.setOptions({ breaks: true, gfm: true });
+marked.setOptions({ breaks: true, gfm: true });
 
-    function escapeHtml(str) { if(!str) return ''; return str.replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
-    function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
+// ──────────────── Helpers ────────────────
+function escapeHtml(str) {
+    if (!str) return '';
+    return str.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+}
+function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
 
-    async function saveMessage(threadId, role, content) { try { await fetch('/chat/history', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ thread_id:threadId, role, content }) }); } catch(e){} }
-    async function loadHistory(threadId) { try { const resp = await fetch(`/chat/history?thread_id=${encodeURIComponent(threadId)}&limit=200`); return await resp.json(); } catch(e){ return []; } }
-    async function loadAgentHistory(agentId) {
-        const threadId = `private_${agentId}_super_user`;
-        const history = await loadHistory(threadId);
-        if(!messageHistory[agentId]) messageHistory[agentId] = [];
-        for(let msg of history) messageHistory[agentId].push({ sender: msg.role === 'user' ? '我' : agentId, text: msg.content, time: new Date(msg.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' }) });
+function generateThreadId(agentId) {
+    const uuid8 = crypto.randomUUID().substring(0, 8);
+    return `private_${agentId}_super_user_${uuid8}`;
+}
+
+function fmtTime(isoStr) {
+    const d = new Date(isoStr);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return d.toLocaleDateString('zh-CN');
+}
+
+async function api(method, path, body) {
+    try {
+        const opts = { method, headers: { 'Content-Type': 'application/json' } };
+        if (body) opts.body = JSON.stringify(body);
+        const resp = await fetch(path, opts);
+        return await resp.json();
+    } catch (e) { return null; }
+}
+
+// ──────────────── Theme ────────────────
+function getSavedTheme() { return localStorage.getItem('agentpro-theme') || 'light'; }
+function applyTheme(theme) {
+    if (theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        themeToggle.textContent = '🌙';
+        themeToggle.title = 'Switch to light';
+    } else {
+        document.documentElement.removeAttribute('data-theme');
+        themeToggle.textContent = '☀️';
+        themeToggle.title = 'Switch to dark';
     }
+    localStorage.setItem('agentpro-theme', theme);
+}
+function toggleTheme() {
+    const current = document.documentElement.hasAttribute('data-theme') ? 'dark' : 'light';
+    applyTheme(current === 'dark' ? 'light' : 'dark');
+}
 
-    function renderAgents() {
-        agentsContainer.innerHTML = '';
-        agents.forEach(agent => {
-            const card = document.createElement('div');
-            card.className = `agent-card ${currentAgent === agent && !currentRoom ? 'active' : ''}`;
-            card.innerHTML = `<div class="agent-avatar">🤖</div><div class="agent-info"><div class="agent-name">${escapeHtml(agent)}</div><div class="agent-status">在线</div></div>`;
-            card.onclick = () => selectAgent(agent);
-            agentsContainer.appendChild(card);
+// ──────────────── Font size ────────────────
+const FONT_SIZES = { small: 0.85, medium: 1, large: 1.15 };
+const FONT_LABELS = { small: 'S', medium: 'M', large: 'L' };
+
+function getSavedFontSize() { return localStorage.getItem('agentpro-font') || 'medium'; }
+function applyFontSize(size) {
+    document.documentElement.style.setProperty('--font-scale', FONT_SIZES[size] || 1);
+    fontSizeLabel.textContent = FONT_LABELS[size] || 'M';
+    localStorage.setItem('agentpro-font', size);
+}
+function adjustFontSize(delta) {
+    const sizes = ['small', 'medium', 'large'];
+    const current = getSavedFontSize();
+    const idx = Math.min(Math.max(sizes.indexOf(current) + delta, 0), sizes.length - 1);
+    applyFontSize(sizes[idx]);
+}
+
+// ──────────────── Rename conversation ────────────────
+async function renameConversation(threadId, newTitle) {
+    if (!newTitle.trim()) return;
+    await api('PATCH', `/chat/conversations/${encodeURIComponent(threadId)}`, { title: newTitle.trim() });
+    const conv = findConversation(threadId);
+    if (conv) conv.title = newTitle.trim();
+    // Update header if this is the active conversation
+    if (activeThreadId === threadId) {
+        currentChatNameSpan.textContent = newTitle.trim();
+    }
+    renderConvList();
+}
+
+function startRenameConvItem(threadId, titleEl) {
+    const oldTitle = findConversation(threadId)?.title || '';
+    const input = document.createElement('input');
+    input.className = 'conv-rename-input';
+    input.value = oldTitle;
+    input.style.cssText = titleEl.style.cssText;
+    titleEl.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = async () => {
+        const newTitle = input.value.trim() || oldTitle;
+        const span = document.createElement('span');
+        span.className = 'conv-title';
+        span.textContent = newTitle;
+        input.replaceWith(span);
+        if (newTitle !== oldTitle) await renameConversation(threadId, newTitle);
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { input.value = oldTitle; commit(); } });
+}
+
+function startRenameHeader() {
+    if (!activeThreadId || activeRoom) return;
+    const h2 = currentChatNameSpan;
+    const oldTitle = h2.textContent;
+    const input = document.createElement('input');
+    input.className = 'title-edit-input';
+    input.value = oldTitle;
+    h2.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = async () => {
+        const newTitle = input.value.trim() || oldTitle;
+        const newH2 = document.createElement('h2');
+        newH2.id = 'currentChatName';
+        newH2.title = 'Click to rename';
+        newH2.textContent = newTitle;
+        newH2.addEventListener('click', startRenameHeader);
+        input.replaceWith(newH2);
+        currentChatNameSpan = newH2;
+        if (newTitle !== oldTitle) await renameConversation(activeThreadId, newTitle);
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') { input.value = oldTitle; commit(); } });
+}
+
+// ──────────────── Conversation management ────────────────
+async function loadConversations(agentId) {
+    const data = await api('GET', `/chat/conversations?agent_id=${encodeURIComponent(agentId)}`);
+    if (data && data.conversations) {
+        conversations[agentId] = data.conversations;
+    } else {
+        conversations[agentId] = [];
+    }
+}
+
+function findConversation(threadId) {
+    for (const agentId in conversations) {
+        const found = conversations[agentId].find(c => c.thread_id === threadId);
+        if (found) return found;
+    }
+    return null;
+}
+
+function renderConvList() {
+    convList.innerHTML = '';
+    if (!activeAgent) {
+        convList.innerHTML = '<div class="conv-empty">Select an agent to start</div>';
+        return;
+    }
+    const convs = conversations[activeAgent] || [];
+    if (convs.length === 0) {
+        convList.innerHTML = '<div class="conv-empty">No conversations yet</div>';
+        return;
+    }
+    convs.forEach(c => {
+        const item = document.createElement('div');
+        item.className = `conv-item${c.thread_id === activeThreadId && !activeRoom ? ' active' : ''}`;
+        item.innerHTML = `
+            <span class="conv-title">${escapeHtml(c.title || 'New Chat')}</span>
+            <span class="conv-time">${fmtTime(c.updated_at || c.created_at)}</span>
+            <button class="conv-edit" data-thread="${escapeHtml(c.thread_id)}" title="Rename">✏️</button>
+            <button class="conv-delete" data-thread="${escapeHtml(c.thread_id)}" title="Archive">&times;</button>
+        `;
+        item.onclick = (e) => {
+            if (e.target.classList.contains('conv-delete') || e.target.classList.contains('conv-edit')) return;
+            switchConversation(activeAgent, c.thread_id);
+        };
+        item.addEventListener('dblclick', (e) => {
+            if (e.target.classList.contains('conv-delete') || e.target.classList.contains('conv-edit')) return;
+            const titleEl = item.querySelector('.conv-title');
+            if (titleEl) startRenameConvItem(c.thread_id, titleEl);
         });
-    }
-
-    async function selectAgent(agent) {
-        if(currentRoom) { currentRoom = null; renderRooms(); hideMembersPanel(); }
-        currentAgent = agent;
-        currentChatNameSpan.innerText = agent;
-        currentChatMetaSpan.innerText = '对话中';
-        messageInput.disabled = false; sendBtn.disabled = false;
-        inviteAgentBtn.style.display = 'none';
-        renderAgents();
-        if(!messageHistory[agent]) { messageHistory[agent] = []; await loadAgentHistory(agent); }
-        loadMessages(agent);
-        messageInput.focus();
-    }
-
-    function loadMessages(agentId) {
-        messagesDiv.innerHTML = '';
-        (messageHistory[agentId] || []).forEach(msg => { if(!showToolCalls && isToolMessage(msg.text)) return; displayMessage(msg.sender, msg.text, msg.time); });
-        addCopyButtonsToCodeBlocks();
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-
-    function displayMessage(sender, text, time) {
-        const isSelf = (sender === '我');
-        const msgDiv = document.createElement('div');
-        msgDiv.className = `message ${isSelf ? 'self' : ''}`;
-        const rendered = marked.parse(text);
-        msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(isSelf ? '我' : sender)} · ${escapeHtml(time || new Date().toLocaleTimeString())}</div><div class="bubble">${rendered}</div>`;
-        messagesDiv.appendChild(msgDiv);
-        addCopyButtonsToCodeBlocks();
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-
-    function sendMessage() {
-        let text = messageInput.value.trim();
-        if (!text && !currentImageBase64) return;
-        let newThread = false;
-        if (text.startsWith('/new')) { newThread = true; text = text.substring(4).trim() || "新对话"; }
-        const time = new Date().toLocaleTimeString();
-
-        if (text && currentAgent) {
-            saveMessage(`private_${currentAgent}_super_user`, 'user', text);
-            if (!messageHistory[currentAgent]) messageHistory[currentAgent] = [];
-            messageHistory[currentAgent].push({ sender: '我', text, time });
-            displayMessage('我', text, time);
-            ws.send(JSON.stringify({ type: 'send', to: currentAgent, text, image: currentImageBase64 || null, new_thread: newThread }));
-        }
-        else if (currentRoom) {
-            if (!roomMessages[currentRoom]) roomMessages[currentRoom] = [];
-            roomMessages[currentRoom].push({ sender: '我', text, time });
-            displayMessage('我', text, time);
-            ws.send(JSON.stringify({ type: 'group_message', room_id: currentRoom, text: text, image: currentImageBase64 || null }));
-        }
-
-        messageInput.value = '';
-        currentImageBase64 = null;
-        previewDiv.style.display = 'none';
-        imageInput.value = '';
-        messageInput.style.height = 'auto';
-        messageInput.focus();
-    }
-
-    function renderRooms() {
-        roomsContainer.innerHTML = '';
-        for(let roomId in rooms) {
-            const room = rooms[roomId];
-            const card = document.createElement('div');
-            card.className = `room-card ${currentRoom === roomId && !currentAgent ? 'active' : ''}`;
-            card.innerHTML = `<div class="room-avatar">🏠</div><div class="room-info"><div class="room-name">${escapeHtml(roomId)}</div><div class="room-members">${room.members?.length || 0} 人</div></div>${room.unread ? '<div class="unread-dot"></div>' : ''}`;
-            card.onclick = () => {
-                if(currentAgent) { currentAgent = null; renderAgents(); }
-                currentRoom = roomId;
-                currentChatNameSpan.innerText = roomId;
-                currentChatMetaSpan.innerText = '群聊';
-                messageInput.disabled = false; sendBtn.disabled = false;
-                inviteAgentBtn.style.display = 'flex';
-                renderRooms();
-                showMembersPanel();
-                loadRoomMessages(roomId);
-                if(rooms[roomId]) rooms[roomId].unread = false;
-                if(ws) ws.send(JSON.stringify({ type:'get_room_members', room_id: roomId }));
-            };
-            roomsContainer.appendChild(card);
-        }
-    }
-
-    function loadRoomMessages(roomId) {
-        messagesDiv.innerHTML = '';
-        (roomMessages[roomId] || []).forEach(msg => { if(!showToolCalls && isToolMessage(msg.text)) return; displayMessage(msg.sender, msg.text, msg.time); });
-        addCopyButtonsToCodeBlocks();
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
-
-    function updateMembersPanel(members) {
-        membersListDiv.innerHTML = '';
-        if (!members || members.length === 0) {
-            membersListDiv.innerHTML = '<div class="empty-members">暂无成员</div>';
-            return;
-        }
-        const isWsConnected = (ws && ws.readyState === WebSocket.OPEN);
-        members.forEach(m => {
-            let isOnline = false;
-            let displayName = m;
-            let avatar = '🤖';
-            if (m === 'super_user') {
-                isOnline = isWsConnected;
-                displayName = '我';
-                avatar = '👤';
-            } else {
-                isOnline = onlineAgentsSet.has(m);
-            }
-            const statusText = isOnline ? '在线' : '离线';
-            const statusColor = isOnline ? '#10B981' : '#6B7280';
-            const memberDiv = document.createElement('div');
-            memberDiv.className = 'member-item';
-            memberDiv.innerHTML = `
-                <div class="member-avatar">${avatar}</div>
-                <div class="member-name">${escapeHtml(displayName)}</div>
-                <div class="member-status" style="color: ${statusColor};">${statusText}</div>
-            `;
-            membersListDiv.appendChild(memberDiv);
-        });
-    }
-
-    function showMembersPanel() { membersPanel.style.display = 'flex'; }
-    function hideMembersPanel() { membersPanel.style.display = 'none'; }
-
-    function showInviteDropdown() {
-        if(!currentRoom) return;
-        const existing = rooms[currentRoom]?.members || [];
-        const available = agents.filter(a => !existing.includes(a));
-        if(available.length===0) { connStatusSpan.innerText = '无可用Agent邀请'; return; }
-        let dropdown = document.querySelector('.invite-dropdown');
-        if(dropdown) dropdown.remove();
-        const div = document.createElement('div');
-        div.className = 'invite-dropdown';
-        div.innerHTML = `<h4 style="padding:8px 12px; color:#06B6D4;">邀请加入</h4>`;
-        available.forEach(ag => {
-            const item = document.createElement('div');
-            item.className = 'suggest-item';
-            item.innerText = `🤖 ${ag}`;
-            item.onclick = () => {
-                ws.send(JSON.stringify({ type: 'invite_to_room', room_id: currentRoom, target_agent: ag }));
-                connStatusSpan.innerText = `邀请 ${ag} 加入...`;
-                div.remove();
-            };
-            div.appendChild(item);
-        });
-        document.body.appendChild(div);
-        setTimeout(() => document.addEventListener('click', function remove(e){ if(!div.contains(e.target) && e.target !== inviteAgentBtn) { div.remove(); document.removeEventListener('click', remove); } }), 10);
-    }
-
-    let suggestDropdown = null;
-    function closeSuggest() { if(suggestDropdown) { suggestDropdown.remove(); suggestDropdown = null; } }
-    function showSuggest(items, onSelect) {
-        closeSuggest();
-        const rect = messageInput.getBoundingClientRect();
-        const div = document.createElement('div');
-        div.className = 'suggest-dropdown';
-        items.forEach(item => {
-            const opt = document.createElement('div');
-            opt.className = 'suggest-item';
-            opt.innerText = item;
-            opt.onclick = () => { onSelect(item); closeSuggest(); messageInput.focus(); };
-            div.appendChild(opt);
-        });
-        document.body.appendChild(div);
-        div.style.bottom = `${window.innerHeight - rect.top + 10}px`;
-        div.style.left = `${rect.left}px`;
-        suggestDropdown = div;
-        setTimeout(() => { const handleClick = (e) => { if(!div.contains(e.target) && e.target !== messageInput) closeSuggest(); document.removeEventListener('click', handleClick); }; document.addEventListener('click', handleClick); }, 0);
-    }
-    messageInput.addEventListener('input', function(e) {
-        const val = this.value;
-        const cursorPos = this.selectionStart;
-        const beforeCursor = val.slice(0, cursorPos);
-        const lastAtIndex = beforeCursor.lastIndexOf('@');
-        const lastSlash = beforeCursor.lastIndexOf('/');
-        if(lastAtIndex !== -1 && lastAtIndex === beforeCursor.length - 1) {
-            const availableAgents = agents.filter(a => a !== 'super_user');
-            showSuggest(availableAgents, (selected) => {
-                const newVal = val.slice(0, lastAtIndex) + '@' + selected + ' ' + val.slice(cursorPos);
-                messageInput.value = newVal;
-                messageInput.selectionStart = messageInput.selectionEnd = lastAtIndex + selected.length + 2;
-                messageInput.dispatchEvent(new Event('input'));
-            });
-        } else if(lastSlash !== -1 && lastSlash === beforeCursor.length-1 && val[lastSlash] === '/') {
-            showSuggest(['/new '], (cmd) => {
-                const newVal = val.slice(0, lastSlash) + cmd + ' ';
-                messageInput.value = newVal;
-                messageInput.selectionStart = messageInput.selectionEnd = newVal.length;
-            });
-        } else { closeSuggest(); }
+        convList.appendChild(item);
     });
-    messageInput.addEventListener('blur', () => setTimeout(closeSuggest, 200));
 
-    function connect() {
-        ws = new WebSocket(`ws://${window.location.host}/ws`);
-        ws.onopen = () => { connStatusSpan.innerText = '● 已连接'; connStatusSpan.style.color = '#06B6D4'; ws.send(JSON.stringify({ type:'list_rooms' })); updateMembersPanel(rooms[currentRoom]?.members || []);};
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'agents') {
-                agents = (data.agents || []).filter(a => a !== 'super_user');
-                onlineAgentsSet.clear();
-                agents.forEach(a => onlineAgentsSet.add(a));
-                renderAgents();
-                if (currentRoom && rooms[currentRoom]) updateMembersPanel(rooms[currentRoom].members);
-            } else if(data.type === 'message') {
-                const from=data.from, text=data.text, time=new Date().toLocaleTimeString();
-                saveMessage(`private_${from}_super_user`, 'assistant', text);
-                if(!messageHistory[from]) messageHistory[from]=[];
-                messageHistory[from].push({ sender:from, text, time });
-                if(currentAgent===from && (showToolCalls || !isToolMessage(text))) displayMessage(from,text,time);
-                else renderAgents();
-            } else if (data.type === 'group_message') {
-                const rid = data.room_id;
-                const from = data.from;
-                let text = data.text || (data.payload?.text);
-                if (!text) return;
-                const time = new Date().toLocaleTimeString();
-                if (!roomMessages[rid]) roomMessages[rid] = [];
-                roomMessages[rid].push({ sender: from, text, time });
-                if (currentRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time);
-                else if (rooms[rid]) rooms[rid].unread = true;
-                renderRooms();
-            } else if(data.type === 'room_members_update' || data.type === 'room_members') {
-                const rid = data.room_id;
-                const members = data.members;
-                if(!rooms[rid]) rooms[rid] = { members: [], unread: false };
-                rooms[rid].members = members;
-                if(currentRoom === rid) updateMembersPanel(members);
-                renderRooms();
-            } else if(data.type === 'rooms_list') {
-                (data.rooms || []).forEach(rid => { if(!rooms[rid]) rooms[rid]={ members:[], unread:false }; });
-                renderRooms();
-            } else if(data.type === 'room_created' || data.type === 'room_joined') {
-                if(!rooms[data.room_id]) rooms[data.room_id]={ members:[], unread:false };
-                renderRooms();
-                if(currentRoom === data.room_id) ws.send(JSON.stringify({ type:'get_room_members', room_id: data.room_id }));
-            } else if(data.type === 'approval_request') {
-                pendingApproval = { tool:data.tool, args:data.args, allowed:data.allowed, fromAgent:data.from, tool_call_id: data.tool_call_id };
-                approvalContentDiv.innerHTML = `<strong>🔐 工具调用需要审批</strong><br>工具: ${escapeHtml(data.tool)}<br>参数: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>允许操作: ${data.allowed.join(', ')}`;
-                modalOverlay.classList.add('active');
+    // Wire delete buttons
+    convList.querySelectorAll('.conv-delete').forEach(btn => {
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            const tid = btn.dataset.thread;
+            if (confirm('Archive this conversation?')) {
+                await archiveConversation(tid);
             }
         };
-        ws.onclose = () => { connStatusSpan.innerText = '● 断开重连'; connStatusSpan.style.color='#EC4899'; setTimeout(connect,3000); if (currentRoom) updateMembersPanel(rooms[currentRoom]?.members || []);};
+    });
+
+    // Wire edit buttons
+    convList.querySelectorAll('.conv-edit').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            const tid = btn.dataset.thread;
+            const item = btn.closest('.conv-item');
+            const titleEl = item.querySelector('.conv-title');
+            if (titleEl) startRenameConvItem(tid, titleEl);
+        };
+    });
+}
+
+async function switchConversation(agentId, threadId) {
+    activeAgent = agentId;
+    activeThreadId = threadId;
+    activeRoom = null;
+
+    // Update header
+    const conv = findConversation(threadId);
+    currentChatNameSpan.innerText = conv ? conv.title : agentId;
+    currentChatMetaSpan.innerText = 'Chatting';
+
+    // Load messages if not cached
+    if (!messageCache[threadId]) {
+        messageCache[threadId] = [];
+        messagesDiv.innerHTML = '<div class="empty-chat">Loading...</div>';
+        const history = await api('GET', `/chat/history?thread_id=${encodeURIComponent(threadId)}&limit=200`);
+        if (history && Array.isArray(history)) {
+            messageCache[threadId] = history.map(h => ({ role: h.role, content: h.content, created_at: h.created_at }));
+        }
     }
 
-    function closeApprovalModal() { modalOverlay.classList.remove('active'); editArgsInput.style.display='none'; submitEditBtn.style.display='none'; editBtn.style.display='inline-block'; pendingApproval=null; }
-    approveBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'approve', tool_call_id: pendingApproval.tool_call_id})); closeApprovalModal(); } };
-    rejectBtn.onclick = () => { if(pendingApproval){ ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'reject', tool_call_id: pendingApproval.tool_call_id })); closeApprovalModal(); } };
-    editBtn.onclick = () => { editArgsInput.style.display='block'; submitEditBtn.style.display='inline-block'; editBtn.style.display='none'; editArgsInput.value = JSON.stringify(pendingApproval.args, null, 2); };
-    submitEditBtn.onclick = () => { try{ const edited = JSON.parse(editArgsInput.value); ws.send(JSON.stringify({ type:'approval_decision', to:pendingApproval.fromAgent, tool:pendingApproval.tool, decision:'edit', edited_args:edited, tool_call_id: pendingApproval.tool_call_id })); closeApprovalModal(); } catch(e){ alert('JSON 格式错误'); } };
-    closeApprovalBtn.onclick = closeApprovalModal;
+    renderMessages(threadId);
+    renderConvList();
+    updateAgentSelect();
+    messageInput.disabled = false;
+    sendBtn.disabled = false;
+    newChatBtn.disabled = false;
+    inviteAgentBtn.style.display = 'none';
+    membersToggleBtn.style.display = 'none';
+    hideMembersDrawer();
+    messageInput.focus();
+}
 
-    createRoomBtn.onclick = () => { const rid=createRoomInput.value.trim(); if(rid){ ws.send(JSON.stringify({ type:'create_room', room_id:rid, target_agent:'super_user' })); createRoomInput.value=''; } };
-    joinRoomBtn.onclick = () => { const rid=joinRoomInput.value.trim(); if(rid){ ws.send(JSON.stringify({ type:'join_room', room_id:rid, target_agent:'super_user' })); joinRoomInput.value=''; } };
-    imageBtn.onclick = () => imageInput.click();
-    imageInput.onchange = (e) => { const file=e.target.files[0]; if(file){ const reader=new FileReader(); reader.onload=(ev)=>{ currentImageBase64=ev.target.result.split(',')[1]; previewImg.src=ev.target.result; previewDiv.style.display='flex'; }; reader.readAsDataURL(file); } };
-    removeImgBtn.onclick = () => { currentImageBase64=null; previewDiv.style.display='none'; imageInput.value=''; };
-    toggleSwitch.onchange = (e) => { showToolCalls=e.target.checked; if(currentAgent) loadMessages(currentAgent); else if(currentRoom) loadRoomMessages(currentRoom); };
-    sendBtn.onclick = sendMessage;
-    messageInput.addEventListener('keydown', (e) => { if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); } });
-    messageInput.addEventListener('input', function() { this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,100)+'px'; });
-    inviteAgentBtn.onclick = showInviteDropdown;
+async function createConversation(agentId) {
+    const threadId = generateThreadId(agentId);
+    await api('POST', '/chat/conversations', { agent_id: agentId, thread_id: threadId });
 
-    // 为所有代码块添加复制按钮
-    function addCopyButtonsToCodeBlocks() {
-        const messageContainers = document.querySelectorAll('.message .bubble');
-        messageContainers.forEach(container => {
-            const pres = container.querySelectorAll('pre');
-            pres.forEach(pre => {
-                // 避免重复添加按钮
-                if (pre.querySelector('.copy-code-btn')) return;
-                // 只对包含 code 的 pre 添加
-                const codeElem = pre.querySelector('code');
-                if (!codeElem) return;
+    // Add to local state
+    if (!conversations[agentId]) conversations[agentId] = [];
+    conversations[agentId].unshift({
+        thread_id: threadId,
+        agent_id: agentId,
+        title: 'New Chat',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        is_archived: false
+    });
 
-                const btn = document.createElement('button');
-                btn.className = 'copy-code-btn';
-                btn.innerText = '复制';
-                btn.onclick = async (e) => {
-                    e.stopPropagation();
-                    const code = codeElem.innerText;
-                    try {
-                        await navigator.clipboard.writeText(code);
-                        btn.innerText = '已复制!';
-                        setTimeout(() => { btn.innerText = '复制'; }, 1500);
-                    } catch (err) {
-                        btn.innerText = '失败';
-                        setTimeout(() => { btn.innerText = '复制'; }, 1500);
-                    }
-                };
-                // 确保 pre 定位方式支持绝对定位子元素
-                if (getComputedStyle(pre).position === 'static') {
-                    pre.style.position = 'relative';
+    messageCache[threadId] = [];
+    await switchConversation(agentId, threadId);
+}
+
+async function archiveConversation(threadId) {
+    await api('PATCH', `/chat/conversations/${encodeURIComponent(threadId)}`, { is_archived: true });
+    // Remove from local state
+    for (const agentId in conversations) {
+        conversations[agentId] = conversations[agentId].filter(c => c.thread_id !== threadId);
+        if (conversations[agentId].length === 0) delete conversations[agentId];
+    }
+    delete messageCache[threadId];
+
+    if (activeThreadId === threadId) {
+        activeThreadId = null;
+        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        currentChatNameSpan.innerText = activeAgent || 'AgentPro';
+        currentChatMetaSpan.innerText = 'Ready';
+    }
+    renderConvList();
+}
+
+async function setConversationTitle(threadId, firstMessage) {
+    const title = firstMessage.trim().substring(0, 80);
+    await api('PATCH', `/chat/conversations/${encodeURIComponent(threadId)}`, { title: title });
+    const conv = findConversation(threadId);
+    if (conv) conv.title = title;
+    renderConvList();
+}
+
+// ──────────────── Messages ────────────────
+function renderMessages(threadId) {
+    messagesDiv.innerHTML = '';
+    const msgs = messageCache[threadId] || [];
+    if (msgs.length === 0) {
+        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        return;
+    }
+    msgs.forEach(m => {
+        if (!showToolCalls && isToolMessage(m.content)) return;
+        const sender = m.role === 'user' ? 'You' : (activeAgent || 'Agent');
+        const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
+        displayMessage(sender, m.content, time);
+    });
+    addCopyButtonsToCodeBlocks();
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function displayMessage(sender, text, time) {
+    const isSelf = (sender === 'You');
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `message ${isSelf ? 'self' : ''}`;
+    const rendered = marked.parse(text);
+    msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${rendered}</div>`;
+    messagesDiv.appendChild(msgDiv);
+    addCopyButtonsToCodeBlocks();
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+async function saveMessage(threadId, role, content) {
+    await api('POST', '/chat/history', { thread_id: threadId, role, content });
+}
+
+// ──────────────── Agent selector ────────────────
+function updateAgentSelect() {
+    agentSelect.innerHTML = '<option value="">-- Select Agent --</option>';
+    agents.forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a;
+        opt.textContent = a;
+        if (a === activeAgent && !activeRoom) opt.selected = true;
+        agentSelect.appendChild(opt);
+    });
+}
+
+agentSelect.addEventListener('change', function () {
+    const val = this.value;
+    if (!val) return;
+    if (activeRoom) { activeRoom = null; updateRoomsUI(); hideMembersDrawer(); }
+    selectAgent(val);
+});
+
+async function selectAgent(agentId) {
+    activeAgent = agentId;
+    activeRoom = null;
+    newChatBtn.disabled = false;
+    messageInput.disabled = false;
+    sendBtn.disabled = false;
+    inviteAgentBtn.style.display = 'none';
+    membersToggleBtn.style.display = 'none';
+
+    updateAgentSelect();
+
+    // Load conversations if not loaded
+    if (!conversations[agentId]) {
+        await loadConversations(agentId);
+    }
+
+    const convs = conversations[agentId] || [];
+    if (convs.length > 0) {
+        await switchConversation(agentId, convs[0].thread_id);
+    } else {
+        activeThreadId = null;
+        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        currentChatNameSpan.innerText = agentId;
+        currentChatMetaSpan.innerText = 'Ready';
+        renderConvList();
+        messageInput.focus();
+    }
+}
+
+// ──────────────── Send message ────────────────
+async function sendMessage() {
+    let text = messageInput.value.trim();
+    if (!text && !currentImageBase64) return;
+
+    // If no active thread and we have an agent, auto-create a conversation
+    if (!activeThreadId && activeAgent) {
+        await createConversation(activeAgent);
+        if (!text && !currentImageBase64) {
+            messageInput.value = '';
+            messageInput.focus();
+            return;
+        }
+    }
+
+    // Handle /new: create a fresh conversation
+    if (text.startsWith('/new')) {
+        text = text.substring(4).trim();
+        if (activeAgent) {
+            await createConversation(activeAgent);
+            if (!text && !currentImageBase64) {
+                messageInput.value = '';
+                messageInput.focus();
+                return;
+            }
+        }
+    }
+
+    const threadId = activeThreadId;
+    const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+    if (text && activeAgent && threadId) {
+        // Determine if this is the first message in a new conversation
+        const isFirstMsg = !messageCache[threadId] || messageCache[threadId].length === 0;
+
+        // Save to backend
+        saveMessage(threadId, 'user', text);
+        // Cache locally
+        if (!messageCache[threadId]) messageCache[threadId] = [];
+        messageCache[threadId].push({ role: 'user', content: text, created_at: new Date().toISOString() });
+        displayMessage('You', text, time);
+
+        // Auto-title: if this is the first user message
+        const userMsgs = messageCache[threadId].filter(m => m.role === 'user');
+        if (userMsgs.length === 1) {
+            setConversationTitle(threadId, text);
+        }
+
+        ws.send(JSON.stringify({ type: 'send', to: activeAgent, text, image: currentImageBase64 || null, thread_id: threadId, new_thread: isFirstMsg }));
+    } else if (activeRoom) {
+        if (!roomMessages[activeRoom]) roomMessages[activeRoom] = [];
+        roomMessages[activeRoom].push({ sender: 'You', text, time });
+        displayMessage('You', text, time);
+        ws.send(JSON.stringify({ type: 'group_message', room_id: activeRoom, text, image: currentImageBase64 || null }));
+    }
+
+    messageInput.value = '';
+    currentImageBase64 = null;
+    previewDiv.style.display = 'none';
+    imageInput.value = '';
+    messageInput.style.height = 'auto';
+    messageInput.focus();
+}
+
+// ──────────────── Rooms ────────────────
+function toggleRoomsSection() {
+    roomsSection.classList.toggle('open');
+}
+
+function renderRooms() {
+    roomsListDiv.innerHTML = '';
+    for (let roomId in rooms) {
+        const room = rooms[roomId];
+        const item = document.createElement('div');
+        item.className = `room-item${activeRoom === roomId && !activeAgent ? ' active' : ''}`;
+        item.innerHTML = `${escapeHtml(roomId)} <span style="font-size:0.68rem;color:var(--text-muted);">${room.members?.length || 0}人</span>${room.unread ? '<span class="unread-dot"></span>' : ''}`;
+        item.onclick = () => selectRoom(roomId);
+        roomsListDiv.appendChild(item);
+    }
+}
+
+function selectRoom(roomId) {
+    if (activeAgent) { activeAgent = null; activeThreadId = null; updateAgentSelect(); renderConvList(); }
+    activeRoom = roomId;
+    currentChatNameSpan.innerText = roomId;
+    currentChatMetaSpan.innerText = 'Group Chat';
+    messageInput.disabled = false;
+    sendBtn.disabled = false;
+    newChatBtn.disabled = true;
+    inviteAgentBtn.style.display = 'flex';
+    membersToggleBtn.style.display = 'flex';
+    renderRooms();
+    loadRoomMessages(roomId);
+    if (rooms[roomId]) rooms[roomId].unread = false;
+    if (ws) ws.send(JSON.stringify({ type: 'get_room_members', room_id: roomId }));
+    showMembersDrawer();
+    messageInput.focus();
+}
+
+function loadRoomMessages(roomId) {
+    messagesDiv.innerHTML = '';
+    const msgs = roomMessages[roomId] || [];
+    if (msgs.length === 0) {
+        messagesDiv.innerHTML = '<div class="empty-chat">No messages yet</div>';
+        return;
+    }
+    msgs.forEach(msg => {
+        if (!showToolCalls && isToolMessage(msg.text)) return;
+        displayMessage(msg.sender, msg.text, msg.time);
+    });
+    addCopyButtonsToCodeBlocks();
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function updateRoomsUI() {
+    renderRooms();
+    if (activeRoom && rooms[activeRoom]) {
+        updateMembersPanel(rooms[activeRoom].members);
+    }
+}
+
+function updateMembersPanel(members) {
+    membersListDiv.innerHTML = '';
+    if (!members || members.length === 0) {
+        membersListDiv.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">No members</div>';
+        return;
+    }
+    const isWsConnected = (ws && ws.readyState === WebSocket.OPEN);
+    members.forEach(m => {
+        let isOnline = false;
+        let displayName = m;
+        let avatar = '🤖';
+        if (m === 'super_user') {
+            isOnline = isWsConnected;
+            displayName = 'You';
+            avatar = '👤';
+        } else {
+            isOnline = onlineAgentsSet.has(m);
+        }
+        const div = document.createElement('div');
+        div.className = 'member-item';
+        div.innerHTML = `
+            <div class="member-avatar">${avatar}</div>
+            <div class="member-name">${escapeHtml(displayName)}</div>
+            <div class="member-status" style="color:${isOnline ? 'var(--success)' : 'var(--text-muted)'};">${isOnline ? 'online' : 'offline'}</div>
+        `;
+        membersListDiv.appendChild(div);
+    });
+}
+
+function showMembersDrawer() {
+    membersDrawer.classList.add('open');
+    drawerBackdrop.classList.add('show');
+}
+function hideMembersDrawer() {
+    membersDrawer.classList.remove('open');
+    drawerBackdrop.classList.remove('show');
+}
+
+function showInviteDropdown() {
+    if (!activeRoom) return;
+    const existing = rooms[activeRoom]?.members || [];
+    const available = agents.filter(a => !existing.includes(a));
+    if (available.length === 0) { connStatusSpan.innerText = 'No agents to invite'; return; }
+    let dropdown = document.querySelector('.invite-dropdown');
+    if (dropdown) dropdown.remove();
+    const div = document.createElement('div');
+    div.className = 'invite-dropdown';
+    div.innerHTML = `<div class="suggest-item" style="font-size:0.7rem;color:var(--text-muted);cursor:default;">Invite to room</div>`;
+    available.forEach(ag => {
+        const item = document.createElement('div');
+        item.className = 'suggest-item';
+        item.innerText = ag;
+        item.onclick = () => {
+            ws.send(JSON.stringify({ type: 'invite_to_room', room_id: activeRoom, target_agent: ag }));
+            connStatusSpan.innerText = `Invited ${ag}...`;
+            div.remove();
+        };
+        div.appendChild(item);
+    });
+    document.body.appendChild(div);
+    setTimeout(() => document.addEventListener('click', function remove(e) { if (!div.contains(e.target) && e.target !== inviteAgentBtn) { div.remove(); document.removeEventListener('click', remove); } }), 10);
+}
+
+// ──────────────── Suggest dropdown ────────────────
+let suggestDropdown = null;
+function closeSuggest() { if (suggestDropdown) { suggestDropdown.remove(); suggestDropdown = null; } }
+function showSuggest(items, onSelect) {
+    closeSuggest();
+    const rect = messageInput.getBoundingClientRect();
+    const div = document.createElement('div');
+    div.className = 'suggest-dropdown';
+    items.forEach(item => {
+        const opt = document.createElement('div');
+        opt.className = 'suggest-item';
+        opt.innerText = item;
+        opt.onclick = () => { onSelect(item); closeSuggest(); messageInput.focus(); };
+        div.appendChild(opt);
+    });
+    document.body.appendChild(div);
+    div.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    div.style.left = `${rect.left}px`;
+    suggestDropdown = div;
+    setTimeout(() => {
+        const handleClick = (e) => { if (!div.contains(e.target) && e.target !== messageInput) closeSuggest(); document.removeEventListener('click', handleClick); };
+        document.addEventListener('click', handleClick);
+    }, 0);
+}
+
+messageInput.addEventListener('input', function (e) {
+    const val = this.value;
+    const cursorPos = this.selectionStart;
+    const beforeCursor = val.slice(0, cursorPos);
+    const lastAtIndex = beforeCursor.lastIndexOf('@');
+    const lastSlash = beforeCursor.lastIndexOf('/');
+    if (lastAtIndex !== -1 && lastAtIndex === beforeCursor.length - 1) {
+        const availableAgents = agents.filter(a => a !== 'super_user');
+        showSuggest(availableAgents, (selected) => {
+            const newVal = val.slice(0, lastAtIndex) + '@' + selected + ' ' + val.slice(cursorPos);
+            messageInput.value = newVal;
+            messageInput.selectionStart = messageInput.selectionEnd = lastAtIndex + selected.length + 2;
+            messageInput.dispatchEvent(new Event('input'));
+        });
+    } else if (lastSlash !== -1 && lastSlash === beforeCursor.length - 1 && val[lastSlash] === '/') {
+        showSuggest(['/new '], (cmd) => {
+            const newVal = val.slice(0, lastSlash) + cmd + ' ';
+            messageInput.value = newVal;
+            messageInput.selectionStart = messageInput.selectionEnd = newVal.length;
+        });
+    } else { closeSuggest(); }
+});
+messageInput.addEventListener('blur', () => setTimeout(closeSuggest, 200));
+
+// ──────────────── WebSocket ────────────────
+function connect() {
+    ws = new WebSocket(`ws://${window.location.host}/ws`);
+    ws.onopen = () => {
+        connStatusSpan.innerText = 'Connected';
+        connStatusSpan.style.color = 'var(--success)';
+        ws.send(JSON.stringify({ type: 'list_rooms' }));
+        updateMembersPanel(rooms[activeRoom]?.members || []);
+    };
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'agents') {
+            agents = (data.agents || []).filter(a => a !== 'super_user');
+            onlineAgentsSet.clear();
+            agents.forEach(a => onlineAgentsSet.add(a));
+            updateAgentSelect();
+            if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
+        } else if (data.type === 'message') {
+            const from = data.from, text = data.text;
+            const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
+            // Determine which thread to save to
+            let targetThreadId = activeThreadId;
+            if (activeAgent !== from) {
+                // Message from an agent not currently active — find or create a thread
+                const convs = conversations[from] || [];
+                targetThreadId = convs.length > 0 ? convs[0].thread_id : null;
+                if (!targetThreadId) {
+                    // No existing conversation, message will be missed for now
+                    // (Could auto-create, but simpler to only track active)
                 }
-                pre.appendChild(btn);
-            });
+            }
+            if (targetThreadId) {
+                saveMessage(targetThreadId, 'assistant', text);
+                if (!messageCache[targetThreadId]) messageCache[targetThreadId] = [];
+                messageCache[targetThreadId].push({ role: 'assistant', content: text, created_at: new Date().toISOString() });
+            }
+            // Display if this agent is active
+            if (activeAgent === from && activeThreadId && (showToolCalls || !isToolMessage(text))) {
+                displayMessage(from, text, time);
+            }
+        } else if (data.type === 'group_message') {
+            const rid = data.room_id;
+            const from = data.from;
+            let text = data.text || (data.payload?.text);
+            if (!text) return;
+            const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
+            if (!roomMessages[rid]) roomMessages[rid] = [];
+            roomMessages[rid].push({ sender: from, text, time });
+            if (activeRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time);
+            else if (rooms[rid]) rooms[rid].unread = true;
+            renderRooms();
+        } else if (data.type === 'room_members_update' || data.type === 'room_members') {
+            const rid = data.room_id;
+            const members = data.members;
+            if (!rooms[rid]) rooms[rid] = { members: [], unread: false };
+            rooms[rid].members = members;
+            if (activeRoom === rid) updateMembersPanel(members);
+            renderRooms();
+        } else if (data.type === 'rooms_list') {
+            (data.rooms || []).forEach(rid => { if (!rooms[rid]) rooms[rid] = { members: [], unread: false }; });
+            renderRooms();
+        } else if (data.type === 'room_created' || data.type === 'room_joined') {
+            if (!rooms[data.room_id]) rooms[data.room_id] = { members: [], unread: false };
+            renderRooms();
+            if (activeRoom === data.room_id) ws.send(JSON.stringify({ type: 'get_room_members', room_id: data.room_id }));
+        } else if (data.type === 'approval_request') {
+            pendingApproval = { tool: data.tool, args: data.args, allowed: data.allowed, fromAgent: data.from, tool_call_id: data.tool_call_id };
+            approvalContentDiv.innerHTML = `<strong>Tool Call Approval</strong><br>Tool: ${escapeHtml(data.tool)}<br>Args: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>Allowed: ${data.allowed.join(', ')}`;
+            modalOverlay.classList.add('active');
+        }
+    };
+    ws.onclose = () => {
+        connStatusSpan.innerText = 'Disconnected — reconnecting...';
+        connStatusSpan.style.color = 'var(--danger)';
+        setTimeout(connect, 3000);
+        if (activeRoom) updateMembersPanel(rooms[activeRoom]?.members || []);
+    };
+}
+
+// ──────────────── Approval modal ────────────────
+function closeApprovalModal() {
+    modalOverlay.classList.remove('active');
+    editArgsInput.style.display = 'none';
+    submitEditBtn.style.display = 'none';
+    editBtn.style.display = 'inline-block';
+    pendingApproval = null;
+}
+approveBtn.onclick = () => {
+    if (pendingApproval) {
+        ws.send(JSON.stringify({ type: 'approval_decision', to: pendingApproval.fromAgent, tool: pendingApproval.tool, decision: 'approve', tool_call_id: pendingApproval.tool_call_id }));
+        closeApprovalModal();
+    }
+};
+rejectBtn.onclick = () => {
+    if (pendingApproval) {
+        ws.send(JSON.stringify({ type: 'approval_decision', to: pendingApproval.fromAgent, tool: pendingApproval.tool, decision: 'reject', tool_call_id: pendingApproval.tool_call_id }));
+        closeApprovalModal();
+    }
+};
+editBtn.onclick = () => {
+    editArgsInput.style.display = 'block';
+    submitEditBtn.style.display = 'inline-block';
+    editBtn.style.display = 'none';
+    editArgsInput.value = JSON.stringify(pendingApproval.args, null, 2);
+};
+submitEditBtn.onclick = () => {
+    try {
+        const edited = JSON.parse(editArgsInput.value);
+        ws.send(JSON.stringify({ type: 'approval_decision', to: pendingApproval.fromAgent, tool: pendingApproval.tool, decision: 'edit', edited_args: edited, tool_call_id: pendingApproval.tool_call_id }));
+        closeApprovalModal();
+    } catch (e) { alert('Invalid JSON'); }
+};
+closeApprovalBtn.onclick = closeApprovalModal;
+
+// ──────────────── Event bindings ────────────────
+newChatBtn.onclick = () => {
+    if (activeAgent) createConversation(activeAgent);
+};
+sendBtn.onclick = sendMessage;
+messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+messageInput.addEventListener('input', function () {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+});
+toggleSwitch.onchange = (e) => {
+    showToolCalls = e.target.checked;
+    if (activeAgent && activeThreadId) renderMessages(activeThreadId);
+    else if (activeRoom) loadRoomMessages(activeRoom);
+};
+
+// Image
+imageBtn.onclick = () => imageInput.click();
+imageInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+    if (file.size > MAX_SIZE) {
+        alert(`图片过大 (${(file.size / 1024 / 1024).toFixed(1)}MB)，最大支持 10MB`);
+        imageInput.value = '';
+        return;
+    }
+    const reader = new FileReader();
+    reader.onerror = () => {
+        alert('图片读取失败，请重试');
+        imageInput.value = '';
+    };
+    reader.onload = (ev) => {
+        currentImageBase64 = ev.target.result; // 完整 data URL，保留 MIME 类型
+        previewImg.src = ev.target.result;
+        previewDiv.style.display = 'flex';
+    };
+    reader.readAsDataURL(file);
+};
+removeImgBtn.onclick = () => { currentImageBase64 = null; previewDiv.style.display = 'none'; imageInput.value = ''; };
+
+// Rooms
+createRoomBtn.onclick = () => { const rid = createRoomInput.value.trim(); if (rid) { ws.send(JSON.stringify({ type: 'create_room', room_id: rid, target_agent: 'super_user' })); createRoomInput.value = ''; } };
+joinRoomBtn.onclick = () => { const rid = joinRoomInput.value.trim(); if (rid) { ws.send(JSON.stringify({ type: 'join_room', room_id: rid, target_agent: 'super_user' })); joinRoomInput.value = ''; } };
+inviteAgentBtn.onclick = showInviteDropdown;
+roomsToggle.onclick = toggleRoomsSection;
+membersToggleBtn.onclick = showMembersDrawer;
+closeDrawerBtn.onclick = hideMembersDrawer;
+drawerBackdrop.onclick = hideMembersDrawer;
+
+// Theme & font
+themeToggle.onclick = toggleTheme;
+fontDown.onclick = () => adjustFontSize(-1);
+fontUp.onclick = () => adjustFontSize(1);
+currentChatNameSpan.addEventListener('click', startRenameHeader);
+
+// Initialize theme & font from saved preferences
+applyTheme(getSavedTheme());
+applyFontSize(getSavedFontSize());
+
+// Copy code buttons
+function addCopyButtonsToCodeBlocks() {
+    document.querySelectorAll('.message .bubble pre').forEach(pre => {
+        if (pre.querySelector('.copy-code-btn')) return;
+        const codeElem = pre.querySelector('code');
+        if (!codeElem) return;
+        const btn = document.createElement('button');
+        btn.className = 'copy-code-btn';
+        btn.innerText = 'Copy';
+        btn.onclick = async (e) => {
+            e.stopPropagation();
+            try {
+                await navigator.clipboard.writeText(codeElem.innerText);
+                btn.innerText = 'Copied!';
+                setTimeout(() => { btn.innerText = 'Copy'; }, 1500);
+            } catch (err) {
+                btn.innerText = 'Failed';
+                setTimeout(() => { btn.innerText = 'Copy'; }, 1500);
+            }
+        };
+        if (getComputedStyle(pre).position === 'static') pre.style.position = 'relative';
+        pre.appendChild(btn);
+    });
+}
+
+// ──────────────── Startup ────────────────
+// Load all conversations on connect
+async function loadAllConversations() {
+    const data = await api('GET', '/chat/conversations');
+    if (data && data.conversations) {
+        conversations = {};
+        data.conversations.forEach(c => {
+            if (!conversations[c.agent_id]) conversations[c.agent_id] = [];
+            conversations[c.agent_id].push(c);
         });
     }
-    connect();
+}
+
+connect();
+// Try to load existing conversations immediately (server might not be up yet, but /chat/conversations will just fail gracefully)
+setTimeout(loadAllConversations, 500);
 </script>
 </body>
 </html>

@@ -8,7 +8,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 import uvicorn
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
 import psycopg
 from config import config  # 导入你的配置
 
@@ -17,6 +17,12 @@ DB_URI = config.db.postgres_uri
 
 def get_db_connection():
     return psycopg.connect(DB_URI)
+
+def fmt_dt(dt):
+    """将 naive datetime 标记为 UTC 并返回带时区的 ISO 字符串"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
 
 # 在 lifespan 中初始化表（同步）
 def init_db():
@@ -31,7 +37,61 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_threads (
+                id SERIAL PRIMARY KEY,
+                thread_id VARCHAR(255) UNIQUE NOT NULL,
+                agent_id VARCHAR(255) NOT NULL,
+                title VARCHAR(500) DEFAULT 'New Chat',
+                user_id VARCHAR(255) DEFAULT 'super_user',
+                is_archived BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_threads_agent
+            ON conversation_threads(agent_id, user_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_threads_updated
+            ON conversation_threads(updated_at DESC)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created
+            ON chat_messages(thread_id, created_at DESC)
+        """)
     conn.commit()
+    conn.close()
+    migrate_legacy_threads()
+
+def migrate_legacy_threads():
+    """将旧格式 thread_id（如 private_agent_super_user）迁移到 conversation_threads 表"""
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT thread_id FROM chat_messages
+            WHERE thread_id LIKE 'private\\_%\\_super\\_user'
+            AND thread_id NOT LIKE 'private\\_%\\_super\\_user\\_%'
+        """)
+        old_threads = [row[0] for row in cur.fetchall()]
+        for thread_id in old_threads:
+            parts = thread_id.split('_')
+            # 格式: private_{agent_id}_super_user
+            if len(parts) >= 3 and parts[0] == 'private' and parts[-1] == 'user' and parts[-2] == 'super':
+                agent_id = '_'.join(parts[1:-2])  # 处理 agent_id 中可能包含下划线
+                cur.execute(
+                    "SELECT 1 FROM conversation_threads WHERE thread_id = %s",
+                    (thread_id,)
+                )
+                if not cur.fetchone():
+                    cur.execute("""
+                        INSERT INTO conversation_threads (thread_id, agent_id, title, created_at, updated_at)
+                        SELECT %s, %s, %s,
+                            (SELECT MIN(created_at) FROM chat_messages WHERE thread_id = %s),
+                            (SELECT MAX(created_at) FROM chat_messages WHERE thread_id = %s)
+                    """, (thread_id, agent_id, f'Chat with {agent_id}', thread_id, thread_id))
+        conn.commit()
     conn.close()
 
 @asynccontextmanager
@@ -49,6 +109,14 @@ class MessageIn(BaseModel):
 class MessageOut(MessageIn):
     id: int
     created_at: datetime
+
+class ConversationCreate(BaseModel):
+    agent_id: str
+    thread_id: str
+
+class ConversationUpdate(BaseModel):
+    title: str | None = None
+    is_archived: bool | None = None
     
 # 全局变量
 hub_ws = None
@@ -99,8 +167,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 text = message.get("text")
                 image = message.get("image")
                 new_thread = message.get("new_thread", False)
+                thread_id = message.get("thread_id")
                 if hub_ws and target:
-                    payload = {"text": text, "new_thread": new_thread}
+                    payload = {"text": text, "new_thread": new_thread, "thread_id": thread_id}
                     if image:
                         payload["image"] = image
                     await hub_ws.send(json.dumps({
@@ -203,7 +272,7 @@ async def connect_to_hub():
     uri = "ws://localhost:8765"
     while True:
         try:
-            async with websockets.connect(uri) as ws:
+            async with websockets.connect(uri, max_size=20 * 1024 * 1024) as ws:
                 hub_ws = ws
                 await ws.send(json.dumps({"type": "register", "agent_id": my_agent_id}))
                 await ws.send(json.dumps({"type": "get_agents"}))
@@ -311,13 +380,15 @@ async def connect_to_hub():
     
 @app.post("/chat/history")
 async def save_message(msg: MessageIn):
-    if 'super_user' not in msg.thread_id:
-        return {"status": "ignored"}
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO chat_messages (thread_id, role, content) VALUES (%s, %s, %s)",
             (msg.thread_id, msg.role, msg.content)
+        )
+        cur.execute(
+            "UPDATE conversation_threads SET updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+            (msg.thread_id,)
         )
     conn.commit()
     conn.close()
@@ -338,7 +409,7 @@ async def get_history(thread_id: str, limit: int = 100):
             "id": row[0],
             "role": row[1],
             "content": row[2],
-            "created_at": row[3].isoformat()
+            "created_at": fmt_dt(row[3])
         }
         for row in rows
     ]
@@ -350,6 +421,91 @@ async def get_threads():
         rows = cur.fetchall()
     conn.close()
     return {"threads": [row[0] for row in rows]}
+
+# ── 对话管理 API ──
+
+@app.get("/chat/conversations")
+async def list_conversations(agent_id: str = None):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        if agent_id:
+            cur.execute(
+                """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
+                   FROM conversation_threads
+                   WHERE agent_id = %s AND user_id = 'super_user' AND is_archived = FALSE
+                   ORDER BY updated_at DESC""",
+                (agent_id,)
+            )
+        else:
+            cur.execute(
+                """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
+                   FROM conversation_threads
+                   WHERE user_id = 'super_user' AND is_archived = FALSE
+                   ORDER BY updated_at DESC"""
+            )
+        rows = cur.fetchall()
+    conn.close()
+    return {
+        "conversations": [
+            {
+                "thread_id": r[0], "agent_id": r[1], "title": r[2],
+                "is_archived": r[3], "created_at": fmt_dt(r[4]), "updated_at": fmt_dt(r[5])
+            }
+            for r in rows
+        ]
+    }
+
+@app.post("/chat/conversations")
+async def create_conversation(data: ConversationCreate):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO conversation_threads (thread_id, agent_id, title, user_id)
+               VALUES (%s, %s, 'New Chat', 'super_user')
+               ON CONFLICT (thread_id) DO NOTHING""",
+            (data.thread_id, data.agent_id)
+        )
+    conn.commit()
+    conn.close()
+    return {"status": "ok", "thread_id": data.thread_id}
+
+@app.patch("/chat/conversations/{thread_id}")
+async def update_conversation(thread_id: str, data: ConversationUpdate):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        updates = []
+        params = []
+        if data.title is not None:
+            updates.append("title = %s")
+            params.append(data.title[:500])
+        if data.is_archived is not None:
+            updates.append("is_archived = %s")
+            params.append(data.is_archived)
+        if updates:
+            params.append(thread_id)
+            cur.execute(
+                f"UPDATE conversation_threads SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+                params
+            )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+@app.delete("/chat/conversations/{thread_id}")
+async def delete_conversation(thread_id: str, permanent: bool = False):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        if permanent:
+            cur.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
+            cur.execute("DELETE FROM conversation_threads WHERE thread_id = %s", (thread_id,))
+        else:
+            cur.execute(
+                "UPDATE conversation_threads SET is_archived = TRUE, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+                (thread_id,)
+            )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

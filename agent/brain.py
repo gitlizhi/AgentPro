@@ -210,6 +210,11 @@ class Brain:
             self.last_run_time = datetime.now()
     
     def get_thread_id(self, new_thread, chat_id):
+        # 如果前端已经显式传了 thread_id，直接使用（无论 new_thread 标志）
+        if self.thread_id and chat_id in self.thread_id:
+            print(f'使用前端指定的 thread_id: {self.thread_id}', flush=True)
+            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+            return
         if new_thread:
             # 用户要求新对话：生成新 ID，并更新元数据
             print(f'new_thread: {new_thread}', flush=True)
@@ -217,16 +222,15 @@ class Brain:
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
         else:
             # 尝试从长期记忆恢复上次的 thread_id
-            if not (self.thread_id and self.thread_id.startswith(f'{chat_id}')):
-                last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
-                if last_thread:
-                    print(f'加载从长期记忆中的last_thread_id')
-                    self.thread_id = last_thread
-                else:
-                    print(f'首次对话，生成新 ID')
-                    # 首次对话，生成新 ID
-                    self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-                    self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+            last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
+            if last_thread:
+                print(f'加载从长期记忆中的last_thread_id')
+                self.thread_id = last_thread
+            else:
+                print(f'首次对话，生成新 ID')
+                # 首次对话，生成新 ID
+                self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+                self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
 
     async def _detect_reminder_intent(self, user_input: str) -> dict:
         """调用模型判断是否是定时任务，并提取时间和消息"""
@@ -466,7 +470,8 @@ class Brain:
             base_prompt += memory_text
         if image_data:
             image_desc = await self._handle_image(image_data)
-            base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：“{image_desc}”"
+            if image_desc:
+                base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：”{image_desc}”"
         
         messages = [
             {"role": "system", "content": base_prompt},
@@ -583,6 +588,10 @@ class Brain:
             if memories:
                 memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join(...)
                 base_prompt += memory_text
+        if image_data:
+            image_desc = await self._handle_image(image_data)
+            if image_desc:
+                base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：\"{image_desc}\""
 
         messages = [
             {"role": "system", "content": base_prompt},
@@ -647,7 +656,8 @@ class Brain:
         
         if image_data:
             image_desc = await self._handle_image(image_data)
-            base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：“{image_desc}”"
+            if image_desc:
+                base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：”{image_desc}”"
             
         # print(f'base_prompt: {base_prompt}', flush=True)
         messages = [
@@ -689,14 +699,12 @@ class Brain:
         #     await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
         return current_ai_message if not silent else ""
     
-    async def _handle_image(self, image_data: str) -> str:
-        """处理图片输入，返回视觉模型的结果"""
-        # 获取视觉模型（需要在 model_config.py 中预先配置）
+    async def _handle_image(self, image_data: str) -> str | None:
+        """处理图片输入，返回视觉模型的结果。失败时返回 None。"""
         model = model_config.get_model("vision")
-        # 构造多模态消息：文本 + 图片
         content = [
             {"type": "text", "text": "读取图片的内容，尽可能完整地描述出图片的内容。"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+            {"type": "image_url", "image_url": {"url": image_data}}
         ]
         messages = [{"role": "user", "content": content}]
         try:
@@ -704,7 +712,7 @@ class Brain:
             return response.content
         except Exception as e:
             logger.error(f"图片处理失败: {e}")
-            return f"图片处理失败: {e}"
+            return None
         
     async def _generate_thought(self, user_id: str = "super_user") -> str:
         """生成一个随机想法，结合记忆和最近对话"""
