@@ -21,7 +21,7 @@ class Hub:
     async def register(self, agent_id: str, websocket: WebSocketServerProtocol):
         self.clients[agent_id] = websocket
         logger.info(f"Agent {agent_id} registered. Total clients: {len(self.clients)}")
-        if agent_id in ["super_user", "reminder_bot"]:  # 需要接收列表更新的客户端
+        if agent_id == "super_user":  # 需要接收列表更新的客户端
             self.observers.add(websocket)
         # 发送确认
         await websocket.send(json.dumps({"type": "register_ack"}))

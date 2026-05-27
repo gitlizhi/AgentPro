@@ -131,7 +131,7 @@ if __name__ == "__main__":
     parser.add_argument("--all", action="store_true", help="删除所有短期记忆线程")
     parser.add_argument("--room", help="指定要删除的群聊房间 ID（同时清理对应短期记忆）")
     parser.add_argument("--clear-rooms", action="store_true", help="删除所有群聊房间及成员（同时清理对应短期记忆）")
-    parser.add_argument("--agent", help="指定要清理的智能体 ID（如 'reminder_bot'），将删除该智能体的全部私聊记录（包括持久化消息和短期记忆）")
+    parser.add_argument("--agent", help="指定要清理的智能体 ID（如 'agent_main'），将删除该智能体的全部私聊记录（包括持久化消息和短期记忆）")
     args = parser.parse_args()
 
     if args.thread:

@@ -432,7 +432,7 @@ class Brain:
                     responses.append(f"出错了，无法理解这个时间：{time_str}")
             else:
                 responses.append("出错了 提醒信息不完整")
-        return "好的，reminder_bot会" + "，".join(responses)
+        return "好的，我会在" + "，".join(responses)
     
     async def _handle_query_reminder(self, user_id: str) -> str:
         from agent.db import get_pool
