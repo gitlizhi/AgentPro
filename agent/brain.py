@@ -204,18 +204,22 @@ class Brain:
         await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
 
     def _inject_time_context(self, text: str) -> str:
-        """将相对时间词替换为带具体日期的标注，帮助模型理解当前时间"""
+        """将相对时间词替换为带具体日期的标注，帮助模型理解当前时间。
+        使用正则负向后顾避免误替换（如"如今天气"中的"今天"不会被替换）。"""
         now = datetime.now()
-        time_words = {
-            '前天': now - timedelta(days=2),
-            '昨天': now - timedelta(days=1),
-            '今天': now,
-            '明天': now + timedelta(days=1),
-            '后天': now + timedelta(days=2),
-        }
-        for word, dt in time_words.items():
-            date_str = dt.strftime('%Y%m%d')
-            text = text.replace(word, f'{word}（{date_str}）')
+        # 负向后顾字符集：避免"今"前接如/而/至/当/现/迄/古（如今、而今、至今...）
+        #                   避免"明"前接说/证/声/表/聪/文/光/发（说明、证明、声明...）
+        #                   避免"昨"前接其他字、避免"前/后"与其他字组合
+        rules = [
+            (r'(?<![如今而至当现迄古今])今天', 0),
+            (r'(?<![昨])昨天', -1),
+            (r'(?<![前])前天', -2),
+            (r'(?<![后])后天', 2),
+            (r'(?<![说证声表聪文明光发])明天', 1),
+        ]
+        for pattern, offset in rules:
+            date_str = (now + timedelta(days=offset)).strftime('%Y%m%d')
+            text = re.sub(pattern, rf'\g<0>（{date_str}）', text)
         return text
         
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
