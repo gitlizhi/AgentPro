@@ -114,23 +114,30 @@ async def process_user_conversation(user_id: str, thread_id: str, force: bool = 
     new_facts = extracted["facts"]
     new_events = extracted["events"]
 
-    # 处理 facts（去重逻辑保持不变）
+    # 处理 facts（语义去重）
     if new_facts:
-        existing_facts = set()
+        # 用语义相似度去重，而非精确字符串匹配
+        # cosine distance: 0 = 完全相同, 0.15 = 高度相似
+        SIMILARITY_THRESHOLD = 0.15
+        final_facts = []
         for fact in new_facts:
-            similar = memory.query_relevant(fact, user_id, n_results=2)
+            similar = memory.query_relevant(fact, user_id, n_results=3)
+            is_dup = False
             for sim in similar:
-                if sim["content"].strip() == fact.strip():
-                    existing_facts.add(fact)
+                # 精确匹配或高度语义相似都视为重复
+                if (sim["content"].strip() == fact.strip()
+                        or (sim.get("distance") is not None and sim["distance"] < SIMILARITY_THRESHOLD)):
+                    is_dup = True
                     break
-        final_facts = [f for f in new_facts if f not in existing_facts]
+            if not is_dup:
+                final_facts.append(fact)
         if final_facts:
             memory.add_facts_batch(final_facts, user_id, {
                 "source": "auto_extracted",
                 "thread_id": thread_id,
                 "type": "fact"
             })
-            print(f"[MEM] Extracted {len(final_facts)} new facts for {user_id}")
+            print(f"[MEM] Extracted {len(final_facts)} new facts for {user_id} ({len(new_facts) - len(final_facts)} duplicates filtered)")
 
     # 处理 events：直接存储（可用相似度去重，但事件通常不重复）
     if new_events:

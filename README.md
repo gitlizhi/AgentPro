@@ -27,6 +27,7 @@ AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框
 - **调度器**：APScheduler (AsyncIOExecutor)
 - **模型**：DeepSeek-v4-flash  智谱 AI（GLM-4.7, GLM-4.6v, GLM-4-Flash），支持 OpenAI 兼容格式
 - **异步运行时**：Python 3.12+，asyncio
+- **获取技术文档详细内容**：查看项目中的 **ARCHITECTURE.md** 文件
 
 ## 🚀 快速开始
 
