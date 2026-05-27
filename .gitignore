@@ -8,6 +8,7 @@
 *.log
 *.json
 *.md
+!ARCHITECTURE.md
 /agent/data/*
 /agent/chroma_db/*
 /pgdata
