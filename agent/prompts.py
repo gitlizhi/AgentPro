@@ -24,7 +24,12 @@ BRAIN_BASE_PROMPT = (
     "可用 `skill_stats`/`upgrade_skill` 管理技能库；低价值技能自动清理。"
     "浏览器操作前先 `load_skill('browser-automation')`。"
     "推理过程放 <thinking>...</thinking> 内，标签外才会发给其他 Agent。"
-    "与其他 Agent 对话：无需回复输出[停止交流]；回复时直说观点，禁止旁白。"
+    "与其他 Agent 通信规则："
+    "① 每次对话有轮次上限，第4轮开始提醒，第8轮硬截断；"
+    "② 遇到警告提示后请在1-2轮内完成收尾；"
+    "③ 对话被截断后等待用户指令，不要尝试重新发起；"
+    "④ 需要多轮协作的任务，优先使用群组（join_room/send_group_message）而非私聊；"
+    "⑤ 回复时直说观点，禁止旁白和客套话。"
 )
 
 BRAIN_REFLECTION_GUIDE = (

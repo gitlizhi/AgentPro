@@ -50,6 +50,10 @@ class Agent:
                 sender = data.get("from")
                 # 如果是来自其他 Agent 的消息（非自身），也作为新消息处理
                 if user_input and sender not in [self.agent_id, 'super_user']:
+                    # ---- P0: 已被截断的对话直接丢弃，不创建异步任务 ----
+                    if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
+                        logger.info(f"对话 {self.agent_id}<->{sender} 已截断，丢弃消息于入口处")
+                        return
                     asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
                     return
                 if user_input.startswith("/approve"):
@@ -110,15 +114,17 @@ class Agent:
             elif msg_type == "rooms_list":
                 rooms = data.get("rooms", [])
                 logger.info(f"Received rooms list: {rooms}")
-                # 可以根据需要初始化房间成员缓存
+                # 启动后主动请求每个房间的成员列表，填充本地缓存
                 for rid in rooms:
                     if rid not in self._room_members:
                         self._room_members[rid] = []
+                    await self.comm.send({"type": "get_room_members", "room_id": rid})
                         
             elif msg_type == "register_ack":
                 logger.info("Registration acknowledged by hub")
-                # 启动后主动请求当前在线智能体列表
+                # 启动后主动请求在线智能体列表和房间列表
                 await self.comm.send({"type": "get_agents"})
+                await self.comm.send({"type": "get_my_rooms", "agent_id": self.agent_id})
 
             elif msg_type == "agents_list":
                 agents = set(data.get("agents", []))
@@ -172,16 +178,19 @@ class Agent:
         group_thread_id = f"group_{room_id}"
         mention = f"@{self.agent_id}"
         silent = mention not in user_input  # 未被点时静默
-        extra = '\n' + (f'[注意：当前消息为群聊消息，不是所有消息都需要进行回复，只回复与自己相关的消息'
-                        f'先判断是否需要回复这条消息，如需要回复，只能使用send_group_message回复这条群消息，'
-                        f'room_id是{room_id}，你已在群内，当前群聊内所有成员如下：{self._room_members.get(room_id, '无')}]')
+        members = self._room_members.get(room_id, [])
+        group_context = {
+            "room_id": room_id,
+            "members": list(members) if members else [],
+        }
         response = await self.brain.process(
             user_id=sender,
-            user_input=user_input + extra,
+            user_input=user_input,
             image_data=image_data,
             new_thread=False,
             thread_id_override=group_thread_id,
-            silent=silent
+            silent=silent,
+            group_context=group_context,
         )
         if not silent and response:
             await self.comm.send_to_room(room_id,{"text": response})

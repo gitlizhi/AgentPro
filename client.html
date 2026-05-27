@@ -189,6 +189,67 @@
             text-align: center;
             padding: 10px 0;
         }
+        .agent-launch-btn {
+            width: 20px; height: 20px;
+            border: none;
+            background: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1rem;
+            line-height: 1;
+            border-radius: 4px;
+            transition: color 0.12s, background 0.12s;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .agent-launch-btn:hover { color: var(--accent); background: var(--accent-light); }
+        .launch-form {
+            padding: 6px 0 4px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .launch-form input {
+            width: 100%;
+            padding: 6px 8px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text);
+            font-size: 0.76rem;
+            outline: none;
+            font-family: inherit;
+            box-sizing: border-box;
+        }
+        .launch-form input:focus { border-color: var(--accent); }
+        .launch-form .launch-actions {
+            display: flex;
+            gap: 4px;
+        }
+        .launch-form .launch-actions button {
+            flex: 1;
+            padding: 5px 0;
+            border: none;
+            border-radius: var(--radius-sm);
+            font-size: 0.74rem;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: 500;
+            transition: background 0.12s;
+        }
+        .launch-form .btn-launch {
+            background: var(--accent);
+            color: #fff;
+        }
+        .launch-form .btn-launch:hover { opacity: 0.9; }
+        .launch-form .btn-launch:disabled { opacity: 0.5; cursor: not-allowed; }
+        .launch-form .btn-cancel {
+            background: var(--surface);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
 
         /* New Chat button */
         .new-chat-btn {
@@ -895,6 +956,36 @@
             font-weight: 500;
         }
 
+        /* App dialog (replaces native alert/confirm) */
+        .app-dialog-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.35);
+            z-index: 3000;
+            display: flex; align-items: center; justify-content: center;
+            backdrop-filter: blur(3px);
+            -webkit-backdrop-filter: blur(3px);
+        }
+        .app-dialog {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 28px 28px 20px;
+            min-width: 340px; max-width: 440px;
+            box-shadow: 0 24px 80px rgba(0,0,0,0.15);
+            animation: dialogIn 0.2s ease;
+        }
+        @keyframes dialogIn { from { opacity: 0; transform: scale(0.94) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+        .app-dialog-msg { margin-bottom: 22px; font-size: 0.9rem; line-height: 1.6; color: var(--text); white-space: pre-wrap; }
+        .app-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+        .app-dialog-actions button {
+            padding: 8px 20px; border: none; border-radius: 7px;
+            font-size: 0.82rem; cursor: pointer; font-family: inherit;
+            font-weight: 500; transition: opacity 0.12s;
+        }
+        .app-dialog-actions button:hover { opacity: 0.85; }
+        .btn-dialog-primary { background: var(--accent); color: #fff; }
+        .btn-dialog-secondary { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border) !important; }
+
         /* Suggest / Invite dropdown */
         .suggest-dropdown, .invite-dropdown {
             position: absolute;
@@ -1028,50 +1119,61 @@
 <aside class="sidebar">
     <div class="sidebar-header">
         <div class="logo">AgentPro</div>
-        <div class="subtitle">Multi-Agent Console</div>
+        <div class="subtitle">多智能体控制台</div>
     </div>
 
     <div class="agent-select-area">
         <div class="agent-section-header">
-            <span class="agent-section-label">Agents</span>
-            <span class="agent-count" id="agentCount">0</span>
+            <span class="agent-section-label">智能体</span>
+            <div style="display:flex;align-items:center;gap:4px;">
+                <span class="agent-count" id="agentCount">0</span>
+                <button class="agent-launch-btn" id="agentLaunchBtn" title="启动新智能体">+</button>
+            </div>
+        </div>
+        <div class="launch-form" id="launchForm" style="display:none;">
+            <input type="text" id="launchAgentId" placeholder="智能体 ID (例: helper)">
+            <input type="text" id="launchAgentDesc" placeholder="专长描述...">
+            <div class="launch-actions">
+                <button class="btn-launch" id="btnLaunch">启动</button>
+                <button class="btn-cancel" id="btnCancelLaunch">取消</button>
+            </div>
         </div>
         <div class="agent-list" id="agentList">
-            <div class="agent-empty">No agents online</div>
+            <div class="agent-empty">暂无在线智能体</div>
         </div>
     </div>
 
-    <button class="new-chat-btn" id="newChatBtn" disabled>+ New Chat</button>
+    <button class="new-chat-btn" id="newChatBtn" disabled>+ 新建会话</button>
 
-    <div class="conv-list-label">Conversations</div>
+    <div class="conv-list-label">会话列表</div>
     <div class="conv-list" id="convList">
-        <div class="conv-empty">Select an agent to start</div>
+        <div class="conv-empty">选择一个智能体开始</div>
     </div>
 
     <!-- Rooms (collapsible) -->
     <div class="rooms-section" id="roomsSection">
-        <div class="section-title">Group Rooms</div>
+        <div class="section-title">群聊房间</div>
         <div id="roomsList"></div>
         <div class="room-actions">
             <div class="room-action-row">
-                <input type="text" id="createRoomInput" placeholder="Room ID...">
-                <button id="createRoomBtn">Create</button>
+                <input type="text" id="createRoomInput" placeholder="房间 ID...">
+                <button id="createRoomBtn">创建</button>
             </div>
             <div class="room-action-row">
-                <input type="text" id="joinRoomInput" placeholder="Room ID...">
-                <button id="joinRoomBtn">Join</button>
+                <input type="text" id="joinRoomInput" placeholder="房间 ID...">
+                <button id="joinRoomBtn">加入</button>
             </div>
         </div>
     </div>
 
     <div class="settings-row">
-        <button class="settings-btn" id="themeToggle" title="Toggle theme">☀️</button>
+        <button class="settings-btn" id="themeToggle" title="切换主题">☀️</button>
         <span class="settings-divider"></span>
-        <button class="settings-btn" id="fontDown" title="Smaller text">A-</button>
+        <button class="settings-btn" id="fontDown" title="缩小字体">A-</button>
         <span class="font-size-label" id="fontSizeLabel">M</span>
-        <button class="settings-btn" id="fontUp" title="Larger text">A+</button>
+        <button class="settings-btn" id="fontUp" title="放大字体">A+</button>
         <span class="settings-divider"></span>
-        <button class="settings-btn" id="roomsToggle" title="Rooms">🏠</button>
+        <button class="settings-btn" id="roomsToggle" title="房间">🏠</button>
     </div>
     <div class="sidebar-footer">
         <span class="dot"></span> super_user
@@ -1082,14 +1184,14 @@
 <main class="chat-main">
     <div class="chat-header">
         <div class="chat-header-left">
-            <h2 id="currentChatName" title="Click to rename">AgentPro</h2>
-            <span id="currentChatMeta">Ready</span>
+            <h2 id="currentChatName" title="点击重命名">AgentPro</h2>
+            <span id="currentChatMeta">就绪</span>
         </div>
         <div class="header-actions">
-            <button class="invite-btn" id="inviteAgentBtn">+ Invite</button>
-            <button class="icon-btn" id="membersToggleBtn" style="display:none; width:auto; padding:0 10px; font-size:0.78rem;">Members</button>
+            <button class="invite-btn" id="inviteAgentBtn">+ 邀请</button>
+            <button class="icon-btn" id="membersToggleBtn" style="display:none; width:auto; padding:0 10px; font-size:0.78rem;">成员</button>
             <div class="toggle-row">
-                <span>Tools</span>
+                <span>工具</span>
                 <label class="switch">
                     <input type="checkbox" id="toggleToolCalls" checked>
                     <span class="slider"></span>
@@ -1099,7 +1201,7 @@
     </div>
 
     <div class="messages" id="messages">
-        <div class="empty-chat">Select an agent and start a conversation</div>
+        <div class="empty-chat">选择一个智能体开始对话</div>
     </div>
 
     <div id="imagePreview" class="preview-bar" style="display:none;">
@@ -1110,14 +1212,14 @@
     <div class="input-zone" id="inputZone">
         <div class="input-flex">
             <div class="input-box">
-                <textarea id="messageInput" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter new line)" disabled></textarea>
+                <textarea id="messageInput" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" disabled></textarea>
             </div>
             <div class="btn-group">
-                <button id="imageBtn" class="icon-btn" title="Attach image">&#128247;</button>
-                <button id="sendBtn" disabled>Send</button>
+                <button id="imageBtn" class="icon-btn" title="上传图片">&#128247;</button>
+                <button id="sendBtn" disabled>发送</button>
             </div>
         </div>
-        <div class="status" id="connectionStatus">Connecting...</div>
+        <div class="status" id="connectionStatus">连接中...</div>
     </div>
 </main>
 
@@ -1125,11 +1227,11 @@
 <div class="drawer-backdrop" id="drawerBackdrop"></div>
 <div class="members-drawer" id="membersDrawer">
     <div class="drawer-header">
-        Members
+        成员
         <button class="drawer-close" id="closeDrawerBtn">&times;</button>
     </div>
     <div class="drawer-members" id="membersList">
-        <div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">No members yet</div>
+        <div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">暂无成员</div>
     </div>
 </div>
 
@@ -1139,17 +1241,25 @@
 <div id="approvalModalOverlay" class="modal-overlay">
     <div class="approval-panel">
         <div class="approval-header">
-            <h3>Tool Call Approval</h3>
+            <h3>工具调用审批</h3>
             <button class="close-approval" id="closeApprovalBtn">&times;</button>
         </div>
         <div id="approvalContent" class="approval-content"></div>
         <div class="approval-buttons">
-            <button id="approveBtn" class="approval-btn approve-btn">Approve</button>
-            <button id="rejectBtn" class="approval-btn reject-btn">Reject</button>
-            <button id="editBtn" class="approval-btn edit-btn">Edit Args</button>
+            <button id="approveBtn" class="approval-btn approve-btn">批准</button>
+            <button id="rejectBtn" class="approval-btn reject-btn">拒绝</button>
+            <button id="editBtn" class="approval-btn edit-btn">编辑参数</button>
         </div>
-        <input type="text" id="editArgsInput" class="edit-args-input" placeholder='Edited args (JSON)' style="display:none;">
-        <button id="submitEditBtn" class="submit-edit" style="display:none;">Submit Edit</button>
+        <input type="text" id="editArgsInput" class="edit-args-input" placeholder='编辑参数 (JSON)' style="display:none;">
+        <button id="submitEditBtn" class="submit-edit" style="display:none;">提交修改</button>
+    </div>
+</div>
+
+<!-- Custom app dialog (replaces alert/confirm) -->
+<div class="app-dialog-overlay" id="appDialogOverlay" style="display:none;">
+    <div class="app-dialog">
+        <div class="app-dialog-msg" id="appDialogMsg"></div>
+        <div class="app-dialog-actions" id="appDialogActions"></div>
     </div>
 </div>
 
@@ -1176,6 +1286,12 @@ let messageCache = {};
 // ──────────────── DOM refs ────────────────
 const agentList = document.getElementById('agentList');
 const agentCount = document.getElementById('agentCount');
+const launchForm = document.getElementById('launchForm');
+const launchAgentId = document.getElementById('launchAgentId');
+const launchAgentDesc = document.getElementById('launchAgentDesc');
+const agentLaunchBtn = document.getElementById('agentLaunchBtn');
+const btnLaunch = document.getElementById('btnLaunch');
+const btnCancelLaunch = document.getElementById('btnCancelLaunch');
 const convList = document.getElementById('convList');
 const newChatBtn = document.getElementById('newChatBtn');
 const messagesDiv = document.getElementById('messages');
@@ -1225,6 +1341,32 @@ function escapeHtml(str) {
 }
 function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
 
+// ── Custom dialog (replaces alert/confirm) ──
+function showDialog(msg, options = {}) {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('appDialogOverlay');
+        const msgEl = document.getElementById('appDialogMsg');
+        const actionsEl = document.getElementById('appDialogActions');
+        msgEl.textContent = msg;
+        actionsEl.innerHTML = '';
+        const primary = options.primary || '确定';
+        const secondary = options.secondary || null;
+        if (secondary) {
+            const b = document.createElement('button');
+            b.className = 'btn-dialog-secondary';
+            b.textContent = secondary;
+            b.onclick = () => { overlay.style.display = 'none'; resolve(false); };
+            actionsEl.appendChild(b);
+        }
+        const b = document.createElement('button');
+        b.className = 'btn-dialog-primary';
+        b.textContent = primary;
+        b.onclick = () => { overlay.style.display = 'none'; resolve(true); };
+        actionsEl.appendChild(b);
+        overlay.style.display = 'flex';
+    });
+}
+
 function generateThreadId(agentId) {
     const uuid8 = crypto.randomUUID().substring(0, 8);
     return `private_${agentId}_super_user_${uuid8}`;
@@ -1235,12 +1377,12 @@ function fmtTime(isoStr) {
     const now = new Date();
     const diffMs = now - d;
     const diffMin = Math.floor(diffMs / 60000);
-    if (diffMin < 1) return 'just now';
-    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffMin < 1) return '刚刚';
+    if (diffMin < 60) return `${diffMin}分钟前`;
     const diffHr = Math.floor(diffMin / 60);
-    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffHr < 24) return `${diffHr}小时前`;
     const diffDay = Math.floor(diffHr / 24);
-    if (diffDay < 7) return `${diffDay}d ago`;
+    if (diffDay < 7) return `${diffDay}天前`;
     return d.toLocaleDateString('zh-CN');
 }
 
@@ -1259,11 +1401,11 @@ function applyTheme(theme) {
     if (theme === 'dark') {
         document.documentElement.setAttribute('data-theme', 'dark');
         themeToggle.textContent = '🌙';
-        themeToggle.title = 'Switch to light';
+        themeToggle.title = '切换浅色';
     } else {
         document.documentElement.removeAttribute('data-theme');
         themeToggle.textContent = '☀️';
-        themeToggle.title = 'Switch to dark';
+        themeToggle.title = '切换深色';
     }
     localStorage.setItem('agentpro-theme', theme);
 }
@@ -1337,7 +1479,7 @@ function startRenameHeader() {
         const newTitle = input.value.trim() || oldTitle;
         const newH2 = document.createElement('h2');
         newH2.id = 'currentChatName';
-        newH2.title = 'Click to rename';
+        newH2.title = '点击重命名';
         newH2.textContent = newTitle;
         newH2.addEventListener('click', startRenameHeader);
         input.replaceWith(newH2);
@@ -1369,22 +1511,22 @@ function findConversation(threadId) {
 function renderConvList() {
     convList.innerHTML = '';
     if (!activeAgent) {
-        convList.innerHTML = '<div class="conv-empty">Select an agent to start</div>';
+        convList.innerHTML = '<div class="conv-empty">选择一个智能体开始</div>';
         return;
     }
     const convs = conversations[activeAgent] || [];
     if (convs.length === 0) {
-        convList.innerHTML = '<div class="conv-empty">No conversations yet</div>';
+        convList.innerHTML = '<div class="conv-empty">暂无会话</div>';
         return;
     }
     convs.forEach(c => {
         const item = document.createElement('div');
         item.className = `conv-item${c.thread_id === activeThreadId && !activeRoom ? ' active' : ''}`;
         item.innerHTML = `
-            <span class="conv-title">${escapeHtml(c.title || 'New Chat')}</span>
+            <span class="conv-title">${escapeHtml(c.title || '新会话')}</span>
             <span class="conv-time">${fmtTime(c.updated_at || c.created_at)}</span>
-            <button class="conv-edit" data-thread="${escapeHtml(c.thread_id)}" title="Rename">✏️</button>
-            <button class="conv-delete" data-thread="${escapeHtml(c.thread_id)}" title="Archive">&times;</button>
+            <button class="conv-edit" data-thread="${escapeHtml(c.thread_id)}" title="重命名">✏️</button>
+            <button class="conv-delete" data-thread="${escapeHtml(c.thread_id)}" title="归档">&times;</button>
         `;
         item.onclick = (e) => {
             if (e.target.classList.contains('conv-delete') || e.target.classList.contains('conv-edit')) return;
@@ -1403,7 +1545,7 @@ function renderConvList() {
         btn.onclick = async (e) => {
             e.stopPropagation();
             const tid = btn.dataset.thread;
-            if (confirm('Archive this conversation?')) {
+            if (await showDialog('确认归档此会话？', {primary: '归档', secondary: '取消'})) {
                 await archiveConversation(tid);
             }
         };
@@ -1429,12 +1571,12 @@ async function switchConversation(agentId, threadId) {
     // Update header
     const conv = findConversation(threadId);
     currentChatNameSpan.innerText = conv ? conv.title : agentId;
-    currentChatMetaSpan.innerText = 'Chatting';
+    currentChatMetaSpan.innerText = '对话中';
 
     // Load messages if not cached
     if (!messageCache[threadId]) {
         messageCache[threadId] = [];
-        messagesDiv.innerHTML = '<div class="empty-chat">Loading...</div>';
+        messagesDiv.innerHTML = '<div class="empty-chat">加载中...</div>';
         const history = await api('GET', `/chat/history?thread_id=${encodeURIComponent(threadId)}&limit=200`);
         if (history && Array.isArray(history)) {
             messageCache[threadId] = history.map(h => ({ role: h.role, content: h.content, created_at: h.created_at }));
@@ -1462,7 +1604,7 @@ async function createConversation(agentId) {
     conversations[agentId].unshift({
         thread_id: threadId,
         agent_id: agentId,
-        title: 'New Chat',
+        title: '新会话',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         is_archived: false
@@ -1483,9 +1625,9 @@ async function archiveConversation(threadId) {
 
     if (activeThreadId === threadId) {
         activeThreadId = null;
-        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        messagesDiv.innerHTML = '<div class="empty-chat">开始新会话</div>';
         currentChatNameSpan.innerText = activeAgent || 'AgentPro';
-        currentChatMetaSpan.innerText = 'Ready';
+        currentChatMetaSpan.innerText = '就绪';
     }
     renderConvList();
 }
@@ -1503,12 +1645,12 @@ function renderMessages(threadId) {
     messagesDiv.innerHTML = '';
     const msgs = messageCache[threadId] || [];
     if (msgs.length === 0) {
-        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        messagesDiv.innerHTML = '<div class="empty-chat">开始新会话</div>';
         return;
     }
     msgs.forEach(m => {
         if (!showToolCalls && isToolMessage(m.content)) return;
-        const sender = m.role === 'user' ? 'You' : (activeAgent || 'Agent');
+        const sender = m.role === 'user' ? '你' : (activeAgent || '智能体');
         const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
         displayMessage(sender, m.content, time);
     });
@@ -1517,7 +1659,7 @@ function renderMessages(threadId) {
 }
 
 function displayMessage(sender, text, time) {
-    const isSelf = (sender === 'You');
+    const isSelf = (sender === '你');
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
     const rendered = marked.parse(text);
@@ -1535,7 +1677,7 @@ async function saveMessage(threadId, role, content) {
 function renderAgentList() {
     if (!agentList) return;
     if (agents.length === 0) {
-        agentList.innerHTML = '<div class="agent-empty">No agents yet</div>';
+        agentList.innerHTML = '<div class="agent-empty">暂无智能体</div>';
         agentCount.textContent = '0';
         return;
     }
@@ -1555,7 +1697,7 @@ function renderAgentList() {
             <span class="agent-name">${escapeHtml(a)}</span>
             <span class="agent-unread"></span>
         `;
-        item.title = `${a} (${isOnline ? 'online' : 'offline'})`;
+        item.title = `${a} (${isOnline ? '在线' : '离线'})`;
         item.onclick = () => {
             if (activeRoom) { activeRoom = null; updateRoomsUI(); hideMembersDrawer(); }
             selectAgent(a);
@@ -1586,9 +1728,9 @@ async function selectAgent(agentId) {
         await switchConversation(agentId, convs[0].thread_id);
     } else {
         activeThreadId = null;
-        messagesDiv.innerHTML = '<div class="empty-chat">Start a new conversation</div>';
+        messagesDiv.innerHTML = '<div class="empty-chat">开始新会话</div>';
         currentChatNameSpan.innerText = agentId;
-        currentChatMetaSpan.innerText = 'Ready';
+        currentChatMetaSpan.innerText = '就绪';
         renderConvList();
         messageInput.focus();
     }
@@ -1634,7 +1776,7 @@ async function sendMessage() {
         // Cache locally
         if (!messageCache[threadId]) messageCache[threadId] = [];
         messageCache[threadId].push({ role: 'user', content: text, created_at: new Date().toISOString() });
-        displayMessage('You', text, time);
+        displayMessage('你', text, time);
 
         // Auto-title: if this is the first user message
         const userMsgs = messageCache[threadId].filter(m => m.role === 'user');
@@ -1645,8 +1787,8 @@ async function sendMessage() {
         ws.send(JSON.stringify({ type: 'send', to: activeAgent, text, image: currentImageBase64 || null, thread_id: threadId, new_thread: isFirstMsg }));
     } else if (activeRoom) {
         if (!roomMessages[activeRoom]) roomMessages[activeRoom] = [];
-        roomMessages[activeRoom].push({ sender: 'You', text, time });
-        displayMessage('You', text, time);
+        roomMessages[activeRoom].push({ sender: '你', text, time });
+        displayMessage('你', text, time);
         ws.send(JSON.stringify({ type: 'group_message', room_id: activeRoom, text, image: currentImageBase64 || null }));
     }
 
@@ -1679,7 +1821,7 @@ function selectRoom(roomId) {
     if (activeAgent) { activeAgent = null; activeThreadId = null; renderAgentList(); renderConvList(); }
     activeRoom = roomId;
     currentChatNameSpan.innerText = roomId;
-    currentChatMetaSpan.innerText = 'Group Chat';
+    currentChatMetaSpan.innerText = '群聊';
     messageInput.disabled = false;
     sendBtn.disabled = false;
     newChatBtn.disabled = true;
@@ -1697,7 +1839,7 @@ function loadRoomMessages(roomId) {
     messagesDiv.innerHTML = '';
     const msgs = roomMessages[roomId] || [];
     if (msgs.length === 0) {
-        messagesDiv.innerHTML = '<div class="empty-chat">No messages yet</div>';
+        messagesDiv.innerHTML = '<div class="empty-chat">暂无消息</div>';
         return;
     }
     msgs.forEach(msg => {
@@ -1718,7 +1860,7 @@ function updateRoomsUI() {
 function updateMembersPanel(members) {
     membersListDiv.innerHTML = '';
     if (!members || members.length === 0) {
-        membersListDiv.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">No members</div>';
+        membersListDiv.innerHTML = '<div style="color:var(--text-muted);font-size:0.8rem;text-align:center;padding:16px;">无成员</div>';
         return;
     }
     const isWsConnected = (ws && ws.readyState === WebSocket.OPEN);
@@ -1728,7 +1870,7 @@ function updateMembersPanel(members) {
         let avatar = '🤖';
         if (m === 'super_user') {
             isOnline = isWsConnected;
-            displayName = 'You';
+            displayName = '你';
             avatar = '👤';
         } else {
             isOnline = onlineAgentsSet.has(m);
@@ -1738,7 +1880,7 @@ function updateMembersPanel(members) {
         div.innerHTML = `
             <div class="member-avatar">${avatar}</div>
             <div class="member-name">${escapeHtml(displayName)}</div>
-            <div class="member-status" style="color:${isOnline ? 'var(--success)' : 'var(--text-muted)'};">${isOnline ? 'online' : 'offline'}</div>
+            <div class="member-status" style="color:${isOnline ? 'var(--success)' : 'var(--text-muted)'};">${isOnline ? '在线' : '离线'}</div>
         `;
         membersListDiv.appendChild(div);
     });
@@ -1757,19 +1899,19 @@ function showInviteDropdown() {
     if (!activeRoom) return;
     const existing = rooms[activeRoom]?.members || [];
     const available = agents.filter(a => !existing.includes(a));
-    if (available.length === 0) { connStatusSpan.innerText = 'No agents to invite'; return; }
+    if (available.length === 0) { connStatusSpan.innerText = '无可邀请的智能体'; return; }
     let dropdown = document.querySelector('.invite-dropdown');
     if (dropdown) dropdown.remove();
     const div = document.createElement('div');
     div.className = 'invite-dropdown';
-    div.innerHTML = `<div class="suggest-item" style="font-size:0.7rem;color:var(--text-muted);cursor:default;">Invite to room</div>`;
+    div.innerHTML = `<div class="suggest-item" style="font-size:0.7rem;color:var(--text-muted);cursor:default;">邀请到房间</div>`;
     available.forEach(ag => {
         const item = document.createElement('div');
         item.className = 'suggest-item';
         item.innerText = ag;
         item.onclick = () => {
             ws.send(JSON.stringify({ type: 'invite_to_room', room_id: activeRoom, target_agent: ag }));
-            connStatusSpan.innerText = `Invited ${ag}...`;
+            //connStatusSpan.innerText = `已邀请 ${ag}...`;
             div.remove();
         };
         div.appendChild(item);
@@ -1831,7 +1973,7 @@ messageInput.addEventListener('blur', () => setTimeout(closeSuggest, 200));
 function connect() {
     ws = new WebSocket(`ws://${window.location.host}/ws`);
     ws.onopen = () => {
-        connStatusSpan.innerText = 'Connected';
+        connStatusSpan.innerText = '已连接';
         connStatusSpan.style.color = 'var(--success)';
         ws.send(JSON.stringify({ type: 'list_rooms' }));
         updateMembersPanel(rooms[activeRoom]?.members || []);
@@ -1874,7 +2016,7 @@ function connect() {
                     await api('POST', '/chat/conversations', { agent_id: from, thread_id: targetThreadId });
                     if (!conversations[from]) conversations[from] = [];
                     conversations[from].unshift({
-                        thread_id: targetThreadId, agent_id: from, title: 'New Chat',
+                        thread_id: targetThreadId, agent_id: from, title: '新会话',
                         created_at: new Date().toISOString(), updated_at: new Date().toISOString(), is_archived: false
                     });
                     messageCache[targetThreadId] = [];
@@ -1919,12 +2061,12 @@ function connect() {
             if (activeRoom === data.room_id) ws.send(JSON.stringify({ type: 'get_room_members', room_id: data.room_id }));
         } else if (data.type === 'approval_request') {
             pendingApproval = { tool: data.tool, args: data.args, allowed: data.allowed, fromAgent: data.from, tool_call_id: data.tool_call_id };
-            approvalContentDiv.innerHTML = `<strong>Tool Call Approval</strong><br>Tool: ${escapeHtml(data.tool)}<br>Args: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>Allowed: ${data.allowed.join(', ')}`;
+            approvalContentDiv.innerHTML = `<strong>工具调用审批</strong><br>工具: ${escapeHtml(data.tool)}<br>参数: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>允许: ${data.allowed.join(', ')}`;
             modalOverlay.classList.add('active');
         }
     };
     ws.onclose = () => {
-        connStatusSpan.innerText = 'Disconnected — reconnecting...';
+        connStatusSpan.innerText = '已断开 — 重连中...';
         connStatusSpan.style.color = 'var(--danger)';
         setTimeout(connect, 3000);
         if (activeRoom) updateMembersPanel(rooms[activeRoom]?.members || []);
@@ -1962,7 +2104,7 @@ submitEditBtn.onclick = () => {
         const edited = JSON.parse(editArgsInput.value);
         ws.send(JSON.stringify({ type: 'approval_decision', to: pendingApproval.fromAgent, tool: pendingApproval.tool, decision: 'edit', edited_args: edited, tool_call_id: pendingApproval.tool_call_id }));
         closeApprovalModal();
-    } catch (e) { alert('Invalid JSON'); }
+    } catch (e) { showDialog('JSON 格式错误'); }
 };
 closeApprovalBtn.onclick = closeApprovalModal;
 
@@ -1991,13 +2133,13 @@ imageInput.onchange = (e) => {
     if (!file) return;
     const MAX_SIZE = 10 * 1024 * 1024; // 10MB
     if (file.size > MAX_SIZE) {
-        alert(`图片过大 (${(file.size / 1024 / 1024).toFixed(1)}MB)，最大支持 10MB`);
+        showDialog(`图片过大 (${(file.size / 1024 / 1024).toFixed(1)}MB)，最大支持 10MB`);
         imageInput.value = '';
         return;
     }
     const reader = new FileReader();
     reader.onerror = () => {
-        alert('图片读取失败，请重试');
+        showDialog('图片读取失败，请重试');
         imageInput.value = '';
     };
     reader.onload = (ev) => {
@@ -2008,6 +2150,44 @@ imageInput.onchange = (e) => {
     reader.readAsDataURL(file);
 };
 removeImgBtn.onclick = () => { currentImageBase64 = null; previewDiv.style.display = 'none'; imageInput.value = ''; };
+
+// Launch agent form
+agentLaunchBtn.onclick = () => {
+    const visible = launchForm.style.display === 'block';
+    launchForm.style.display = visible ? 'none' : 'block';
+    if (!visible) { launchAgentId.focus(); }
+};
+btnCancelLaunch.onclick = () => {
+    launchForm.style.display = 'none';
+    launchAgentId.value = '';
+    launchAgentDesc.value = '';
+};
+btnLaunch.onclick = async () => {
+    const agentId = launchAgentId.value.trim();
+    const expertise = launchAgentDesc.value.trim();
+    if (!agentId || !expertise) { showDialog('请输入智能体 ID 和专长描述'); return; }
+    btnLaunch.disabled = true;
+    btnLaunch.textContent = '启动中...';
+    try {
+        const res = await api('POST', '/agents/launch', { agent_id: agentId, expertise: expertise });
+        if (res && res.status === 'ok') {
+            launchForm.style.display = 'none';
+            launchAgentId.value = '';
+            launchAgentDesc.value = '';
+            await showDialog(`智能体 "${agentId}" 已启动 (PID: ${res.pid})，上线后将出现在侧边栏`);
+        } else {
+            await showDialog(`启动失败: ${res?.message || '未知错误'}`);
+        }
+    } catch (err) {
+        await showDialog(`启动错误: ${err.message}`);
+    }
+    btnLaunch.disabled = false;
+    btnLaunch.textContent = '启动';
+};
+// Enter key in description field triggers launch
+launchAgentDesc.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') btnLaunch.click();
+});
 
 // Rooms
 createRoomBtn.onclick = () => { const rid = createRoomInput.value.trim(); if (rid) { ws.send(JSON.stringify({ type: 'create_room', room_id: rid, target_agent: 'super_user' })); createRoomInput.value = ''; } };
@@ -2036,16 +2216,16 @@ function addCopyButtonsToCodeBlocks() {
         if (!codeElem) return;
         const btn = document.createElement('button');
         btn.className = 'copy-code-btn';
-        btn.innerText = 'Copy';
+        btn.innerText = '复制';
         btn.onclick = async (e) => {
             e.stopPropagation();
             try {
                 await navigator.clipboard.writeText(codeElem.innerText);
-                btn.innerText = 'Copied!';
-                setTimeout(() => { btn.innerText = 'Copy'; }, 1500);
+                btn.innerText = '已复制!';
+                setTimeout(() => { btn.innerText = '复制'; }, 1500);
             } catch (err) {
-                btn.innerText = 'Failed';
-                setTimeout(() => { btn.innerText = 'Copy'; }, 1500);
+                btn.innerText = '失败';
+                setTimeout(() => { btn.innerText = '复制'; }, 1500);
             }
         };
         if (getComputedStyle(pre).position === 'static') pre.style.position = 'relative';

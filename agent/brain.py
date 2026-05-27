@@ -39,6 +39,7 @@ from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
 from agent.reflection import init_chroma, submit_task_for_reflection
 from agent.browser_tools import browser, close_browser_session
 from agent.task_buffer import TaskBuffer
+from agent.conversation_tracker import ConversationTracker
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
 from langchain_core.runnables import RunnableConfig
 import chromadb
@@ -79,13 +80,18 @@ class Brain:
             db_pool = get_pool()
         self.checkpointer = AsyncPostgresSaver(db_pool)
         
+        # 智能体对话追踪器（轮次计数 + 逐级降级 + 硬上限）
+        self.conversation_tracker = ConversationTracker()
+        self.group_context = None  # 当前消息的群聊上下文
         # 和其他Agent交互工具
         self.send_to_agent_tool = self._create_send_to_agent_tool()
         # 创建群组相关的工具
         room_tools = self._create_room_tools()
         
         self.agent_msg_cache = {}  # user_id -> 累积的消息文本
-        self.agent_msg_timer = {}  # user_id -> asyncio.Task
+        self.agent_msg_group_ctx = {}  # user_id -> 群聊上下文（与消息一同缓存，避免延迟处理时丢失）
+        self.agent_msg_pending = {}  # user_id -> asyncio.Task (sleep 中，可安全取消)
+        self.agent_msg_processing = set()  # 正在处理中的 user_id 集合
         
         self._pending_approvals = {}
         # 用于去重
@@ -94,6 +100,7 @@ class Brain:
         self._termination_cache = {}
         # 任务缓冲模块
         self.task_buffer = TaskBuffer()
+        
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
         # root_dir = os.path.expanduser("~")  # 这会得到当前用户的家目录
@@ -173,14 +180,34 @@ class Brain:
 
     def _build_system_prompt(self):
         return build_brain_system_prompt(self.agent_id)
-    
+
+    def _build_group_context_prompt(self) -> str:
+        """构建群聊上下文提示，用于注入到系统提示词中。"""
+        gc = self.group_context
+        if not gc:
+            return ""
+        room_id = gc.get("room_id", "未知")
+        members = gc.get("members", [])
+        members_str = "、".join(members) if members else "未知"
+        return (
+            f"\n\n[群聊上下文]"
+            f"\n你正在群聊「{room_id}」中，当前群成员：{members_str}。"
+            f"\n群聊规则："
+            f"\n1. 只回复与你相关、或明确 @你 的消息，其他消息静默忽略；"
+            f"\n2. 回复时必须使用 send_group_message 工具，room_id 为「{room_id}」；"
+            f"\n3. 禁止使用 send_to_agent 私聊群成员来绕过群聊；"
+            f"\n4. 回复应简洁专业，面向全体群成员。"
+        )
+
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
         await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
         
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
-                      thread_id_override: str = None, silent: bool = False) -> str:
+                      thread_id_override: str = None, silent: bool = False,
+                      group_context: dict = None) -> str:
         self.is_busy = True
+        self.group_context = group_context  # 群聊上下文，注入系统提示词
         try:
             self.user_id = user_id
             effective_thread_id = thread_id_override if thread_id_override else self.thread_id
@@ -194,7 +221,11 @@ class Brain:
         finally:
             self.is_busy = False
             self.last_run_time = datetime.now()
-    
+            # 注意：不在这里清除 group_context，因为 agent 消息走延迟处理路径，
+            # 实际处理在 delayed_process 中异步发生，此时 group_context 仍需保留。
+            # group_context 在 _process_agent_message / _handle_with_agent 使用后由下次
+            # process() 调用覆盖，或在 _process_agent_message 中主动清除。
+
     async def process_group_message(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         # 处理群组消息
         self.is_busy = True
@@ -418,34 +449,63 @@ class Brain:
      
     async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
                                     silent: bool = False):
+        # ---- P0: 用户消息自动解除该智能体的所有对话限制 ----
+        if self.user_id == 'super_user':
+            self.conversation_tracker.reset_all_for(self.agent_id)
+
+        # ---- P0: 检查该对话对是否已被硬截断 ----
+        if self.user_id != 'super_user' and self.conversation_tracker.is_capped(self.agent_id, self.user_id):
+            logger.info(f"对话 {self.agent_id}<->{self.user_id} 已截断，丢弃收到的消息")
+            return
+
         # 如果是 Agent 之间的对话，执行缓存合并逻辑
         if self.user_id != 'super_user':
-            # 取消已有的定时器（新消息到来，重新计时）
-            if self.user_id in self.agent_msg_timer:
-                self.agent_msg_timer[self.user_id].cancel()
-            
-            strings = ['检索', '记忆', '关于', '经验', '参考']
-            if all(string in user_input for string in strings) and len(user_input) <= 50:     # 废话提取掉
-                return
-            
             # 累积消息
             if self.user_id not in self.agent_msg_cache:
                 self.agent_msg_cache[self.user_id] = user_input
             else:
                 self.agent_msg_cache[self.user_id] += "\n" + user_input
-            
-            # 创建新的延时处理任务
+
+            # 保存群聊上下文（与消息一同缓存，避免 process() 返回后被清除）
+            if self.group_context:
+                self.agent_msg_group_ctx[self.user_id] = self.group_context
+
+            # 如果正在处理中，不打断——消息已累积到 cache 中，
+            # 当前处理结束后如果 cache 还有内容会启动新 timer
+            if self.user_id in self.agent_msg_processing:
+                return
+
+            # 取消还在 sleep 的旧 timer（安全，未进入 LLM 调用）
+            if self.user_id in self.agent_msg_pending:
+                self.agent_msg_pending[self.user_id].cancel()
+
             async def delayed_process():
                 await asyncio.sleep(5)
-                if hasattr(self, 'agent_msg_cache'):
-                    full_input = self.agent_msg_cache.pop(self.user_id, "")
-                    if full_input:
-                        await self._process_agent_message(full_input, image_data, new_thread)
-                    if self.user_id in self.agent_msg_timer:
-                        del self.agent_msg_timer[self.user_id]
-            
+                # 标记进入处理阶段，从 pending 移除
+                self.agent_msg_pending.pop(self.user_id, None)
+                self.agent_msg_processing.add(self.user_id)
+                # 恢复缓存的群聊上下文（process() 返回后可能已被覆盖）
+                saved_ctx = self.agent_msg_group_ctx.pop(self.user_id, None)
+                if saved_ctx:
+                    self.group_context = saved_ctx
+                try:
+                    if hasattr(self, 'agent_msg_cache'):
+                        full_input = self.agent_msg_cache.pop(self.user_id, "")
+                        if full_input:
+                            await self._process_agent_message(full_input, image_data, new_thread)
+                finally:
+                    self.agent_msg_processing.discard(self.user_id)
+                    # 如果处理期间有新消息累积，自动启动新 timer
+                    if (hasattr(self, 'agent_msg_cache')
+                            and self.user_id in self.agent_msg_cache
+                            and self.agent_msg_cache[self.user_id]
+                            and self.user_id not in self.agent_msg_pending):
+                        t = asyncio.create_task(delayed_process())
+                        self.agent_msg_pending[self.user_id] = t
+
             if user_input:
-                self.agent_msg_timer[self.user_id] = asyncio.create_task(delayed_process())
+                t = asyncio.create_task(delayed_process())
+                self.agent_msg_pending[self.user_id] = t
             return  # 等待定时器，不立即处理
         
         
@@ -463,8 +523,12 @@ class Brain:
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
         base_prompt = self._build_system_prompt()
+        group_context = self._build_group_context_prompt()
         # 告知 AI 当前在和谁对话
-        base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
+        base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
+
+        # 群聊上下文
+        base_prompt += group_context
         if memories:
             memory_text = "\n\n## 关于他的长期记忆：\n" + "\n".join([
                 f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
@@ -558,8 +622,8 @@ class Brain:
                 break
     
     async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
-        chat_id = f'{self.agent_id}_{self.user_id}'
-        self.get_thread_id(new_thread, chat_id)
+        # ---- 使用 tracker 管理的 thread_id，每次新会话自动隔离 checkpoint ----
+        self.thread_id = self.conversation_tracker.get_or_create_thread_id(self.agent_id, self.user_id)
         
         # ===== 新增：记录收到的消息（有助于任务活跃检测） =====
         if hasattr(self, 'task_buffer') and self.thread_id:
@@ -569,29 +633,39 @@ class Brain:
                 user_input[:500]
             )
             
-        # ---- 新增终止检查 ----
-        if await self._should_terminate_conversation(self.thread_id):
-            print(f"对话 {self.thread_id} 被判定为死循环，终止处理。")
-            # 可选：发送终止通知给对方
-            # await self.comm.send_to_agent(self.user_id, {"text": "我认为我们应该停止交流，我不会再对该话题进行回复"})
+        # ---- P0: 检查对话是否已被硬截断 ----
+        if self.conversation_tracker.is_capped(self.agent_id, self.user_id):
+            logger.info(f"对话 {self.agent_id}<->{self.user_id} 已截断，跳过消息处理")
+            return
+
+        # ---- P0: 对话上限检查（轮次硬截断 + 逐级警告） ----
+        if self.conversation_tracker.is_capped(self.agent_id, self.user_id):
+            logger.info(f"对话 {self.thread_id} 已达轮次上限，终止处理")
             return
         # ----------------------
-        
+
         config = {"configurable": {"thread_id": self.thread_id}}
-        
+
         # 加载已发送消息 ID 集合（可选，用于去重）
         if self.thread_id not in self.sent_msg_ids_by_thread:
             self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
         sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
-        
+
         # 构建系统提示（仅超级用户才添加记忆）
         base_prompt = self._build_system_prompt()
+        group_context = self._build_group_context_prompt()
         # 告知 AI 当前在和谁对话
         if self.user_id == 'super_user':
-            base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
+            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
         else:
             status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
-            base_prompt += f"\n\n[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+            # ---- P0: 注入轮次警告 ----
+            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
+            if warning:
+                base_prompt += f"\n\n{warning}"
+        # 群聊上下文
+        base_prompt += group_context
         if self.memory and self.user_id == 'super_user':
             memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
             if memories:
@@ -649,12 +723,16 @@ class Brain:
         
         # 2. 构建系统提示（基础提示 + 长期记忆信息）
         base_prompt = self._build_system_prompt()
+        
+        group_context = self._build_group_context_prompt()
         # 告知 AI 当前在和谁对话
         if self.user_id == 'super_user':
-            base_prompt += f"\n\n[当前对话] 你正在和人类用户 (id是super_user) 对话。"
+            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
         else:
             status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
-            base_prompt += f"\n\n[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+        # 群聊上下文
+        base_prompt += group_context
         if memories and self.user_id == 'super_user':
             memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
                 f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
@@ -883,30 +961,71 @@ class Brain:
         return list_online_agents
 
     def _create_send_to_agent_tool(self):
-        @tool
+        max_rounds = self.conversation_tracker.default_max_rounds
+        _send_desc = (
+            f"向指定的 Agent 发送消息，不等待对方回复。"
+            f"注意：你与每个 Agent 的对话有轮次上限（默认 {max_rounds} 轮），请高效沟通。"
+            f"建议在发送前先调用 list_online_agents 检查目标 Agent 是否在线。"
+            f"参数 target_agent_id: 目标 Agent 的 ID。"
+            f"参数 message: 要发送的消息内容。"
+            f"返回: 发送结果，包含轮次提醒"
+        )
+        @tool(description=_send_desc)
         async def send_to_agent(target_agent_id: str, message: str) -> str:
-            """
-            向指定的 Agent 发送消息，不等待对方回复。
-            建议在发送前先调用 list_online_agents 检查目标 Agent 是否在线。
-            :param target_agent_id: 目标 Agent 的 ID，例如 'debater' 或 'researcher'。
-            :param message: 要发送的消息内容，例如 '请反驳我的观点'。
-            :return: 发送成功的标志
-            示例: send_to_agent(target_agent_id='debater', message='现在请开始反驳。')
-            """
             if message and '[停止交流]' in message:
+                self.conversation_tracker.reset(self.agent_id, target_agent_id)
                 return f'已和 {target_agent_id} 停止交流'
+
+            # ---- P0: 轮次门控 ----
+            can_send, reject_reason = self.conversation_tracker.can_send(self.agent_id, target_agent_id)
+            if not can_send:
+                logger.warning(f"send_to_agent 被拦截: {self.agent_id} -> {target_agent_id}: {reject_reason}")
+                # 通知用户
+                try:
+                    await self.comm.send_to_agent("super_user", {
+                        "text": f"🔒 [对话限制] {self.agent_id} 尝试向 {target_agent_id} 发送消息被拦截：{reject_reason}"
+                    })
+                except Exception:
+                    pass
+                return f"❌ 发送失败：{reject_reason}"
+
             online = self.online_agents
             if online is not None and target_agent_id not in online:
                 logger.warning(f"向离线 Agent 发送消息: {target_agent_id}")
             await self.comm.send_to_agent(target_agent_id, {"text": message})
+
+            # ---- P0: 记录轮次 ----
+            level, warning = self.conversation_tracker.record_send(self.agent_id, target_agent_id)
+
             hint = "" if (online is None or target_agent_id in online) else f"（注意：{target_agent_id} 当前可能离线）"
             if hint:
                 return f'消息发送失败，{hint}'
-            return f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
+
+            # ---- P0: 达到上限时通知用户 ----
+            if level == "capped":
+                state = self.conversation_tracker.get_state(self.agent_id, target_agent_id)
+                try:
+                    await self.comm.send_to_agent("super_user", {
+                        "text": (
+                            f"🔒 [对话达上限] {self.agent_id} 与 {target_agent_id} 的对话已达到 "
+                            f"{state.max_rounds} 轮上限，已自动限制。如需继续，请发送消息指示。"
+                        )
+                    })
+                except Exception:
+                    pass
+                return (
+                    f"⚠️ 消息已发送，但你与 {target_agent_id} 的对话已达 {state.max_rounds} 轮上限，"
+                    f"后续消息将被限制。请等待用户指示或使用其他方式协作。"
+                )
+
+            result = f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
+            if warning:
+                result += f"\n{warning}"
+            return result
         return send_to_agent
     
     async def close(self):
-        for task in self.agent_msg_timer.values():
+        for task in self.agent_msg_pending.values():
             task.cancel()
         for thread_id, task in list(self.task_buffer.buffers.items()):
             if task.get("status") == "in_progress":
@@ -1011,18 +1130,14 @@ class Brain:
         state = await self.agent.aget_state(configs)
         if not state or not state.values:
             return []
-        
+
         messages = state.values.get("messages", [])
         if not messages:
             return []
-        
-        # 从 thread_id 中解析对方 Agent ID（格式：f"{self.agent_id}_{other_agent_id}_{uuid}"）
-        parts = thread_id.split("_")
-        if len(parts) >= 2 and parts[0] == self.agent_id:
-            other_agent_id = parts[1]
-        else:
-            other_agent_id = "unknown"
-        
+
+        # 对方 Agent ID：在 agent-to-agent 上下文中，self.user_id 就是对方
+        other_agent_id = self.user_id if self.user_id != 'super_user' else "user"
+
         history = []
         for msg in messages[-max_messages:]:
             if msg.type == "ai":

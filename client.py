@@ -2,6 +2,7 @@ import asyncio
 import sys
 import json
 import re
+import subprocess
 from contextlib import asynccontextmanager
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -11,6 +12,7 @@ from pydantic import BaseModel
 from datetime import datetime, timezone
 import psycopg
 from config import config  # 导入你的配置
+from agent.prompts import build_launch_agent_prompt
 
 # 获取数据库连接字符串（同步方式）
 DB_URI = config.db.postgres_uri
@@ -117,6 +119,10 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     title: str | None = None
     is_archived: bool | None = None
+
+class LaunchAgentRequest(BaseModel):
+    agent_id: str
+    expertise: str  # 专长描述
     
 # 全局变量
 hub_ws = None
@@ -518,6 +524,23 @@ async def delete_conversation(thread_id: str, permanent: bool = False):
     conn.commit()
     conn.close()
     return {"status": "ok"}
+
+# ── 智能体管理 API ──
+
+@app.post("/agents/launch")
+async def launch_agent_endpoint(data: LaunchAgentRequest):
+    """直接启动一个新的智能体实例"""
+    cmd = [
+        sys.executable, "main.py",
+        "--agent-id", data.agent_id,
+        "--system-prompt", build_launch_agent_prompt(data.expertise)
+    ]
+    try:
+        flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+        process = subprocess.Popen(cmd, creationflags=flags)
+        return {"status": "ok", "agent_id": data.agent_id, "pid": process.pid}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
