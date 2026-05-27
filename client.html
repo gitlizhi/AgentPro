@@ -1650,7 +1650,7 @@ function renderMessages(threadId) {
     }
     msgs.forEach(m => {
         if (!showToolCalls && isToolMessage(m.content)) return;
-        const sender = m.role === 'user' ? '你' : (activeAgent || '智能体');
+        const sender = m.role === 'user' ? '我' : (activeAgent || '智能体');
         const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
         displayMessage(sender, m.content, time);
     });
@@ -1659,7 +1659,7 @@ function renderMessages(threadId) {
 }
 
 function displayMessage(sender, text, time) {
-    const isSelf = (sender === '你');
+    const isSelf = (sender === '我');
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
     const rendered = marked.parse(text);
@@ -1768,6 +1768,10 @@ async function sendMessage() {
     const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
     if (text && activeAgent && threadId) {
+        // Remove empty-chat placeholder before displaying message
+        const emptyDiv = messagesDiv.querySelector('.empty-chat');
+        if (emptyDiv) emptyDiv.remove();
+
         // Determine if this is the first message in a new conversation
         const isFirstMsg = !messageCache[threadId] || messageCache[threadId].length === 0;
 
@@ -1776,7 +1780,7 @@ async function sendMessage() {
         // Cache locally
         if (!messageCache[threadId]) messageCache[threadId] = [];
         messageCache[threadId].push({ role: 'user', content: text, created_at: new Date().toISOString() });
-        displayMessage('你', text, time);
+        displayMessage('我', text, time);
 
         // Auto-title: if this is the first user message
         const userMsgs = messageCache[threadId].filter(m => m.role === 'user');
@@ -1786,9 +1790,13 @@ async function sendMessage() {
 
         ws.send(JSON.stringify({ type: 'send', to: activeAgent, text, image: currentImageBase64 || null, thread_id: threadId, new_thread: isFirstMsg }));
     } else if (activeRoom) {
+        // Remove empty-chat placeholder before displaying message
+        const emptyDiv = messagesDiv.querySelector('.empty-chat');
+        if (emptyDiv) emptyDiv.remove();
+
         if (!roomMessages[activeRoom]) roomMessages[activeRoom] = [];
-        roomMessages[activeRoom].push({ sender: '你', text, time });
-        displayMessage('你', text, time);
+        roomMessages[activeRoom].push({ sender: '我', text, time });
+        displayMessage('我', text, time);
         ws.send(JSON.stringify({ type: 'group_message', room_id: activeRoom, text, image: currentImageBase64 || null }));
     }
 
@@ -1870,7 +1878,7 @@ function updateMembersPanel(members) {
         let avatar = '🤖';
         if (m === 'super_user') {
             isOnline = isWsConnected;
-            displayName = '你';
+            displayName = '我';
             avatar = '👤';
         } else {
             isOnline = onlineAgentsSet.has(m);
@@ -2119,6 +2127,11 @@ messageInput.addEventListener('keydown', (e) => {
 messageInput.addEventListener('input', function () {
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 100) + 'px';
+    // 输入框有内容时隐藏空状态提示，清空时恢复
+    const emptyDiv = messagesDiv.querySelector('.empty-chat');
+    if (emptyDiv) {
+        emptyDiv.style.display = this.value.trim() ? 'none' : '';
+    }
 });
 toggleSwitch.onchange = (e) => {
     showToolCalls = e.target.checked;

@@ -202,12 +202,28 @@ class Brain:
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
         await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
+
+    def _inject_time_context(self, text: str) -> str:
+        """将相对时间词替换为带具体日期的标注，帮助模型理解当前时间"""
+        now = datetime.now()
+        time_words = {
+            '前天': now - timedelta(days=2),
+            '昨天': now - timedelta(days=1),
+            '今天': now,
+            '明天': now + timedelta(days=1),
+            '后天': now + timedelta(days=2),
+        }
+        for word, dt in time_words.items():
+            date_str = dt.strftime('%Y%m%d')
+            text = text.replace(word, f'{word}（{date_str}）')
+        return text
         
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
                       thread_id_override: str = None, silent: bool = False,
                       group_context: dict = None) -> str:
         self.is_busy = True
         self.group_context = group_context  # 群聊上下文，注入系统提示词
+        user_input = self._inject_time_context(user_input)
         try:
             self.user_id = user_id
             effective_thread_id = thread_id_override if thread_id_override else self.thread_id
@@ -229,6 +245,7 @@ class Brain:
     async def process_group_message(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         # 处理群组消息
         self.is_busy = True
+        user_input = self._inject_time_context(user_input)
         try:
             self.user_id = user_id
             if self.user_id != 'super_user':        # 如果是Agent之间的交互，则跳过意图识别，直接认为是复杂任务
