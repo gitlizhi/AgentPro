@@ -147,7 +147,7 @@ class Brain:
         # ========== 反思子代理定义结束 ==========
 
         # 自定义工具
-        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
+        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), self._create_load_user_profile_tool(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -180,8 +180,50 @@ class Brain:
         else:
             return "Unknown OS"
 
+    def _create_load_user_profile_tool(self):
+        """创建 load_user_profile 工具：按需加载用户画像"""
+        brain_ref = self
+        @tool
+        async def load_user_profile() -> str:
+            """加载人类用户（super_user）的个人画像信息，包括身份、偏好、习惯、长期约定等。
+            当需要了解用户背景以提供个性化回复时调用此工具。
+            返回格式化的用户画像文本，可直接用于个性化对话。"""
+            if not brain_ref.memory:
+                return "记忆系统未启用，无法获取用户画像。"
+            return brain_ref.memory.get_user_profile("super_user")
+        return load_user_profile
+
     def _build_system_prompt(self):
         return build_brain_system_prompt(self.agent_id)
+
+    def _build_dynamic_context(self, group_context: str = "", image_desc: str = "") -> str:
+        """
+        构建当前消息的动态上下文前缀（每轮可能不同）。
+        注意：静态系统提示词由 create_deep_agent 的 system_prompt 参数处理，
+        这里只构建随对话变化的上下文信息，作为用户消息的前缀传入。
+        """
+        parts = []
+
+        # 告知 AI 当前在和谁对话
+        if self.user_id == 'super_user':
+            parts.append(f"[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。")
+        else:
+            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
+            parts.append(f"[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。")
+            # 注入轮次警告
+            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
+            if warning:
+                parts.append(warning)
+
+        # 群聊上下文
+        if group_context:
+            parts.append(group_context)
+
+        # 图片信息
+        if image_desc:
+            parts.append(f"[图片信息] 对方刚上传了一张图片，内容描述如下：\"{image_desc}\"")
+
+        return "\n\n".join(parts) if parts else ""
 
     def _build_group_context_prompt(self) -> str:
         """构建群聊上下文提示，用于注入到系统提示词中。"""
@@ -542,29 +584,16 @@ class Brain:
         else:
             # 已有任务，只记录步骤并刷新活跃时间
             self.task_buffer.add_step(self.thread_id, "用户继续输入（补充信息或修正指令）", user_input[:500])
-        memories = []
-        if self.memory and self.user_id == 'super_user':
-            memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
-        base_prompt = self._build_system_prompt()
+        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
         group_context = self._build_group_context_prompt()
-        # 告知 AI 当前在和谁对话
-        base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
-
-        # 群聊上下文
-        base_prompt += group_context
-        if memories:
-            memory_text = "\n\n## 关于他的长期记忆：\n" + "\n".join([
-                f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
-                for m in memories
-            ])
-            base_prompt += memory_text
+        image_desc = None
         if image_data:
             image_desc = await self._handle_image(image_data)
-            if image_desc:
-                base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：”{image_desc}”"
+        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
+        if context_prefix:
+            user_input = f"{context_prefix}\n\n{user_input}"
         
         messages = [
-            {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
         
@@ -674,33 +703,16 @@ class Brain:
             self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
         sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
 
-        # 构建系统提示（仅超级用户才添加记忆）
-        base_prompt = self._build_system_prompt()
+        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
         group_context = self._build_group_context_prompt()
-        # 告知 AI 当前在和谁对话
-        if self.user_id == 'super_user':
-            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
-        else:
-            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
-            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。"
-            # ---- P0: 注入轮次警告 ----
-            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
-            if warning:
-                base_prompt += f"\n\n{warning}"
-        # 群聊上下文
-        base_prompt += group_context
-        if self.memory and self.user_id == 'super_user':
-            memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
-            if memories:
-                memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join(...)
-                base_prompt += memory_text
+        image_desc = None
         if image_data:
             image_desc = await self._handle_image(image_data)
-            if image_desc:
-                base_prompt += f"\n\n[图片信息] 对方刚上传了一张图片，内容描述如下：\"{image_desc}\""
-
+        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
+        if context_prefix:
+            user_input = f"{context_prefix}\n\n{user_input}"
+        
         messages = [
-            {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
         
@@ -740,44 +752,25 @@ class Brain:
         """聊天"""
         chat_id = f'{self.agent_id}_{self.user_id}'
         self.get_thread_id(new_thread, chat_id)
-        memories = []
-        if self.memory and self.user_id == 'super_user':
-            memories = self.memory.query_relevant(user_input, self.user_id, n_results=3)
-        
-        # 2. 构建系统提示（基础提示 + 长期记忆信息）
-        base_prompt = self._build_system_prompt()
-        
+        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
         group_context = self._build_group_context_prompt()
-        # 告知 AI 当前在和谁对话
-        if self.user_id == 'super_user':
-            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。"
-        else:
-            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
-            base_prompt += f"\n\n[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。"
-        # 群聊上下文
-        base_prompt += group_context
-        if memories and self.user_id == 'super_user':
-            memory_text = "\n\n## 关于用户的长期记忆：\n" + "\n".join([
-                f"- {m['content']} (来自 {m['metadata'].get('timestamp', '过去')})"
-                for m in memories
-            ])
-            base_prompt += memory_text
-            
-        # 添加最近主动消息（5分钟内有效）
-        recent = self.recent_active_messages.get(self.user_id)
-        if recent and (datetime.now() - recent["timestamp"]) < timedelta(minutes=60):
-            base_prompt += f"\n\n[主动消息] AI刚才主动对用户说过：“{recent['content']}”"
-            # 使用后立即删除，避免每条消息都重复出现（也可保留到过期，根据需要调整）
-            del self.recent_active_messages[self.user_id]
-        
+        image_desc = None
         if image_data:
             image_desc = await self._handle_image(image_data)
-            if image_desc:
-                base_prompt += f"\n\n[图片信息] 用户刚上传了一张图片，内容描述如下：”{image_desc}”"
-            
-        # print(f'base_prompt: {base_prompt}', flush=True)
+        
+        # 添加最近主动消息（60分钟内有效）
+        recent = self.recent_active_messages.get(self.user_id)
+        if recent and (datetime.now() - recent["timestamp"]) < timedelta(minutes=60):
+            recent_context = f"\n\n[主动消息] AI刚才主动对用户说过：\u201c{recent['content']}\u201d"
+            del self.recent_active_messages[self.user_id]
+        else:
+            recent_context = ""
+        
+        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
+        if context_prefix:
+            user_input = f"{context_prefix}{recent_context}\n\n{user_input}"
+        
         messages = [
-            {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
         

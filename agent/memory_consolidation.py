@@ -29,8 +29,6 @@ def write_facts_to_markdown(file_path: str, facts: list):
         for fact in facts:
             f.write(f"## {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"- 事实：{fact}\n")
-            f.write("- source：consolidated\n")
-            f.write("- type：fact\n\n")
 
 async def deduplicate_facts_with_llm(facts: list) -> list:
     """使用大模型对事实列表进行语义去重和合并（异步）"""

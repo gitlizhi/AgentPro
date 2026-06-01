@@ -93,25 +93,16 @@ class LongTermMemory:
         return None
     
     def _sync_to_markdown(self, user_id: str, fact: str, metadata: dict):
-        """将事实追加到用户的 Markdown 记忆文件中"""
+        """将事实追加到用户的 Markdown 记忆文件中（仅写入事实本身）"""
         file_path = os.path.join(self.markdown_dir, f"{user_id}.md")
         timestamp = metadata.get('timestamp', datetime.now().isoformat())
-        # 格式化时间，使其更可读
         try:
             dt = datetime.fromisoformat(timestamp)
             time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
         except:
             time_str = timestamp
-        
-        # 构建条目
-        entry = f"\n## {time_str}\n"
-        entry += f"- 事实：{fact}\n"
-        # 添加其他元数据（可选）
-        for key, value in metadata.items():
-            if key not in ['timestamp', 'thread_id']:  # 排除一些字段
-                entry += f"- {key}：{value}\n"
-        
-        # 追加写入文件（使用 utf-8 编码）
+
+        entry = f"\n## {time_str}\n- 事实：{fact}\n"
         with open(file_path, 'a', encoding='utf-8') as f:
             f.write(entry)
     
@@ -159,7 +150,7 @@ class LongTermMemory:
             self._append_to_markdown(user_id, facts, metadatas)
     
     def _append_to_markdown(self, user_id: str, facts: List[str], metadatas: List[dict]):
-        """将批量事实追加到用户的 Markdown 记忆文件中"""
+        """将批量事实追加到用户的 Markdown 记忆文件中（仅写入事实本身）"""
         file_path = os.path.join(self.markdown_dir, f"{user_id}.md")
         with open(file_path, 'a', encoding='utf-8') as f:
             for fact, meta in zip(facts, metadatas):
@@ -169,15 +160,42 @@ class LongTermMemory:
                     time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                 except:
                     time_str = timestamp
-
-                f.write(f"\n## {time_str}\n")
-                f.write(f"- 事实：{fact}\n")
-                # 写入其他元数据（排除已单独显示的字段）
-                for key, value in meta.items():
-                    if key not in ['timestamp', 'thread_id', 'user_id']:
-                        f.write(f"- {key}：{value}\n")
-                f.write("\n")
+                f.write(f"\n## {time_str}\n- 事实：{fact}\n")
     
+    def get_user_profile(self, user_id: str) -> str:
+        """
+        获取用户画像 - 从 Markdown 文件中读取所有事实（仅 facts，不包含 events）。
+        返回去重后的用户画像文本，供 load_user_profile 工具使用。
+        """
+        file_path = os.path.join(self.markdown_dir, f"{user_id}.md")
+        if not os.path.exists(file_path):
+            return "暂无该用户的画像信息。"
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # 解析出所有事实行
+        facts = []
+        for line in content.split('\n'):
+            line = line.strip()
+            if line.startswith('- 事实：') or line.startswith('- fact：'):
+                fact = line.split('：', 1)[1].strip() if '：' in line else line[4:].strip()
+                if fact:
+                    facts.append(fact)
+
+        if not facts:
+            return "暂无该用户的画像信息。"
+
+        # 去重（保持顺序）
+        seen = set()
+        unique_facts = []
+        for f in facts:
+            if f not in seen:
+                seen.add(f)
+                unique_facts.append(f)
+
+        return "## 用户画像\n\n" + "\n".join(f"- {f}" for f in unique_facts)
+
     def get_random_facts(self, user_id: str, n: int = 3) -> List[str]:
         """随机获取用户记忆中的 n 条事实"""
         coll = self._get_collection(user_id)
