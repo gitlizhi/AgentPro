@@ -90,6 +90,12 @@ class Hub:
                     await self.register(agent_id, websocket)
                 elif data.get("type") == "message":
                     await self.route_message(data)
+                elif data.get("type") == "stop_task":
+                    await self.route_message(data)
+                elif data.get("type") == "agent_status":
+                    # 转发 agent 状态到 super_user（前端）
+                    if "super_user" in self.clients:
+                        await self.clients["super_user"].send(json.dumps(data, ensure_ascii=False))
                 elif data.get("type") == "get_agents":
                     # 返回当前所有在线 agent_id 列表
                     agents = list(self.clients.keys())

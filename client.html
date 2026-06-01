@@ -911,6 +911,28 @@
         #sendBtn:hover { background: linear-gradient(135deg, var(--accent-hover) 0%, #6d4fd9 100%); box-shadow: 0 4px 16px rgba(91,95,239,0.4); transform: translateY(-1px); }
         #sendBtn:active { transform: translateY(0); }
         #sendBtn:disabled { opacity: 0.3; cursor: default; box-shadow: none; transform: none; }
+        #stopBtn {
+            display: none;
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+            border: none;
+            height: 42px;
+            width: 42px;
+            min-width: 42px;
+            border-radius: 12px;
+            font-weight: 600;
+            color: #fff;
+            cursor: pointer;
+            font-size: 1.1rem;
+            font-family: inherit;
+            transition: all 0.2s var(--spring);
+            box-shadow: 0 2px 8px rgba(231,76,60,0.35);
+            align-items: center;
+            justify-content: center;
+            line-height: 1;
+        }
+        #stopBtn.visible { display: flex; }
+        #stopBtn:hover { background: linear-gradient(135deg, #c0392b 0%, #a93226 100%); box-shadow: 0 4px 16px rgba(231,76,60,0.5); transform: translateY(-1px); }
+        #stopBtn:active { transform: scale(0.95); }
         .status {
             text-align: center;
             font-size: 0.68rem;
@@ -1290,6 +1312,7 @@
                 <textarea id="messageInput" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" disabled></textarea>
             </div>
             <div class="btn-group">
+                <button id="stopBtn" title="停止当前任务">&#9209;</button>
                 <button id="imageBtn" class="icon-btn" title="上传图片">&#128247;</button>
                 <button id="sendBtn" disabled>发送</button>
             </div>
@@ -1352,6 +1375,7 @@ let currentImageBase64 = null;
 let pendingApproval = null;
 let showToolCalls = true;
 let unreadAgents = new Set();
+let agentBusyStates = {};  // { agentId: "busy" | "idle" }
 
 // conversations: { agentId: [{ thread_id, title, created_at, updated_at, is_archived }] }
 let conversations = {};
@@ -1372,6 +1396,7 @@ const newChatBtn = document.getElementById('newChatBtn');
 const messagesDiv = document.getElementById('messages');
 const messageInput = document.getElementById('messageInput');
 const sendBtn = document.getElementById('sendBtn');
+const stopBtn = document.getElementById('stopBtn');
 const currentChatNameSpan = document.getElementById('currentChatName');
 const currentChatMetaSpan = document.getElementById('currentChatMeta');
 const connStatusSpan = document.getElementById('connectionStatus');
@@ -1792,6 +1817,7 @@ async function selectAgent(agentId) {
     sendBtn.disabled = false;
     inviteAgentBtn.style.display = 'none';
     membersToggleBtn.style.display = 'none';
+    updateStopButton();
 
     // Load conversations if not loaded
     if (!conversations[agentId]) {
@@ -1915,6 +1941,7 @@ function selectRoom(roomId) {
     if (rooms[roomId]) rooms[roomId].unread = false;
     if (ws) ws.send(JSON.stringify({ type: 'get_room_members', room_id: roomId }));
     showMembersDrawer();
+    updateStopButton();
     messageInput.focus();
 }
 
@@ -2146,6 +2173,11 @@ function connect() {
             pendingApproval = { tool: data.tool, args: data.args, allowed: data.allowed, fromAgent: data.from, tool_call_id: data.tool_call_id };
             approvalContentDiv.innerHTML = `<strong>工具调用审批</strong><br>工具: ${escapeHtml(data.tool)}<br>参数: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>允许: ${data.allowed.join(', ')}`;
             modalOverlay.classList.add('active');
+        } else if (data.type === 'agent_status') {
+            const aid = data.agent_id;
+            const status = data.status;
+            agentBusyStates[aid] = status;
+            updateStopButton();
         }
     };
     ws.onclose = () => {
@@ -2196,6 +2228,21 @@ newChatBtn.onclick = () => {
     if (activeAgent) createConversation(activeAgent);
 };
 sendBtn.onclick = sendMessage;
+stopBtn.onclick = () => {
+    if (activeAgent && agentBusyStates[activeAgent] === 'busy') {
+        ws.send(JSON.stringify({ type: 'stop_task', agent_id: activeAgent }));
+        stopBtn.classList.remove('visible');
+    }
+};
+
+function updateStopButton() {
+    const aid = activeRoom ? null : activeAgent;
+    if (aid && agentBusyStates[aid] === 'busy') {
+        stopBtn.classList.add('visible');
+    } else {
+        stopBtn.classList.remove('visible');
+    }
+}
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });

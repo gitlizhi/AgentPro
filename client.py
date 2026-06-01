@@ -268,6 +268,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         "type": "get_room_members",
                         "room_id": room_id
                     }))
+
+            # 停止任务
+            elif msg_type == "stop_task":
+                agent_id = message.get("agent_id")
+                if agent_id and hub_ws:
+                    await hub_ws.send(json.dumps({
+                        "type": "stop_task",
+                        "to": agent_id,
+                        "from": my_agent_id
+                    }))
     
     except WebSocketDisconnect:
         frontend_connections.remove(websocket)
@@ -392,10 +402,18 @@ async def connect_to_hub():
                                     "text": cleaned
                                 })
         
+                    elif msg_type == "agent_status":
+                        for conn in frontend_connections:
+                            await conn.send_json({
+                                "type": "agent_status",
+                                "agent_id": data.get("agent_id"),
+                                "status": data.get("status")
+                            })
+
         except Exception as e:
             print(f"Hub 连接失败: {e}")
             await asyncio.sleep(5)
-    
+
 @app.post("/chat/history")
 async def save_message(msg: MessageIn):
     conn = get_db_connection()

@@ -145,6 +145,9 @@ class Agent:
                     self._online_agents.discard(agent)
                     logger.info(f"Agent offline: {agent} (total: {len(self._online_agents)})")
 
+            elif msg_type == "stop_task":
+                self.brain.stop_current_task()
+
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
         except Exception as e:

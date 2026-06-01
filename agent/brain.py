@@ -69,6 +69,7 @@ class Brain:
         
         self.comm = comm
         self.is_busy = False  # 标记是否正在处理用户请求
+        self._current_task = None  # 当前正在运行的 asyncio Task（用于外部取消）
         self.last_run_time = datetime.now()
         self.recent_active_messages = {}  # AI主动发起的对话记录 格式 {user_id: {"content": str, "timestamp": datetime}}
         
@@ -270,6 +271,8 @@ class Brain:
                       thread_id_override: str = None, silent: bool = False,
                       group_context: dict = None) -> str:
         self.is_busy = True
+        self._current_task = asyncio.current_task()
+        await self._notify_status("busy")
         self.group_context = group_context  # 群聊上下文，注入系统提示词
         user_input = self._inject_time_context(user_input)
         try:
@@ -282,9 +285,14 @@ class Brain:
             response = await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread,
                                                  effective_thread_id, silent)
             return response if not silent else ""
+        except asyncio.CancelledError:
+            await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
+            return "" if not silent else None
         finally:
+            self._current_task = None
             self.is_busy = False
             self.last_run_time = datetime.now()
+            await self._notify_status("idle")
             # 注意：不在这里清除 group_context，因为 agent 消息走延迟处理路径，
             # 实际处理在 delayed_process 中异步发生，此时 group_context 仍需保留。
             # group_context 在 _process_agent_message / _handle_with_agent 使用后由下次
@@ -293,6 +301,8 @@ class Brain:
     async def process_group_message(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
         # 处理群组消息
         self.is_busy = True
+        self._current_task = asyncio.current_task()
+        await self._notify_status("busy")
         user_input = self._inject_time_context(user_input)
         try:
             self.user_id = user_id
@@ -302,10 +312,30 @@ class Brain:
                 intent_data = await self._classify_intent(user_input)
             # print(f'意图识别为：{intent_data}')
             return await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread)
+        except asyncio.CancelledError:
+            await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
+            return None
         finally:
+            self._current_task = None
             self.is_busy = False
             self.last_run_time = datetime.now()
-    
+            await self._notify_status("idle")
+
+    async def _notify_status(self, status: str):
+        """通知前端智能体状态变化（busy / idle）"""
+        if self.comm:
+            await self.comm.send({
+                "type": "agent_status",
+                "agent_id": self.agent_id,
+                "status": status,
+            })
+
+    def stop_current_task(self):
+        """取消当前正在执行的任务（由外部 stop_task 消息触发）"""
+        if self._current_task and not self._current_task.done():
+            self._current_task.cancel()
+            logger.info(f"Task cancelled for agent {self.agent_id}")
+
     def get_thread_id(self, new_thread, chat_id):
         # 如果前端已经显式传了 thread_id，直接使用（无论 new_thread 标志）
         if self.thread_id and chat_id in self.thread_id:

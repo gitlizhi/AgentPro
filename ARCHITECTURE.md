@@ -459,6 +459,56 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | Docker 容器每次 execute 后清理 | 沙箱是一次性执行环境，无状态，不留残留 |
 | 延迟合并 Agent 消息（5 秒缓冲） | 减少来回次数，避免 Agent 对每条消息单独回复 |
 | 长期记忆按需加载而非注入 | 每次对话都注入消耗大量 token；Agent 主动调用工具获取，仅在需要时加载，且 Agent 明确知道自己用了哪些信息 |
+| 任务可中断（Stop Task） | 通过 asyncio Task 取消 + agent_status 协议实现，前端一键停止正在执行的 Agent 任务 |
+
+### 11.1 任务中断机制（Stop Task）
+
+用户可在前端点击停止按钮中断 Agent 的长时间运行任务。设计原则：**以 `brain.process()` 的生命周期作为"任务中"的边界**。
+
+**流程：**
+
+```
+用户点击 [⏹] → 前端 ws.send({type:"stop_task", agent_id})
+  → client.py 转发到 Hub
+    → Hub.route_message() 路由到目标 Agent
+      → core.py → brain.stop_current_task()
+        → asyncio.Task.cancel() 取消当前 process()
+          → CancelledError 在 astream() 的 await 点抛出
+            → process() 捕获 → 发送 "⏹ 任务已停止" + agent_status:idle
+              → 前端隐藏停止按钮
+```
+
+**agent_status 协议：**
+
+Agent 通过 `agent_status` 消息实时通知前端自身状态，前端据此显示/隐藏停止按钮：
+
+| 字段 | 说明 |
+|------|------|
+| `type` | `"agent_status"` |
+| `agent_id` | Agent ID |
+| `status` | `"busy"`（任务执行中）或 `"idle"`（空闲） |
+
+- `process()` 入口发送 `busy`，出口（finally）发送 `idle`
+- CancelledError 也被捕获，出口同样发送 `idle`
+- Hub 将 `agent_status` 消息转发到 `super_user`（前端）
+- 前端维护 `agentBusyStates` 映射，按当前活跃对话控制停止按钮显隐
+
+**关键实现细节：**
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| 任务跟踪 | `agent/brain.py` | `_current_task` 存储当前 asyncio Task；`stop_current_task()` 调用 `.cancel()` |
+| 取消处理 | `agent/brain.py` | `process()` / `process_group_message()` 中捕获 `asyncio.CancelledError`，清理后发送停止消息 |
+| 状态通知 | `agent/brain.py` | `_notify_status()` 通过 `comm.send()` 发送 `agent_status` |
+| 消息路由 | `agent/core.py` | 接收 `stop_task` 消息，调用 `brain.stop_current_task()` |
+| Hub 转发 | `hub/server.py` | 路由 `stop_task` 和 `agent_status` 消息 |
+| 前端按钮 | `client.html` | `#stopBtn` 根据 `agentBusyStates[activeAgent]` 控制显隐 |
+
+**设计考量：**
+
+- **为什么用 asyncio Task 取消而非标志位轮询？** 标志位需要在循环中主动检查，而 `astream()` 是阻塞调用，等待 LLM 响应期间无法检查。`Task.cancel()` 在 await 点立即抛出 `CancelledError`，响应即时。
+- **为什么 busy/idle 以 `process()` 为边界？** Agent 可能在任务中发多条消息、调用多个工具，但只要 `process()` 没返回，就代表任务未完成。用 `process()` 的入口/出口统一判断，逻辑简单可靠。
+- **群聊不支持停止？** 停止按钮仅在私聊（`activeAgent` 非空）时显示。群聊涉及多个 Agent，停止单个 Agent 的语义不够清晰，暂不处理。
 
 ---
 
