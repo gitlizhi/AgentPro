@@ -766,7 +766,13 @@ async def launch_agent(agent_name: str, expertise: str) -> str:
     ]
     try:
         # 启动新进程（后台运行，不等待）
-        process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            process = subprocess.Popen(cmd, startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            process = subprocess.Popen(cmd)
         _spawned_agents[agent_name] = {"pid": process.pid, "process": process}
         return f"已启动 Agent '{agent_name}'，专长：{expertise}"
     except Exception as e:

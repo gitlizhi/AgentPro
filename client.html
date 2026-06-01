@@ -236,6 +236,28 @@
             display: none;
         }
         .agent-item.has-unread .agent-unread { display: block; }
+        .agent-item .agent-close-btn {
+            display: none;
+            width: 18px; height: 18px;
+            line-height: 18px;
+            text-align: center;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            cursor: pointer;
+            border-radius: 50%;
+            flex-shrink: 0;
+            padding: 0;
+            transition: all 0.15s;
+        }
+        .agent-item .agent-close-btn:hover {
+            background: #ef4444;
+            color: #fff;
+        }
+        .agent-item:hover .agent-close-btn {
+            display: block;
+        }
         .agent-empty {
             font-size: 0.76rem;
             color: var(--text-muted);
@@ -1910,12 +1932,21 @@ function renderAgentList() {
             <span class="agent-icon">🤖</span>
             <span class="agent-name">${escapeHtml(a)}</span>
             <span class="agent-unread"></span>
+            ${isOnline ? `<button class="agent-close-btn" title="关闭智能体">×</button>` : ''}
         `;
         item.title = `${a} (${isOnline ? '在线' : '离线'})`;
         item.onclick = () => {
             if (activeRoom) { activeRoom = null; updateRoomsUI(); hideMembersDrawer(); }
             selectAgent(a);
         };
+        // 关闭按钮：阻止冒泡到 agent-item 的 onclick
+        if (isOnline) {
+            const closeBtn = item.querySelector('.agent-close-btn');
+            closeBtn.onclick = (e) => {
+                e.stopPropagation();
+                stopAgentProcess(a);
+            };
+        }
         agentList.appendChild(item);
     });
 }
@@ -2456,6 +2487,22 @@ btnLaunch.onclick = async () => {
 launchAgentDesc.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') btnLaunch.click();
 });
+
+// Stop agent process
+async function stopAgentProcess(agentId) {
+    const confirmed = await showDialog(`确定要关闭智能体「${agentId}」吗？`, { primary: '确认关闭', secondary: '取消' });
+    if (!confirmed) return;
+    try {
+        const res = await api('POST', '/agents/stop', { agent_id: agentId, expertise: '' });
+        if (res && res.status === 'ok') {
+            showDialog(`智能体「${agentId}」已关闭`);
+        } else {
+            showDialog(`关闭失败: ${res?.message || '未知错误'}`);
+        }
+    } catch (err) {
+        showDialog(`关闭错误: ${err.message}`);
+    }
+}
 
 // Rooms
 createRoomBtn.onclick = () => { const rid = createRoomInput.value.trim(); if (rid) { ws.send(JSON.stringify({ type: 'create_room', room_id: rid, target_agent: 'super_user' })); createRoomInput.value = ''; } };

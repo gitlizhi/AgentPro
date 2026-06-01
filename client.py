@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import hashlib
+import os
 import sys
 import json
 import re
+import signal
 import subprocess
 from contextlib import asynccontextmanager
 import websockets
@@ -138,6 +140,7 @@ hub_ws = None
 online_agents = set()
 frontend_connections = set()
 my_agent_id = 'super_user'
+_launched_agents: dict[str, subprocess.Popen] = {}  # agent_id -> Popen
 
 
 def clean_agent_response(text: str) -> str:
@@ -623,11 +626,82 @@ async def launch_agent_endpoint(data: LaunchAgentRequest):
         "--system-prompt", build_launch_agent_prompt(data.expertise)
     ]
     try:
-        flags = subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
-        process = subprocess.Popen(cmd, creationflags=flags)
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            process = subprocess.Popen(cmd, startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            process = subprocess.Popen(cmd)
+        _launched_agents[data.agent_id] = process
         return {"status": "ok", "agent_id": data.agent_id, "pid": process.pid}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+def _find_agent_pid(agent_id: str) -> int | None:
+    """通过命令行参数查找智能体进程 PID，用于终止 LLM 工具启动的智能体"""
+    try:
+        if sys.platform == 'win32':
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-Command',
+                 f"Get-CimInstance Win32_Process -Filter \"commandline like '%--agent-id {agent_id}%' and name = 'python.exe'\" | Select-Object -ExpandProperty ProcessId"],
+                capture_output=True, text=True, timeout=10
+            )
+            pids = result.stdout.strip().split()
+            if pids:
+                return int(pids[0])
+        else:
+            result = subprocess.run(
+                ['pgrep', '-f', f'main.py --agent-id {agent_id}'],
+                capture_output=True, text=True, timeout=5
+            )
+            pids = result.stdout.strip().split()
+            if pids:
+                return int(pids[0])
+    except Exception:
+        pass
+    return None
+
+def _kill_process(pid: int) -> bool:
+    """终止指定 PID 的进程树"""
+    try:
+        if sys.platform == 'win32':
+            result = subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True, text=True)
+            return result.returncode == 0
+        else:
+            os.kill(pid, signal.SIGTERM)
+            return True
+    except Exception:
+        return False
+
+@app.post("/agents/stop")
+async def stop_agent_endpoint(data: LaunchAgentRequest):
+    """终止指定智能体进程（支持 API 启动和 LLM 工具启动两种来源）"""
+    agent_id = data.agent_id
+
+    # 路径 1：从 API 启动的记录中查找
+    process = _launched_agents.get(agent_id)
+    if process is not None:
+        # 清理已退出的僵尸进程
+        if process.poll() is not None:
+            del _launched_agents[agent_id]
+        else:
+            try:
+                _kill_process(process.pid)
+                del _launched_agents[agent_id]
+                return {"status": "ok", "message": f"已终止智能体 '{agent_id}'"}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+    # 路径 2：扫描系统进程（LLM 工具启动的智能体）
+    pid = _find_agent_pid(agent_id)
+    if pid is not None:
+        if _kill_process(pid):
+            return {"status": "ok", "message": f"已终止智能体 '{agent_id}' (PID: {pid})"}
+        else:
+            return {"status": "error", "message": f"无法终止进程 {pid}"}
+
+    return {"status": "error", "message": f"未找到智能体 '{agent_id}' 的运行进程"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
