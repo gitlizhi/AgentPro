@@ -421,7 +421,7 @@ async def browser(
         "navigate", "click", "type", "screenshot", "get_content",
         "get_text", "execute_js", "scroll", "go_back", "go_forward",
         "refresh", "wait", "select_option", "press_key", "hover",
-        "get_url", "get_title", "get_elements"
+        "get_url", "get_title", "get_elements", "close"
     ],
     url: Optional[str] = None,
     selector: Optional[str] = None,
@@ -438,12 +438,12 @@ async def browser(
     wait_until: str = "domcontentloaded",
 ) -> str:
     """
-    内置浏览器工具，基于 Chromium 持久化会话，支持 17 种网页操作。
+    内置浏览器工具，基于 Chromium 持久化会话，支持 18 种网页操作。
     首次使用前请调用 load_skill("browser-automation") 获取完整说明和选择器指南。
 
     操作(action): navigate/click/type/screenshot/get_content/get_text/execute_js/
                   scroll/go_back/go_forward/refresh/wait/select_option/press_key/
-                  hover/get_url/get_title/get_elements
+                  hover/get_url/get_title/get_elements/close
     """
     session = _get_browser_session()
 
@@ -520,6 +520,12 @@ async def browser(
             if not selector:
                 return "错误: get_elements 需要 selector 参数"
             return session.get_elements(selector, limit=limit or 20)
+
+        elif action == "close":
+            session.close()
+            global _browser_session
+            _browser_session = None
+            return "浏览器已关闭。如需继续使用，再次调用 browser 工具即可自动打开。"
 
         else:
             return f"未知操作: {action}"
