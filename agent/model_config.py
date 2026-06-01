@@ -191,7 +191,7 @@ class ModelConfig:
             },
             "vision": {
                 "provider": ModelProvider.ZHIPU,
-                "model_name": "glm-4.6v",       # 视觉模型
+                "model_name": "GLM-4.1V-Thinking-Flash",       # 视觉模型
                 "base_url": "https://open.bigmodel.cn/api/paas/v4/",
                 "temperature": 0,
             },
