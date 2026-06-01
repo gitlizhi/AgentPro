@@ -681,6 +681,45 @@
         .messages::-webkit-scrollbar-track { background: transparent; }
         .messages::-webkit-scrollbar-thumb { background: #d0d0d5; border-radius: 3px; }
 
+        /* 新消息提示条 */
+        .scroll-bottom-hint {
+            position: sticky;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            display: flex;
+            justify-content: center;
+            pointer-events: none;
+            z-index: 10;
+            margin-top: -40px;
+            height: 0;
+        }
+        .scroll-bottom-hint.visible { height: auto; }
+        .scroll-bottom-hint-inner {
+            pointer-events: auto;
+            background: var(--surface);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius-pill);
+            padding: 7px 18px;
+            font-size: 0.78rem;
+            color: var(--accent);
+            cursor: pointer;
+            box-shadow: var(--shadow-md);
+            transition: all 0.2s var(--spring);
+            animation: hintIn 0.25s var(--spring) forwards;
+            white-space: nowrap;
+            user-select: none;
+        }
+        .scroll-bottom-hint-inner:hover {
+            background: var(--accent-light);
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-1px);
+        }
+        @keyframes hintIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
         .empty-chat {
             flex: 1;
             display: flex;
@@ -1307,6 +1346,9 @@
 
     <div class="messages" id="messages">
         <div class="empty-chat">选择一个智能体开始对话</div>
+        <div class="scroll-bottom-hint" id="scrollHint" style="display:none;">
+            <span class="scroll-bottom-hint-inner" onclick="scrollToLatest()">↓ 回到底部</span>
+        </div>
     </div>
 
     <div id="imagePreview" class="preview-bar" style="display:none;">
@@ -1782,11 +1824,38 @@ function renderMessages(threadId) {
         displayMessage(sender, m.content, time, m.image);
     });
     addCopyButtonsToCodeBlocks();
+    hideScrollHint();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function isScrolledToBottom() {
+    if (!messagesDiv) return true;
+    return messagesDiv.scrollHeight - messagesDiv.scrollTop - messagesDiv.clientHeight < 60;
+}
+
+function scrollToLatest() {
+    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    hideScrollHint();
+}
+
+let _newMsgCount = 0;
+function showScrollHint() {
+    _newMsgCount++;
+    const hint = document.getElementById('scrollHint');
+    if (!hint) return;
+    hint.style.display = '';
+    hint.querySelector('.scroll-bottom-hint-inner').textContent =
+        _newMsgCount > 1 ? `↓ ${_newMsgCount} 条新消息` : '↓ 回到底部';
+}
+function hideScrollHint() {
+    _newMsgCount = 0;
+    const hint = document.getElementById('scrollHint');
+    if (hint) hint.style.display = 'none';
 }
 
 function displayMessage(sender, text, time, image = null) {
     const isSelf = (sender === '我');
+    const wasAtBottom = isScrolledToBottom();
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
     const rendered = marked.parse(sanitizeBeforeMarkdown(text));
@@ -1794,8 +1863,17 @@ function displayMessage(sender, text, time, image = null) {
     msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${imageHtml}${rendered}</div>`;
     messagesDiv.appendChild(msgDiv);
     addCopyButtonsToCodeBlocks();
-    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    if (wasAtBottom) {
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    } else {
+        showScrollHint();
+    }
 }
+
+// 用户手动滚到底部时自动隐藏提示
+messagesDiv.addEventListener('scroll', function() {
+    if (isScrolledToBottom()) hideScrollHint();
+});
 
 function viewFullImage(src) {
     const overlay = document.createElement('div');
@@ -2010,6 +2088,7 @@ function loadRoomMessages(roomId) {
         displayMessage(msg.sender, msg.text, msg.time, msg.image);
     });
     addCopyButtonsToCodeBlocks();
+    hideScrollHint();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 

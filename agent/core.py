@@ -82,7 +82,13 @@ class Agent:
 
                     await self.brain._complete_approval(tool_call_id, decision)
                     return
-                # 普通消息：后台处理，不阻塞
+                # 普通消息：如果 Agent 正忙（上一轮任务还在执行），
+                # 先取消当前任务，再用新消息重新开始。
+                # 这样用户在任务执行中发消息 = 中断当前任务 + 按新指令执行。
+                if self.brain.is_busy and sender == 'super_user':
+                    logger.info(f"Agent busy, cancelling current task for new message")
+                    self.brain.stop_current_task()
+                    await asyncio.sleep(0.15)  # 让旧任务的取消和清理有机会执行
                 asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
                 # 可选：立即回复“已收到”
                 # await self.comm.send_to_agent(sender, {"text": "✅ 已收到，正在处理..."})

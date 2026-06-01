@@ -13,6 +13,7 @@ import json
 import base64
 import subprocess
 import traceback
+import warnings
 from typing import Optional
 from pathlib import Path
 
@@ -731,7 +732,10 @@ def computer_ocr_find(text: str, lang: str = "ch_sim+en") -> str:
         # 懒初始化 EasyOCR reader
         if _easyocr_reader is None:
             lang_list = lang.split("+")
-            _easyocr_reader = _easyocr.Reader(lang_list, gpu=False)
+            # 抑制 torch 在无 GPU 环境下的 pin_memory 警告
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', message=".*pin_memory.*")
+                _easyocr_reader = _easyocr.Reader(lang_list, gpu=False)
 
         # PIL Image → numpy array for EasyOCR
         img_array = np.array(img.convert("RGB"))

@@ -459,7 +459,8 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | Docker 容器每次 execute 后清理 | 沙箱是一次性执行环境，无状态，不留残留 |
 | 延迟合并 Agent 消息（5 秒缓冲） | 减少来回次数，避免 Agent 对每条消息单独回复 |
 | 长期记忆按需加载而非注入 | 每次对话都注入消耗大量 token；Agent 主动调用工具获取，仅在需要时加载，且 Agent 明确知道自己用了哪些信息 |
-| 任务可中断（Stop Task） | 通过 asyncio Task 取消 + agent_status 协议实现，前端一键停止正在执行的 Agent 任务 |
+| 任务可中断（Stop Task + 消息覆盖） | 通过 asyncio Task 取消 + agent_status 协议实现；支持手动停止按钮和发送新消息自动中断两种方式 |
+| 新消息自动中断当前任务 | 用户发送新消息时，若 Agent 正忙，自动取消当前任务并以新消息开始，保持同一 thread_id 保证上下文连续 |
 
 ### 11.1 任务中断机制（Stop Task）
 
@@ -509,6 +510,58 @@ Agent 通过 `agent_status` 消息实时通知前端自身状态，前端据此�
 - **为什么用 asyncio Task 取消而非标志位轮询？** 标志位需要在循环中主动检查，而 `astream()` 是阻塞调用，等待 LLM 响应期间无法检查。`Task.cancel()` 在 await 点立即抛出 `CancelledError`，响应即时。
 - **为什么 busy/idle 以 `process()` 为边界？** Agent 可能在任务中发多条消息、调用多个工具，但只要 `process()` 没返回，就代表任务未完成。用 `process()` 的入口/出口统一判断，逻辑简单可靠。
 - **群聊不支持停止？** 停止按钮仅在私聊（`activeAgent` 非空）时显示。群聊涉及多个 Agent，停止单个 Agent 的语义不够清晰，暂不处理。
+
+### 11.2 新消息自动中断当前任务
+
+用户发送新消息时，若 Agent 正在执行任务（`is_busy = True`），自动取消当前任务并以新消息开始。设计原则：**以用户意图优先——新消息代表用户的最新需求，旧任务应立即让路**。
+
+**流程：**
+
+```
+用户在 Agent 执行任务中发送新消息
+  → client.py WebSocket → Hub → Agent core.py:_handle_message
+    → 检测 msg_type == "message" && sender == "super_user"
+      → 检查 brain.is_busy
+        ├── True  → brain.stop_current_task()
+        │           → asyncio.Task.cancel() 取消当前 process()
+        │             → CancelledError 在 astream() 的 await 点抛出
+        │               → process() finally 块发送 agent_status:idle
+        │           → await asyncio.sleep(0.15) 确保取消传播完毕
+        │           → asyncio.create_task(_process_message(sender, new_msg, ...))
+        │             → brain.process(thread_id_override=同一 thread_id)
+        │               → 发送 agent_status:busy，开始新任务
+        │
+        └── False → 直接 asyncio.create_task(_process_message(...))
+```
+
+**与 agent_status 协议的协作：**
+
+| 事件 | agent_status 消息 | 前端效果 |
+|------|-------------------|---------|
+| 用户发新消息，Agent 正忙 | 旧任务 cancelled → `idle`；新任务开始 → `busy` | 停止按钮短暂隐藏后重新显示 |
+| 用户发新消息，Agent 空闲 | 新任务开始 → `busy` | 停止按钮显示 |
+| 新任务完成 | `idle` | 停止按钮隐藏 |
+
+**关键实现细节：**
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| 入口检查 | `agent/core.py:88-91` | 在 `_handle_message` 中检测 `is_busy`，调用 `stop_current_task()`，等待 0.15s 后创建新任务 |
+| 任务取消 | `agent/brain.py` | `stop_current_task()` 调用 `_current_task.cancel()`；`process()` 的 finally 块发送 `idle` |
+| 上下文连续性 | `agent/core.py:165` | 新任务使用相同的 `thread_id`，LangGraph checkpoint 保持对话历史连贯 |
+| 状态通知 | `agent/brain.py` | `_notify_status()` 通过 `comm.send()` 发送 `agent_status` |
+
+**设计考量：**
+
+- **为什么保持同一 thread_id？** 取消旧任务后，用户希望 Agent"记住刚才在做什么"。复用 thread_id 让 LangGraph checkpoint 中的历史消息保留，Agent 在新消息的上下文中仍然可以看到之前的工具调用和结果，从而理解用户的纠正意图（如"不对，用百度搜索"）。
+
+- **为什么只对 super_user 生效？** 其他 Agent 的消息走的是独立的缓冲+合并路径（见 3.3），不应打断当前用户任务。只有用户（super_user）的消息才具有"立即中断"的优先级。
+
+- **为什么需要 0.15s 延迟？** `Task.cancel()` 在 await 点抛出 `CancelledError`，但取消信号的传播是异步的。短暂等待确保旧任务的 finally 块（发送 `idle` 状态、清理资源）执行完毕，避免新旧任务的状态通知交错。
+
+- **与 Stop Task 按钮的关系？** 两者共享同一底层机制（`asyncio.Task.cancel()`），但触发方式不同：Stop Task 是用户显式点击按钮（`stop_task` 消息），消息中断是用户发送新消息隐式触发。前者适合"彻底不想继续了"，后者适合"方向错了，换个方式"。
+
+- **消息丢弃风险？** 旧任务在 cancel 后，其未发送的回复（`comm.send_to_agent`）会被丢弃。这是预期行为——旧任务的输出对用户已无意义。新任务从头开始处理用户的最新消息。
 
 ---
 
