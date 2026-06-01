@@ -800,6 +800,8 @@
         }
         .bubble a { color: var(--accent); text-decoration: underline; font-weight: 500; }
         .bubble img { max-width: 100%; border-radius: var(--radius-sm); margin: 0.4rem 0; }
+        .chat-image { max-width: 280px; max-height: 240px; border-radius: 10px; margin-bottom: 6px; cursor: pointer; transition: transform 0.2s ease; object-fit: cover; display: block; }
+        .chat-image:hover { transform: scale(1.02); }
         .bubble table {
             border-collapse: collapse;
             width: 100%;
@@ -973,6 +975,12 @@
             -webkit-backdrop-filter: blur(4px);
         }
         .modal-overlay.active { visibility: visible; opacity: 1; }
+        .image-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); z-index: 9999; display: flex;
+            align-items: center; justify-content: center; cursor: pointer;
+        }
+        .image-overlay-img { max-width: 92vw; max-height: 92vh; border-radius: 10px; box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
         .approval-panel {
             background: var(--surface);
             border: 1px solid var(--border);
@@ -1679,7 +1687,7 @@ async function switchConversation(agentId, threadId) {
         messagesDiv.innerHTML = '<div class="empty-chat">加载中...</div>';
         const history = await api('GET', `/chat/history?thread_id=${encodeURIComponent(threadId)}&limit=200`);
         if (history && Array.isArray(history)) {
-            messageCache[threadId] = history.map(h => ({ role: h.role, content: h.content, created_at: h.created_at }));
+            messageCache[threadId] = history.map(h => ({ role: h.role, content: h.content, created_at: h.created_at, image: h.image }));
         }
     }
 
@@ -1752,25 +1760,34 @@ function renderMessages(threadId) {
         if (!showToolCalls && isToolMessage(m.content)) return;
         const sender = m.role === 'user' ? '我' : (activeAgent || '智能体');
         const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
-        displayMessage(sender, m.content, time);
+        displayMessage(sender, m.content, time, m.image);
     });
     addCopyButtonsToCodeBlocks();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-function displayMessage(sender, text, time) {
+function displayMessage(sender, text, time, image = null) {
     const isSelf = (sender === '我');
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
     const rendered = marked.parse(text);
-    msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${rendered}</div>`;
+    const imageHtml = image ? `<img src="${escapeHtml(image)}" class="chat-image" onclick="viewFullImage(this.src)" loading="lazy">` : '';
+    msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${imageHtml}${rendered}</div>`;
     messagesDiv.appendChild(msgDiv);
     addCopyButtonsToCodeBlocks();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }
 
-async function saveMessage(threadId, role, content) {
-    await api('POST', '/chat/history', { thread_id: threadId, role, content });
+function viewFullImage(src) {
+    const overlay = document.createElement('div');
+    overlay.className = 'image-overlay';
+    overlay.innerHTML = `<img src="${src}" class="image-overlay-img">`;
+    overlay.onclick = () => overlay.remove();
+    document.body.appendChild(overlay);
+}
+
+async function saveMessage(threadId, role, content, image = null) {
+    await api('POST', '/chat/history', { thread_id: threadId, role, content, image });
 }
 
 // ──────────────── Agent selector ────────────────
@@ -1837,15 +1854,32 @@ async function selectAgent(agentId) {
     }
 }
 
+// ──────────────── Upload image helper ────────────────
+async function uploadImage(base64data) {
+    try {
+        const res = await api('POST', '/chat/upload-image', { image: base64data });
+        return res.url || null;
+    } catch (e) {
+        console.error('图片上传失败:', e);
+        return null;
+    }
+}
+
 // ──────────────── Send message ────────────────
 async function sendMessage() {
     let text = messageInput.value.trim();
     if (!text && !currentImageBase64) return;
 
+    // Upload image first (convert base64 → file path on server)
+    let imageUrl = null;
+    if (currentImageBase64) {
+        imageUrl = await uploadImage(currentImageBase64);
+    }
+
     // If no active thread and we have an agent, auto-create a conversation
     if (!activeThreadId && activeAgent) {
         await createConversation(activeAgent);
-        if (!text && !currentImageBase64) {
+        if (!text && !imageUrl) {
             messageInput.value = '';
             messageInput.focus();
             return;
@@ -1857,7 +1891,7 @@ async function sendMessage() {
         text = text.substring(4).trim();
         if (activeAgent) {
             await createConversation(activeAgent);
-            if (!text && !currentImageBase64) {
+            if (!text && !imageUrl) {
                 messageInput.value = '';
                 messageInput.focus();
                 return;
@@ -1868,7 +1902,7 @@ async function sendMessage() {
     const threadId = activeThreadId;
     const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
-    if (text && activeAgent && threadId) {
+    if (activeAgent && threadId) {
         // Remove empty-chat placeholder before displaying message
         const emptyDiv = messagesDiv.querySelector('.empty-chat');
         if (emptyDiv) emptyDiv.remove();
@@ -1876,29 +1910,29 @@ async function sendMessage() {
         // Determine if this is the first message in a new conversation
         const isFirstMsg = !messageCache[threadId] || messageCache[threadId].length === 0;
 
-        // Save to backend
-        saveMessage(threadId, 'user', text);
+        // Save to backend (image path, not base64)
+        saveMessage(threadId, 'user', text || '', imageUrl);
         // Cache locally
         if (!messageCache[threadId]) messageCache[threadId] = [];
-        messageCache[threadId].push({ role: 'user', content: text, created_at: new Date().toISOString() });
-        displayMessage('我', text, time);
+        messageCache[threadId].push({ role: 'user', content: text, created_at: new Date().toISOString(), image: imageUrl });
+        displayMessage('我', text, time, imageUrl);
 
         // Auto-title: if this is the first user message
         const userMsgs = messageCache[threadId].filter(m => m.role === 'user');
-        if (userMsgs.length === 1) {
+        if (userMsgs.length === 1 && text) {
             setConversationTitle(threadId, text);
         }
 
-        ws.send(JSON.stringify({ type: 'send', to: activeAgent, text, image: currentImageBase64 || null, thread_id: threadId, new_thread: isFirstMsg }));
+        ws.send(JSON.stringify({ type: 'send', to: activeAgent, text: text || '', image: imageUrl, thread_id: threadId, new_thread: isFirstMsg }));
     } else if (activeRoom) {
         // Remove empty-chat placeholder before displaying message
         const emptyDiv = messagesDiv.querySelector('.empty-chat');
         if (emptyDiv) emptyDiv.remove();
 
         if (!roomMessages[activeRoom]) roomMessages[activeRoom] = [];
-        roomMessages[activeRoom].push({ sender: '我', text, time });
-        displayMessage('我', text, time);
-        ws.send(JSON.stringify({ type: 'group_message', room_id: activeRoom, text, image: currentImageBase64 || null }));
+        roomMessages[activeRoom].push({ sender: '我', text, time, image: imageUrl });
+        displayMessage('我', text, time, imageUrl);
+        ws.send(JSON.stringify({ type: 'group_message', room_id: activeRoom, text, image: imageUrl }));
     }
 
     messageInput.value = '';
@@ -1954,7 +1988,7 @@ function loadRoomMessages(roomId) {
     }
     msgs.forEach(msg => {
         if (!showToolCalls && isToolMessage(msg.text)) return;
-        displayMessage(msg.sender, msg.text, msg.time);
+        displayMessage(msg.sender, msg.text, msg.time, msg.image);
     });
     addCopyButtonsToCodeBlocks();
     messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -2112,7 +2146,7 @@ function connect() {
                 if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
             }
         } else if (data.type === 'message') {
-            const from = data.from, text = data.text;
+            const from = data.from, text = data.text, image = data.image || null;
             const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
             // Determine which thread to save to
             let targetThreadId = activeThreadId;
@@ -2136,23 +2170,24 @@ function connect() {
                 renderAgentList();
             }
             if (targetThreadId) {
-                saveMessage(targetThreadId, 'assistant', text);
+                saveMessage(targetThreadId, 'assistant', text, image);
                 if (!messageCache[targetThreadId]) messageCache[targetThreadId] = [];
-                messageCache[targetThreadId].push({ role: 'assistant', content: text, created_at: new Date().toISOString() });
+                messageCache[targetThreadId].push({ role: 'assistant', content: text, created_at: new Date().toISOString(), image: image });
             }
             // Display if this agent is active
             if (activeAgent === from && activeThreadId && (showToolCalls || !isToolMessage(text))) {
-                displayMessage(from, text, time);
+                displayMessage(from, text, time, image);
             }
         } else if (data.type === 'group_message') {
             const rid = data.room_id;
             const from = data.from;
             let text = data.text || (data.payload?.text);
-            if (!text) return;
+            const image = data.image || null;
+            if (!text && !image) return;
             const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
             if (!roomMessages[rid]) roomMessages[rid] = [];
-            roomMessages[rid].push({ sender: from, text, time });
-            if (activeRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time);
+            roomMessages[rid].push({ sender: from, text, time, image: image });
+            if (activeRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time, image);
             else if (rooms[rid]) rooms[rid].unread = true;
             renderRooms();
         } else if (data.type === 'room_members_update' || data.type === 'room_members') {

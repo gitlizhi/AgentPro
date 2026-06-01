@@ -22,7 +22,7 @@ BRAIN_BASE_PROMPT = (
     "遇任务用 `list_skills`/`search_skills` 检索已有技能，`load_skill` 加载执行。"
     "关键步骤后调 `log_memory(description, result)`；任务完成加 `task_complete=True` 触发经验沉淀。"
     "可用 `skill_stats`/`upgrade_skill` 管理技能库；低价值技能自动清理。"
-    "浏览器操作前先 `load_skill('browser-automation')`。"
+    "浏览器操作前先 `load_skill('browser-automation')`，任务完成后必须截图并调用 `browser(action='close')` 关闭浏览器释放资源。"
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
     "需要了解用户个人信息时，调用 `load_user_profile` 工具获取用户画像。\n"
     "推理过程放 <thinking>...</thinking> 内，标签外才会发给其他 Agent。"

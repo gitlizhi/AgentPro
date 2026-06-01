@@ -133,8 +133,8 @@ class BrowserSession:
                             "--no-sandbox",
                             "--disable-setuid-sandbox",
                             "--disable-dev-shm-usage",
-                            "--disable-gpu",
-                        ],
+                            "--force-device-scale-factor=1",
+                        ] + (["--disable-gpu"] if self.headless else []),
                         viewport={"width": 1280, "height": 800},
                         locale="zh-CN",
                     )
@@ -150,8 +150,8 @@ class BrowserSession:
                                 "--no-sandbox",
                                 "--disable-setuid-sandbox",
                                 "--disable-dev-shm-usage",
-                                "--disable-gpu",
-                            ],
+                                "--force-device-scale-factor=1",
+                            ] + (["--disable-gpu"] if self.headless else []),
                         )
                         self._context = self._browser.new_context(
                             viewport={"width": 1280, "height": 800},
@@ -224,7 +224,7 @@ class BrowserSession:
             return (
                 f"截图已保存: {filepath}\n"
                 f"页面: {self._page.url}\n"
-                f"base64 长度: {len(b64)} 字符"
+                f"要在聊天中展示此截图，请在回复中包含: ![截图](/screenshots/{filename})"
             )
         except Exception as e:
             return f"截图失败: {e}"

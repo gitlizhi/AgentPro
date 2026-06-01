@@ -185,9 +185,10 @@ def computer_screenshot(save: bool = False) -> str:
         img = _take_screenshot_raw()
         info = f"截图成功。屏幕尺寸：{img.size[0]}x{img.size[1]}"
         if save:
-            filepath = _TEMP_DIR / f"screenshot_{os.getpid()}.png"
+            filename = f"screenshot_{os.getpid()}.png"
+            filepath = _TEMP_DIR / filename
             img.save(str(filepath))
-            info += f"，已保存到 {filepath}"
+            info += f"，已保存到 {filepath}\n要在聊天中展示此截图，请在回复中包含: ![截图](/screenshots/{filename})"
         return info
     except Exception as e:
         return f"截图失败: {e}"

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import sys
 import json
 import re
@@ -6,7 +8,8 @@ import subprocess
 from contextlib import asynccontextmanager
 import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 from pydantic import BaseModel
 from datetime import datetime, timezone
@@ -36,6 +39,7 @@ def init_db():
                 thread_id VARCHAR(255) NOT NULL,
                 role VARCHAR(20) NOT NULL,
                 content TEXT NOT NULL,
+                image TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -62,6 +66,10 @@ def init_db():
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created
             ON chat_messages(thread_id, created_at DESC)
+        """)
+        # Migration: add image column if not exists
+        cur.execute("""
+            ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image TEXT
         """)
     conn.commit()
     conn.close()
@@ -107,6 +115,7 @@ class MessageIn(BaseModel):
     thread_id: str
     role: str   # 'user' or 'assistant'
     content: str
+    image: str | None = None
 
 class MessageOut(MessageIn):
     id: int
@@ -143,6 +152,17 @@ def clean_agent_response(text: str) -> str:
 
 
 app = FastAPI(lifespan=lifespan)
+
+# 挂载 screenshots 目录，让前端能通过 /screenshots/filename.png 访问截图
+import pathlib
+_screenshots_dir = pathlib.Path(__file__).parent / "screenshots"
+_screenshots_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/screenshots", StaticFiles(directory=str(_screenshots_dir)), name="screenshots")
+
+# 挂载 chat_images 目录，存储用户上传的聊天图片
+_chat_images_dir = pathlib.Path(__file__).parent / "chat_images"
+_chat_images_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/chat_images", StaticFiles(directory=str(_chat_images_dir)), name="chat_images")
 
 
 @app.get("/")
@@ -333,14 +353,17 @@ async def connect_to_hub():
                                 })
                         else:
                             cleaned = clean_agent_response(text)
-                            if not cleaned:
+                            if not cleaned and not payload.get("image"):
                                 continue
+                            msg = {
+                                "type": "message",
+                                "from": sender,
+                                "text": cleaned
+                            }
+                            if payload.get("image"):
+                                msg["image"] = payload["image"]
                             for conn in frontend_connections:
-                                await conn.send_json({
-                                    "type": "message",
-                                    "from": sender,
-                                    "text": cleaned
-                                })
+                                await conn.send_json(msg)
                     
                     # 群组相关转发
                     elif msg_type == "room_created":
@@ -393,14 +416,17 @@ async def connect_to_hub():
                         payload = data.get("payload", {})
                         text = payload.get("text", "")
                         cleaned = clean_agent_response(text)
-                        if cleaned:
+                        if cleaned or payload.get("image"):
+                            msg = {
+                                "type": "group_message",
+                                "room_id": room_id,
+                                "from": sender,
+                                "text": cleaned
+                            }
+                            if payload.get("image"):
+                                msg["image"] = payload["image"]
                             for conn in frontend_connections:
-                                await conn.send_json({
-                                    "type": "group_message",
-                                    "room_id": room_id,
-                                    "from": sender,
-                                    "text": cleaned
-                                })
+                                await conn.send_json(msg)
         
                     elif msg_type == "agent_status":
                         for conn in frontend_connections:
@@ -414,13 +440,55 @@ async def connect_to_hub():
             print(f"Hub 连接失败: {e}")
             await asyncio.sleep(5)
 
+@app.post("/chat/upload-image")
+async def upload_image(data: dict):
+    """接收 base64 图片，保存到 chat_images/ 目录，返回访问路径"""
+    import base64 as b64
+    import time as _time
+    image_b64 = data.get("image", "")
+    if not image_b64:
+        return JSONResponse({"error": "缺少 image 字段"}, status_code=400)
+
+    # 解析 data URL: data:image/png;base64,xxxxx
+    header = "base64,"
+    idx = image_b64.find(header)
+    if idx != -1:
+        mime_part = image_b64[:idx]
+        ext = "png"
+        for mime_ext in [("jpeg", "jpg"), ("jpg", "jpg"), ("png", "png"), ("gif", "gif"), ("webp", "webp")]:
+            if mime_ext[0] in mime_part:
+                ext = mime_ext[1]
+                break
+        raw = image_b64[idx + len(header):]
+    else:
+        ext = "png"
+        raw = image_b64
+
+    try:
+        img_bytes = b64.b64decode(raw)
+    except Exception:
+        return JSONResponse({"error": "base64 解码失败"}, status_code=400)
+
+    if len(img_bytes) > 10 * 1024 * 1024:
+        return JSONResponse({"error": "图片过大，最大 10MB"}, status_code=400)
+
+    # 用内容哈希命名以防重复
+    file_hash = hashlib.sha256(img_bytes).hexdigest()[:16]
+    filename = f"{file_hash}.{ext}"
+    filepath = _chat_images_dir / filename
+    if not filepath.exists():
+        filepath.write_bytes(img_bytes)
+
+    return {"url": f"/chat_images/{filename}"}
+
+
 @app.post("/chat/history")
 async def save_message(msg: MessageIn):
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO chat_messages (thread_id, role, content) VALUES (%s, %s, %s)",
-            (msg.thread_id, msg.role, msg.content)
+            "INSERT INTO chat_messages (thread_id, role, content, image) VALUES (%s, %s, %s, %s)",
+            (msg.thread_id, msg.role, msg.content, msg.image)
         )
         cur.execute(
             "UPDATE conversation_threads SET updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
@@ -435,7 +503,7 @@ async def get_history(thread_id: str, limit: int = 100):
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, role, content, created_at FROM chat_messages WHERE thread_id = %s ORDER BY created_at LIMIT %s",
+            "SELECT id, role, content, created_at, image FROM chat_messages WHERE thread_id = %s ORDER BY created_at LIMIT %s",
             (thread_id, limit)
         )
         rows = cur.fetchall()
@@ -445,7 +513,8 @@ async def get_history(thread_id: str, limit: int = 100):
             "id": row[0],
             "role": row[1],
             "content": row[2],
-            "created_at": fmt_dt(row[3])
+            "created_at": fmt_dt(row[3]),
+            "image": row[4]
         }
         for row in rows
     ]
