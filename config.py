@@ -50,7 +50,8 @@ class ModelConfig(BaseSettings):
     default_provider: Optional[str] = Field(None, alias="DEFAULT_PROVIDER")
     base_url: Optional[str] = Field(None, alias="BASE_URL")
     default_model: str = Field("GLM-4.5-Air", alias="DEFAULT_MODEL")
-    vision_model: str = Field("glm-4.6v", alias="VISION_MODEL")
+    vision_model: str = Field("GLM-4.1V-Thinking-Flash", alias="VISION_MODEL")
+    computer_vision_model: str = Field("GLM-4.1V-Thinking-Flash", alias="COMPUTER_VISION_MODEL")
     intent_model: str = Field("GLM-4.5-Air", alias="INTENT_MODEL")
     model_temperature: float = Field(0.0, alias="MODEL_TEMPERATURE")
 

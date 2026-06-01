@@ -24,4 +24,9 @@ dependencies = [
     "pywinauto>=0.6.9",
     "sqlalchemy>=2.0.48",
     "websockets>=16.0",
+    "pyautogui>=0.9.54",
+    "Pillow>=11.0.0",
+    "pygetwindow>=0.0.9",
+    "pyperclip>=1.8.0",
+    "easyocr>=1.7.0",
 ]

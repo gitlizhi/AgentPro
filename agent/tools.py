@@ -4,6 +4,8 @@
 import json
 import uuid
 import os
+import ctypes
+import time
 import subprocess
 import winreg
 import sys
@@ -312,6 +314,72 @@ def _find_matching_windows(title: Optional[str] = None, class_name: Optional[str
     return matches
 
 
+def _bring_window_to_front(title: str) -> bool:
+    """
+    将指定标题的窗口还原（如果最小化）并置于前台。
+    使用 Win32 API + AttachThreadInput 技巧绕过 Windows 前台锁定限制。
+    返回 True 表示成功，False 表示未找到窗口或操作失败。
+    """
+    if not title:
+        return False
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    SW_RESTORE = 9
+    found_hwnd = []
+
+    def enum_callback(hwnd, _lparam):
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buf, length + 1)
+        if title.lower() in buf.value.lower():
+            found_hwnd.append(hwnd)
+            return False  # 找到第一个就停止
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    try:
+        user32.EnumWindows(WNDENUMPROC(enum_callback), 0)
+    except Exception:
+        pass
+
+    if not found_hwnd:
+        return False
+
+    hwnd = found_hwnd[0]
+
+    # Step 1: 如果窗口最小化，先还原
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+        time.sleep(0.3)
+
+    # Step 2: 使用 AttachThreadInput 技巧绕过前台锁定
+    current_thread = kernel32.GetCurrentThreadId()
+    foreground_hwnd = user32.GetForegroundWindow()
+
+    attached = False
+    foreground_thread = None
+    if foreground_hwnd and foreground_hwnd != hwnd:
+        foreground_thread = user32.GetWindowThreadProcessId(foreground_hwnd, None)
+        if foreground_thread and foreground_thread != current_thread:
+            user32.AttachThreadInput(current_thread, foreground_thread, True)
+            attached = True
+
+    try:
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+    finally:
+        if attached and foreground_thread:
+            user32.AttachThreadInput(current_thread, foreground_thread, False)
+
+    time.sleep(0.1)  # 短暂等待前台切换生效
+    return True
+
+
 def _connect_to_window(
     title: Optional[str] = None,
     class_name: Optional[str] = None,
@@ -322,6 +390,7 @@ def _connect_to_window(
 ) -> Application:
     """
     连接到窗口，支持模糊匹配和多窗口选择（index 指定第几个匹配，0 为第一个）
+    连接成功后自动将窗口还原并置于前台。
     """
     try:
         if title and fuzzy_title:
@@ -330,13 +399,20 @@ def _connect_to_window(
             app = Application(backend="uia").connect(
                 title=title, class_name=class_name, process=process_id, timeout=timeout
             )
+        # 连接成功后自动激活窗口
+        if title:
+            _bring_window_to_front(title)
         return app
     except Exception as e:
         # 如果是因为多个匹配项，则手动选择第一个
         if "There are 2 elements that match" in str(e):
             matches = _find_matching_windows(title=title, class_name=class_name)
             if index < len(matches):
-                return Application(backend="uia").connect(handle=matches[index].handle)
+                app = Application(backend="uia").connect(handle=matches[index].handle)
+                # 连接成功后自动激活窗口
+                if title:
+                    _bring_window_to_front(title)
+                return app
             else:
                 raise Exception(f"找到 {len(matches)} 个匹配窗口，但索引 {index} 超出范围。可用的窗口标题: {[w.window_text() for w in matches]}")
         else:
@@ -389,7 +465,8 @@ async def windows_automation(
         "start", "connect", "click", "double_click", "right_click",
         "type", "send_keys", "select", "get_text", "set_text", "wait",
         "maximize", "minimize", "restore", "close", "screenshot",
-        "get_property", "scroll", "drag_drop", "menu_select"
+        "get_property", "scroll", "drag_drop", "menu_select",
+        "list_controls", "search_controls"
     ],
     app_path: Optional[str] = None,
     title: Optional[str] = None,
@@ -414,8 +491,25 @@ async def windows_automation(
     window_index: int = 0,   # 新增：选择第几个匹配窗口
 ) -> str:
     """
-    控制 Windows 应用程序。支持多窗口选择（通过 window_index 参数）。
-    当连接微信出现“多个匹配”错误时，可以尝试 window_index=0 或 1。
+    控制 Windows 应用程序（基于 UIAutomation 无障碍树，像素级精确）。
+
+    ## 核心操作
+    - start: 启动应用 / connect: 连接到已运行窗口
+    - click / double_click / right_click: 点击控件
+    - type / send_keys / set_text: 输入文字或按键
+    - get_text: 读取控件上的文字
+    - scroll / drag_drop / menu_select: 滚动、拖拽、菜单导航
+    - maximize / minimize / restore / close: 窗口操作
+
+    ## 控件发现（精确定位的关键）
+    - list_controls: 列出窗口中所有带文字的控件（最多50个）
+    - search_controls: 按可见文字模糊搜索控件（text 参数为搜索词）
+
+    ## 参数说明
+    - title: 窗口标题（支持模糊匹配）
+    - text: 用于 search_controls（搜索词）或 type（要输入的文字）
+    - window_index: 多窗口时选择第几个（0-based）。
+    当连接微信出现”多个匹配”错误时，可以尝试 window_index=0 或 1。
     """
     try:
         # 处理 start 和 connect 单独，因为它们不需要控件定位
@@ -444,7 +538,83 @@ async def windows_automation(
                 return f"成功连接到窗口: {title or class_name or process_id} (窗口索引 {window_index})"
             except Exception as e:
                 return f"连接失败: {e}"
-        
+
+        elif action == "list_controls":
+            try:
+                app = _connect_to_window(
+                    title=title, class_name=class_name, process_id=process_id,
+                    fuzzy_title=True, timeout=timeout, index=window_index
+                )
+            except Exception as e:
+                return f"连接窗口失败: {e}\n请提供 title 参数指定窗口标题（模糊匹配）。"
+            dlg = app.top_window()
+            controls = []
+            try:
+                for c in dlg.descendants():
+                    try:
+                        name = c.window_text()
+                        if name and name.strip():
+                            controls.append({
+                                "name": name.strip(),
+                                "control_type": c.control_type_name(),
+                                "auto_id": c.automation_id(),
+                                "class_name": c.class_name(),
+                                "rect": c.bounding_rectangle(),
+                            })
+                    except Exception:
+                        pass
+            except Exception as e:
+                return f"枚举控件失败: {e}"
+            total = len(controls)
+            if total > 50:
+                controls = controls[:50]
+                return json.dumps(controls, ensure_ascii=False, indent=2) + (
+                    f"\n\n... 共 {total} 个带文字控件，仅显示前 50 个。"
+                    "建议用 search_controls 搜索特定文字缩小范围。"
+                )
+            elif total == 0:
+                return "未找到任何带文字的控件。该窗口可能是自定义绘制界面（如浏览器内容、游戏等），建议改用 OCR 视觉定位。"
+            return json.dumps(controls, ensure_ascii=False, indent=2)
+
+        elif action == "search_controls":
+            if text is None:
+                return "错误: search_controls 操作需要提供 text 参数（要搜索的控件文字，支持模糊匹配）"
+            try:
+                app = _connect_to_window(
+                    title=title, class_name=class_name, process_id=process_id,
+                    fuzzy_title=True, timeout=timeout, index=window_index
+                )
+            except Exception as e:
+                return f"连接窗口失败: {e}\n请提供 title 参数指定窗口标题。"
+            dlg = app.top_window()
+            results = []
+            try:
+                for c in dlg.descendants():
+                    try:
+                        name = c.window_text()
+                        if name and text.lower() in name.lower():
+                            results.append({
+                                "name": name.strip(),
+                                "control_type": c.control_type_name(),
+                                "auto_id": c.automation_id(),
+                                "class_name": c.class_name(),
+                                "rect": c.bounding_rectangle(),
+                            })
+                    except Exception:
+                        pass
+            except Exception as e:
+                return f"搜索控件失败: {e}"
+            if not results:
+                return (
+                    f"未找到包含 '{text}' 的控件。\n"
+                    "建议：① 用 list_controls 查看窗口中所有带文字的控件 "
+                    "② 用 OCR 视觉定位（computer_ocr_find）查找非原生控件 ③ 检查窗口标题是否正确。"
+                )
+            output = json.dumps(results[:15], ensure_ascii=False, indent=2)
+            if len(results) > 15:
+                output += f"\n\n... 共 {len(results)} 个匹配，仅显示前 15 个。请提供更具体的文字缩小范围。"
+            return output
+
         # 对于需要窗口和控件的操作，定位控件（支持模糊标题）
         try:
             app, control = _find_window_and_control(

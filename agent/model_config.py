@@ -195,6 +195,13 @@ class ModelConfig:
                 "base_url": "https://open.bigmodel.cn/api/paas/v4/",
                 "temperature": 0,
             },
+            "computer_vision": {  # 智谱 GLM-4.6V-Flash 用于电脑操作视觉识别
+                "provider": ModelProvider.ZHIPU,
+                # "model_name": "GLM-4.6V-Flash",
+                "model_name": "GLM-4.1V-Thinking-Flash",
+                "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+                "temperature": 0,
+            },
             "ollama": {  # 本地模型
                 "provider": ModelProvider.OLLAMA,
                 "model_name": "llama3.1",

@@ -38,6 +38,7 @@ from agent.sandboxed_backend import DockerSandboxBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
 from agent.reflection import init_chroma, submit_task_for_reflection
 from agent.browser_tools import browser, close_browser_session
+from agent.computer_tools import COMPUTER_TOOLS
 from agent.task_buffer import TaskBuffer
 from agent.conversation_tracker import ConversationTracker
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
@@ -146,7 +147,7 @@ class Brain:
         # ========== 反思子代理定义结束 ==========
 
         # 自定义工具
-        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools
+        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -157,8 +158,9 @@ class Brain:
             checkpointer=self.checkpointer,
             subagents=[reflection_subagent],  # 在线反思子代理
             interrupt_on={
-                "windows_automation": {"allowed_decisions": ["approve", "reject"]},
+                # "windows_automation": {"allowed_decisions": ["approve", "reject"]},
                 "launch_agent": {"allowed_decisions": ["approve", "reject"]},
+                # "computer_execute": {"allowed_decisions": ["approve", "reject"]},
                 # "browser": {"allowed_decisions": ["approve", "reject"]},
             },
             middleware=[
