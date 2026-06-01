@@ -654,7 +654,7 @@ computer_paste(text='你好，这是中文消息')
 
 ### 12.9 与系统其他部分的集成
 
-#### 12.9.1 工具注册（brain.py）
+#### 13.9.1 工具注册（brain.py）
 
 ```python
 # brain.py line 41
@@ -667,7 +667,7 @@ tools = [..., browser] + room_tools + COMPUTER_TOOLS
 
 所有电脑工具以**平铺方式**注册到 LangGraph Agent，Agent 在每次 LLM 调用时都能看到全部 19 个工具。
 
-#### 12.9.2 提示词注入策略
+#### 13.9.2 提示词注入策略
 
 系统采用**技能加载**而非直接注入的方式传递操作指令：
 
@@ -685,7 +685,7 @@ BRAIN_BASE_PROMPT 中仅有一行：
 - 只在需要桌面操作时才加载指令
 - 技能文档比系统提示词更易维护和迭代
 
-#### 12.9.3 HITL 安全策略
+#### 13.9.3 HITL 安全策略
 
 ```python
 # brain.py lines 160-164
@@ -732,7 +732,141 @@ interrupt_on={
 
 ---
 
-## 十三、文件清单
+## 十三、聊天图片系统
+
+### 13.1 概述
+
+AgentPro 支持聊天中展示图片，来源分两类：
+
+| 来源 | 场景 | 存储目录 | 访问路径 |
+|------|------|---------|---------|
+| 用户上传 | 用户在聊天框中选择图片发送 | `chat_images/` | `/chat_images/{hash}.{ext}` |
+| 智能体截图 | 浏览器/桌面自动化执行后截图 | `screenshots/` | `/screenshots/screenshot_{ts}.png` |
+
+### 13.2 用户图片上传流程
+
+```
+用户选择图片
+  → FileReader.readAsDataURL() → 内存中的 base64 Data URL
+  → uploadImage() → POST /chat/upload-image  { image: "data:image/png;base64,..." }
+    → 服务端解析 MIME 类型和扩展名
+    → SHA256 哈希前 16 位命名（防重复）
+    → 写入 chat_images/{hash}.png
+    → 返回 { url: "/chat_images/{hash}.png" }
+  → 路径存入 messageCache、数据库、WebSocket 消息
+  → <img src="/chat_images/{hash}.png"> 在聊天气泡中展示
+```
+
+### 13.3 智能体截图展示
+
+智能体在浏览器/桌面操作完成后，截图工具返回 markdown 格式：
+
+```
+![截图](/screenshots/screenshot_1712345678.png)
+```
+
+前端通过 `marked.parse()` 将 markdown 转为 HTML `<img>` 标签，浏览器直接从 `/screenshots/` 路径加载。
+
+两个截图工具 (`computer_screenshot` / `browser.screenshot`) 的返回值中已包含正确的 markdown 格式，智能体直接复制到回复中即可展示。
+
+### 13.4 存储架构
+
+```
+┌─────────────────────────────────────────┐
+│  前端 (client.html)                      │
+│  - currentImageBase64 (暂存，仅内存)     │
+│  - imageUrl (上传后的路径，持久化)        │
+│  - messageCache[].image = path          │
+│  - roomMessages[].image = path          │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│  client.py (FastAPI)                    │
+│  - POST /chat/upload-image → 存盘返回URL │
+│  - /chat_images/ → StaticFiles 挂载     │
+│  - /screenshots/ → StaticFiles 挂载     │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│  PostgreSQL chat_messages               │
+│  - image TEXT (存储路径，非 base64)      │
+│  - 路径示例: /chat_images/a1b2c3d4.png  │
+└─────────────────────────────────────────┘
+```
+
+### 13.5 关键设计决策
+
+| 决策 | 理由 |
+|------|------|
+| 图片存磁盘、DB 只存路径 | base64 存 DB 会导致严重膨胀（每条消息数 MB），路径仅几十字节 |
+| 内容哈希命名 | 相同图片不重复存储；SHA256 前 16 位碰撞概率极低 |
+| 前端上传后再发送消息 | 确保消息发送时图片已持久化，消息缓存和 DB 中存的都是可靠路径 |
+| `displayMessage(image)` 参数贯穿全链路 | 缓存、API、WebSocket、renderMessages 统一传递 image，避免切换工具开关后图片丢失 |
+| 用户图片和截图分开目录 | 职责不同：`chat_images/` 持久化用户上传，`screenshots/` 临时截图（7 天自动清理） |
+
+### 13.6 前端渲染
+
+```javascript
+function displayMessage(sender, text, time, image = null) {
+    // image 为服务器路径如 /chat_images/xxx.png 或 /screenshots/xxx.png
+    const imageHtml = image
+        ? `<img src="${image}" class="chat-image" onclick="viewFullImage(this.src)" loading="lazy">`
+        : '';
+    // marked.parse() 同时处理 markdown 中嵌入的图片语法
+    msgDiv.innerHTML = `<div class="bubble">${imageHtml}${marked.parse(text)}</div>`;
+}
+```
+
+点击聊天气泡中的图片可全屏放大预览（`viewFullImage` 创建 overlay）。
+
+---
+
+## 十四、浏览器自动化
+
+### 14.1 概述
+
+AgentPro 内置基于 Playwright 的 Chromium 浏览器，支持 18 种网页操作。使用持久化会话 (`launch_persistent_context`)，cookie 和登录态自动保持。
+
+详见 `agent/skills/browser-automation/SKILL.md`。
+
+### 14.2 任务完成后自动关闭
+
+Agent 完成浏览器任务后必须关闭浏览器释放资源。机制：
+
+```
+BRAIN_BASE_PROMPT 明确指示：
+  "任务完成后必须截图并调用 browser(action='close') 关闭浏览器释放资源"
+
+Agent 操作流程：
+  → browser.screenshot → 保存最终截图
+  → 回复中包含 markdown 截图展示
+  → browser.close → 关闭 Chromium 进程
+```
+
+技能文档中约定的关闭流程与提示词中的强制指令双重保障。
+
+### 14.3 DPI 缩放问题修复
+
+**问题**：Windows 上拖拽 Playwright 浏览器窗口导致前端 UI 整体放大。
+
+**根因**：`--disable-gpu` 参数在非无头模式下触发了 Windows DPI 虚拟化，拖拽窗口在不同 DPI 显示器间移动时，系统错误地缩放了整个应用窗口。
+
+**修复**：
+- 非无头模式下移除 `--disable-gpu` 参数
+- 添加 `--force-device-scale-factor=1` 锁定 DPI 缩放比例
+- 无头模式仍保留 `--disable-gpu`（无头模式不涉及窗口渲染）
+
+```python
+# agent/browser_tools.py
+args=[
+    "--no-sandbox", "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage", "--force-device-scale-factor=1",
+] + (["--disable-gpu"] if self.headless else []),
+```
+
+---
+
+## 十五、文件清单
 
 | 文件 | 职责 |
 |------|------|
