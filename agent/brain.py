@@ -159,9 +159,8 @@ class Brain:
             checkpointer=self.checkpointer,
             subagents=[reflection_subagent],  # 在线反思子代理
             interrupt_on={
-                # "windows_automation": {"allowed_decisions": ["approve", "reject"]},
                 "launch_agent": {"allowed_decisions": ["approve", "reject"]},
-                # "computer_execute": {"allowed_decisions": ["approve", "reject"]},
+                "computer_execute": {"allowed_decisions": ["approve", "reject"]},       # 慎重
                 # "browser": {"allowed_decisions": ["approve", "reject"]},
             },
             middleware=[

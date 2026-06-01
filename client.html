@@ -1449,6 +1449,25 @@ function escapeHtml(str) {
 }
 function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
 
+// 在 marked.parse() 之前消毒文本，剥离可能破坏页面样式的 HTML 标签
+// 主要防范 browser get_content 返回的完整网页 HTML（含外部 CSS、style 等）
+function sanitizeBeforeMarkdown(text) {
+    if (!text) return text;
+    // 剥离会加载外部资源或影响全局样式的标签
+    let cleaned = text
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')   // 内联样式
+        .replace(/<link[^>]*>/gi, '')                      // 外部样式表
+        .replace(/<meta[^>]*>/gi, '')                      // meta 标签
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')  // 脚本
+        .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, ''); // 内嵌框架
+    // 对于 get_content 返回的巨大 HTML 块，截断以避免渲染海量 DOM
+    if (cleaned.length > 8000 && (cleaned.includes('<!DOCTYPE') || cleaned.includes('<html'))) {
+        const preview = cleaned.substring(0, 2000);
+        cleaned = preview + '\n\n---\n> ⚠️ 内容过长（完整 HTML 已截断），如需查看完整内容请在浏览器工具中截图查看\n';
+    }
+    return cleaned;
+}
+
 // ── Custom dialog (replaces alert/confirm) ──
 function showDialog(msg, options = {}) {
     return new Promise((resolve) => {
@@ -1770,7 +1789,7 @@ function displayMessage(sender, text, time, image = null) {
     const isSelf = (sender === '我');
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
-    const rendered = marked.parse(text);
+    const rendered = marked.parse(sanitizeBeforeMarkdown(text));
     const imageHtml = image ? `<img src="${escapeHtml(image)}" class="chat-image" onclick="viewFullImage(this.src)" loading="lazy">` : '';
     msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${imageHtml}${rendered}</div>`;
     messagesDiv.appendChild(msgDiv);
