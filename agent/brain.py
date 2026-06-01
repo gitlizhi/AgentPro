@@ -36,11 +36,12 @@ from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import DockerSandboxBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
-from agent.reflection import init_chroma, submit_task_for_reflection
+from pathlib import Path
+from agent.reflection import init_chroma, submit_task_for_reflection, get_skill_collection, SKILLS_DIR
 from agent.browser_tools import browser, close_browser_session
 from agent.computer_tools import COMPUTER_TOOLS
 from agent.task_buffer import TaskBuffer
-from agent.conversation_tracker import ConversationTracker
+from agent.skill_version_manager import get_skill_latest_version, get_skill_file_path
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
 from langchain_core.runnables import RunnableConfig
 import chromadb
@@ -242,6 +243,77 @@ class Brain:
             f"\n3. 禁止使用 send_to_agent 私聊群成员来绕过群聊；"
             f"\n4. 回复应简洁专业，面向全体群成员。"
         )
+
+    @staticmethod
+    def _load_skill_content(skill_name: str, source: str) -> str | None:
+        """从磁盘加载技能文件完整内容（优先最新版本）"""
+        try:
+            if source == 'builtin':
+                path = Path(__file__).parent / "skills" / skill_name / "SKILL.md"
+            else:
+                ver = get_skill_latest_version(skill_name)
+                if ver:
+                    path = get_skill_file_path(skill_name, ver)
+                else:
+                    path = SKILLS_DIR / f"{skill_name}.md"
+            if path.exists():
+                return path.read_text(encoding='utf-8')
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_skill_lessons(content: str) -> str:
+        """从技能文档中提取注意事项和反思优化部分（即'踩过的坑'）"""
+        parts = []
+        for header in ['执行步骤', '注意事项', '反思与优化', '常见错误', '关键要点']:
+            pattern = rf'#{{1,4}}\s+{header}\s*\n(.*?)(?=\n#{{1,4}}\s|\Z)'
+            m = re.search(pattern, content, re.DOTALL)
+            if m:
+                text = m.group(1).strip()
+                if len(text) > 500:
+                    text = text[:500] + "..."
+                parts.append(f"**{header}**: {text}")
+        return "\n".join(parts) if parts else ""
+
+    async def _get_relevant_skill_lessons(self, user_input: str) -> str:
+        """搜索与用户输入相关的技能，提取经验教训注入上下文。
+        程序化强制执行，不依赖 Agent 自觉调用 search_skills。"""
+        try:
+            collection = get_skill_collection()
+            if not collection:
+                return ""
+
+            results = collection.query(query_texts=[user_input], n_results=3)
+            if not results.get('metadatas') or not results['metadatas'][0]:
+                return ""
+
+            lessons = []
+            seen = set()
+            for meta in results['metadatas'][0]:
+                skill_name = meta.get('skill_name', '')
+                source = meta.get('source', 'learned')
+                if not skill_name or skill_name in seen:
+                    continue
+                seen.add(skill_name)
+
+                content = self._load_skill_content(skill_name, source)
+                if not content:
+                    continue
+
+                extracted = self._extract_skill_lessons(content)
+                if extracted:
+                    lessons.append(f"### {skill_name}\n{extracted}")
+                    if len(lessons) >= 2:
+                        break
+
+            if not lessons:
+                return ""
+
+            return "\n\n[相关经验] 以下是你过去处理类似任务时积累的经验教训，请在执行时特别注意避开已知的坑：\n\n" + "\n\n".join(lessons)
+        except Exception as e:
+            logger.warning(f"获取相关技能经验失败: {e}")
+            return ""
 
     async def update_memory(self, user_id: str, user_input: str, thread_id: str):
         """静默更新指定线程的记忆"""
@@ -621,7 +693,13 @@ class Brain:
         context_prefix = self._build_dynamic_context(group_context, image_desc or "")
         if context_prefix:
             user_input = f"{context_prefix}\n\n{user_input}"
-        
+
+        # 程序化注入相关技能经验：搜索过去踩过的坑，不依赖 Agent 自觉
+        if self.user_id == 'super_user':
+            skill_lessons = await self._get_relevant_skill_lessons(user_input)
+            if skill_lessons:
+                user_input = f"{user_input}\n\n{skill_lessons}"
+
         messages = [
             {"role": "user", "content": user_input}
         ]
