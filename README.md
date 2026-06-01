@@ -1,234 +1,412 @@
-# AgentPro - 智能体框架
+# AgentPro
 
-AgentPro 是一个基于 LangChain 和 LangGraph 构建的高级 AI 智能体框架，支持多智能体协作、短期记忆、长期记忆、记忆转经验（可自动根据过往记忆进行经验总结）、操作浏览器、HITL、意图识别、定时任务、主动思考和未来多模态扩展。它旨在提供一个灵活、可扩展的生产级智能体系统，让你能够快速构建自己的 AI 助手。
+<div align="center">
 
-## ✨ 核心特性
+**基于 LangGraph + LangChain 的多智能体协作平台**
 
-- **多智能体架构**：支持同时运行多个独立智能体，通过 Hub 进行消息路由，互不干扰。
-- **短期记忆**：基于 PostgreSQL 的检查点（Checkpointer）实现对话历史持久化，智能体重启后仍能恢复上下文。
-- **长期记忆**：使用 ChromaDB 向量数据库存储用户事实，并同步为可读的 Markdown 文件，支持智能去重和整理。
-- **记忆转经验**：复杂任务处理后，可将处理步骤，踩坑经历转为经验，下次处理类似任务，可从经验中提取，显著提升智能体处理速度，让智能体越来越聪明。
-- **意图识别**：利用大模型对用户输入进行分类（聊天、复杂任务、设置提醒、查询提醒等），并提取关键参数，快速响应。
-- **操作浏览器**：内置浏览器模块，可操作用户宿主机谷歌浏览器，实现自动化。
-- **多智能体协作**：智能体可复制多个实例并行运行，且多个实例可通过通信协议进行通信，实现共同协作。
-- **群聊功能**：目前已经可以创建群聊，并将指定智能体拉入群内进行任务派发和协作。
-- **定时提醒**：集成 APScheduler，支持用户设置一次性提醒，到期自动发送通知。
-- **人机协作**：新增人机协作功能，在执行关键的操作时，会主动触发HITL，可以让人类确认后再进行操作，提高安全性。
-- **主动思考与沟通**：后台任务定期生成内在想法，结合记忆和近期对话，可在不繁忙时，偶尔主动与用户互动。
-- **技能系统**：内置 deepagents，支持通过 `SKILL.md` 和脚本定义可扩展的技能，实现渐进式披露。
-- **多模态扩展**：支持通过切换视觉模型（如 GLM-4.6V）处理图片输入。
-- **WebSocket 通信**：所有智能体通过统一的 Hub 进行通信，支持点对点和广播消息。
+[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![LangChain](https://img.shields.io/badge/LangChain-1.2+-orange.svg)](https://www.langchain.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-latest-purple.svg)](https://langchain-ai.github.io/langgraph/)
 
-## 🛠️ 技术栈
+</div>
 
-- **核心框架**：LangChain, LangGraph, deepagents
-- **数据库**：PostgreSQL（短期记忆、提醒存储）、ChromaDB（长期记忆）、SQLAlchemy（APScheduler 作业存储）
-- **消息通信**：WebSockets（自定义 Hub）
-- **调度器**：APScheduler (AsyncIOExecutor)
-- **模型**：DeepSeek-v4-flash  智谱 AI（GLM-4.7, GLM-4.6v, GLM-4-Flash），支持 OpenAI 兼容格式
-- **异步运行时**：Python 3.12+，asyncio
-- **获取技术文档详细内容**：查看项目中的 **ARCHITECTURE.md** 文件
+---
 
-## 🚀 快速开始
+## 目录
+
+- [项目介绍](#项目介绍)
+- [核心特性](#核心特性)
+- [系统架构](#系统架构)
+- [快速开始](#快速开始)
+- [配置说明](#配置说明)
+- [项目结构](#项目结构)
+- [记忆系统](#记忆系统)
+- [技能系统](#技能系统)
+- [Computer Use（桌面自动化）](#computer-use桌面自动化)
+- [清理脚本](#清理脚本)
+- [贡献指南](#贡献指南)
+- [许可证](#许可证)
+
+---
+
+## 项目介绍
+
+AgentPro 是一个**生产级多智能体协作平台**。多个 AI Agent 通过 WebSocket Hub 互联，可以私聊、群聊、委派任务、使用技能、操控桌面应用、执行代码。Agent 具备长期记忆和自我反思能力，能自动从过往任务中提炼经验并生成可复用技能。
+
+### 能力一览
+
+```
+用户 → Agent
+        │
+        ├── 💬  多智能体私聊 / 群聊协作
+        ├── 🧠  长期记忆（ChromaDB）+ 短期记忆（PostgreSQL）
+        ├── 🔄  记忆转经验 → 自动生成可复用技能
+        ├── 🖥️  Computer Use（桌面自动化：鼠标/键盘/OCR/视觉定位）
+        ├── 🌐  浏览器自动化（Playwright）
+        ├── 📦  Docker 沙箱代码执行
+        ├── ⏰  定时提醒（APScheduler）
+        ├── 👤  人机协作（HITL 审批）
+        └── 💡  主动思考与互动
+```
+
+---
+
+## 核心特性
+
+### 智能体能力
+
+| 特性 | 说明 |
+|------|------|
+| **多智能体架构** | 多个独立 Agent 并行运行，通过 Hub 消息路由，互不干扰 |
+| **多智能体协作** | Agent 间可私聊通信、群聊讨论、委派任务，协同完成复杂目标 |
+| **意图识别** | LLM 对用户输入分类（聊天/复杂任务/提醒/查询），快速路由 |
+| **主动思考** | 后台定期生成内在想法，结合记忆和对话主动与用户互动 |
+| **人机协作 (HITL)** | 关键操作触发人工审批，审批通过后继续执行 |
+
+### 记忆与学习
+
+| 特性 | 说明 |
+|------|------|
+| **短期记忆** | PostgreSQL checkpoint 持久化对话历史，重启后恢复上下文 |
+| **长期记忆** | ChromaDB 向量存储用户画像和事件，自动去重，同步 Markdown 文件 |
+| **记忆转经验** | 复杂任务完成后自动反思，成功经验生成可复用技能，失败总结教训 |
+| **每日整合** | 凌晨 3:00 自动整理记忆，LLM 去重合并相似事实 |
+
+### 自动化能力
+
+| 特性 | 说明 |
+|------|------|
+| **Computer Use** | 19 个桌面操作工具：截图/OCR/视觉定位/鼠标键盘/UIAutomation/命令执行 |
+| **浏览器自动化** | Playwright 驱动 Chromium，操控网页 |
+| **Docker 沙箱** | 隔离的命令执行环境，安全加固，用完即焚 |
+| **定时提醒** | APScheduler + PostgreSQL，支持自然语言设置提醒 |
+
+### 扩展性
+
+| 特性 | 说明 |
+|------|------|
+| **技能系统** | `SKILL.md` + 脚本定义可扩展技能，渐进式披露，按需加载 |
+| **多模型支持** | DeepSeek / 智谱 GLM / OpenAI / Anthropic / Ollama，一键切换 |
+| **多模态** | 支持视觉模型（GLM-4.6V / GLM-4.1V-Thinking-Flash）处理图片 |
+
+---
+
+## 系统架构
+
+```
+┌──────────────────────────────────────────────────────┐
+│  浏览器 (client.html)                                 │
+│  - 智能体列表、对话面板、群组房间、启动智能体表单       │
+└──────────────┬───────────────────────────────────────┘
+               │ WebSocket
+┌──────────────▼───────────────────────────────────────┐
+│  client.py (FastAPI + super_user WebSocket 客户端)    │
+│  - 前端页面托管 / REST API                            │
+└──────────────┬───────────────────────────────────────┘
+               │ WebSocket
+┌──────────────▼───────────────────────────────────────┐
+│  Hub Server (hub/server.py)                          │
+│  - 中心消息代理 / 房间管理 / 在线广播                  │
+└──┬──────────┬──────────────┬─────────────────────────┘
+   │          │              │
+┌──▼────┐ ┌───▼────┐ ┌──────▼──────┐
+│Agent A│ │Agent B │ │reminder_bot │
+│core.py│ │core.py │ │(定时提醒)    │
+│brain  │ │brain   │ └─────────────┘
+└──┬────┘ └───┬────┘
+   │          │
+   │  LangGraph Agent (deepagents)
+   │     ├── Computer Tools (19 个桌面自动化工具)
+   │     ├── Browser Tools (Playwright)
+   │     ├── DockerSandboxBackend
+   │     ├── ConversationTracker (轮次控制)
+   │     ├── TaskBuffer (任务缓冲)
+   │     └── ChromaDB Memory
+```
+
+> 详细架构请参阅 [ARCHITECTURE.md](./ARCHITECTURE.md)
+
+---
+
+## 快速开始
 
 ### 环境要求
 
-- Python 3.12 或更高版本
-- PostgreSQL 数据库（用于短期记忆和提醒）
-- （可选）ChromaDB 缓存目录（自动创建）
+- **Python** 3.12+
+- **PostgreSQL** 数据库
+- **Docker Desktop**（沙箱执行和浏览器自动化需要）
 
-### 安装步骤
+### 1. 克隆仓库
 
-1. 克隆仓库
-   ```bash
-   git clone https://github.com/gitlizhi/AgentPro.git
-   cd AgentPro
-   ```
+```bash
+git clone https://github.com/gitlizhi/AgentPro.git
+cd AgentPro
+```
 
-2. 创建虚拟环境并安装依赖（使用 uv 或 pip）
-   ```bash
-      pip install uv
-      uv venv
-      source .venv/bin/activate  # Windows: .venv\Scripts\activate
-      uv pip install -e .
-   ```
+### 2. 安装依赖
 
-3. 配置环境变量
-   
-     ```bash
-      # PostgreSQL 连接（需自定义一个链接）
-      POSTGRES_URI=postgresql://user:password@localhost:5432/agentpro  
-      # 智谱 AI API 密钥
-      ZHIPU_API_KEY=your_api_key_here
-      # DEEPSEEK_API_KEY
-      DEEPSEEK_API_KEY=sk-f06c5acb0axxxxxxxxxxx
-      # Hub 配置
-      HUB_HOST=localhost
-      HUB_PORT=8765
-      ```
-4. 安装docker desktop
-  官网地址：https://www.docker.com/products/docker-desktop/
-  安装后启动 docker desktop
+```bash
+pip install uv
+uv venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+uv pip install -e .
+```
 
-5. 一键启动 
-    ```bash
-   双击  start_project.bat
-   # 停止脚本    stop_project.bat
-   ```
+### 3. 配置环境变量
 
+创建 `.env` 文件：
 
-客户端支持以下命令（新版客户端已经移除旧命令）：
+```bash
+# PostgreSQL 连接（必填）
+POSTGRES_URI=postgresql://user:password@localhost:5432/agentpro
 
-- /new 消息：开始新对话（生成新 thread_id）
+# API 密钥（至少配置一个）
+ZHIPU_API_KEY=your_zhipu_api_key
+DEEPSEEK_API_KEY=your_deepseek_api_key
 
-    ```text
-   agentpro/
-   ├── agent/                      # 核心智能体模块
-   │   ├── brain.py                 # 大脑决策层
-   │   ├── core.py                  # 智能体主类
-   │   ├── communication.py         # WebSocket 通信
-   │   ├── db.py                    # 数据库连接池
-   │   ├── memory.py                # 长期记忆（ChromaDB + Markdown）
-   │   ├── memory_consolidation.py  # 记忆整理（长期记忆去重、合并）
-   │   ├── scheduler.py             # APScheduler 调度器
-   │   ├── tasks.py                 # 后台任务（发送提醒、记忆整理）
-   │   ├── utils.py                 # 工具函数（模型调用）
-   │   ├── reflection.py            # 反思模块 
-   │   ├── browser_tools.py            # 内置浏览器操作模块
-   │   ├── sandboxed_backend.py     # docker沙箱环境 
-   │   ├── skill_tools.py           # 技能检索工具
-   │   ├── skill_version_manager.py # 技能版本管理类
-   │   ├── task_buffer.py           # 任务缓存区
-   │   ├── intent.py                # 意图枚举和描述
-   │   ├── model_config.py          # 模型配置管理
-   │   └── skills/                  # 技能目录（按需加载）
-   │   └── data/                    # 记忆转经验（按需加载，渐进式披露）
-   │       ├── memories/            # 过往经验目录
-   │       ├── pengding/            # 待处理经验
-   │       ├── pengding_tasks/      # 待处理任务
-   │       ├── skills/              # 可复用skill
-   │       ├── skills_archive/      # 可复用skill
-   │       ├── reflections/         # 纯反思记录
-   ├── hub/                         # 消息 Hub
-   │   └── server.py
-   ├── agent_memory/                # 长期记忆 Markdown 文件
-   ├── chroma_db/                   # ChromaDB 持久化目录
-   ├── client.py                    # 客户端后端代码
-   ├── .env.example                 # 环境变量示例
-   ├── main.py                      # 应用入口
-   ├── start_project.bat            # 一键启动脚本（Windows）
-   ├── stop_project.bat             # 一键停止脚本（Windows）
-   ├── clean_checkpoints.py         # 清理短期记忆脚本
-   ├── requirements.txt             # 依赖列表（可选）
-   ├── pyproject.toml               # 项目配置（uv/pip）
-   └── README.md
-   ```
+# Hub 配置（可选，使用默认值即可）
+HUB_HOST=localhost
+HUB_PORT=8765
+```
 
+### 4. 启动 Docker Desktop
 
-## 🔧 配置说明
-### 主要配置项
-|变量名|	说明|	默认值|
-| --- | --- | --- |
-|POSTGRES_URI|	PostgreSQL 连接字符串|	postgresql://...|
-|ZHIPU_API_KEY|	智谱 AI API 密钥|	无
-|HUB_HOST	Hub| 服务器主机|	localhost|
-|HUB_PORT	Hub| 服务器端口|	8765|
-|MEMORY_MARKDOWN_DIR	|长期记忆 Markdown 文件目录|	./agent_memory|
-|CHROMA_PERSIST_DIR|	ChromaDB 持久化目录	|./chroma_db|
+下载并启动 [Docker Desktop](https://www.docker.com/products/docker-desktop/)。
 
+### 5. 一键启动
+
+```bash
+# Windows
+双击 start_project.bat
+
+# 或命令行
+python main.py
+```
+
+启动后访问 `http://127.0.0.1:8000` 进入 Web 界面。
+
+### 停止项目
+
+```bash
+双击 stop_project.bat
+```
+
+---
+
+## 配置说明
+
+### 主要环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `POSTGRES_URI` | PostgreSQL 连接字符串 | 必填 |
+| `ZHIPU_API_KEY` | 智谱 AI API 密钥 | - |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | - |
+| `HUB_HOST` | Hub 服务器主机 | `localhost` |
+| `HUB_PORT` | Hub 服务器端口 | `8765` |
+| `MEMORY_MARKDOWN_DIR` | 长期记忆 Markdown 目录 | `./agent_memory` |
+| `CHROMA_PERSIST_DIR` | ChromaDB 持久化目录 | `./chroma_db` |
 
 ### 模型配置
 
-在 agent/model_config.py 中预定义了多个模型配置：
+在 `agent/model_config.py` 中预定义了多个模型，支持按需扩展：
 
-- default: GLM-4.7（默认聊天模型）
+| 配置名 | 模型 | 用途 |
+|--------|------|------|
+| `default` | GLM-4.7 | 默认聊天模型 |
+| `vision` | GLM-4.6V | 通用图片理解 |
+| `computer_vision` | GLM-4.1V-Thinking-Flash | 桌面操作视觉识别 |
+| `deepseek` | DeepSeek-V4 | 备选主力模型 |
+| `ollama` | llama3.1 | 本地模型 |
 
-- vision: GLM-4.6v（视觉模型）
+支持扩展 OpenAI、Anthropic Claude、Gemini 等兼容格式的模型。
 
-- 其他如 deepseek, claude, gemini 等可自行扩展。
+---
 
+## 项目结构
 
-## 🧠 主动思考与内在自驱力（暂时关闭了，也可打开）
-智能体每小时会随机生成一个想法，并可能主动向用户发送消息。这模拟了内在的思考能力，让智能体更像一个真正的伙伴。你可以在 brain.py 的 _generate_thought 方法中自定义思考类型和生成逻辑。
+```
+AgentPro/
+├── agent/                          # 核心智能体模块
+│   ├── brain.py                    # 大脑决策层（LLM 调用、意图识别、工具注册）
+│   ├── core.py                     # 智能体主类（WebSocket 管理、消息路由）
+│   ├── communication.py            # WebSocket 客户端
+│   ├── computer_tools.py           # Computer Use：19 个桌面自动化工具
+│   ├── tools.py                    # LangChain 工具（含 UIAutomation 封装）
+│   ├── browser_tools.py            # Playwright 浏览器自动化
+│   ├── sandboxed_backend.py        # Docker 沙箱执行环境
+│   ├── model_config.py             # 多模型配置管理
+│   ├── prompts.py                  # 集中式提示词管理
+│   ├── memory.py                   # ChromaDB 长期记忆
+│   ├── memory_consolidation.py     # 每日记忆去重整合
+│   ├── conversation_memory_extractor.py  # 对话记忆后台提取
+│   ├── reflection.py               # 任务反思 + 技能生成
+│   ├── skill_tools.py              # 技能检索工具
+│   ├── skill_version_manager.py    # 技能版本管理
+│   ├── conversation_tracker.py     # 智能体对话轮次控制
+│   ├── task_buffer.py              # 任务步骤缓冲
+│   ├── scheduler.py                # APScheduler 调度器
+│   ├── tasks.py                    # 后台任务（提醒、记忆整理）
+│   ├── intent.py                   # 意图枚举与描述
+│   ├── db.py                       # PostgreSQL 连接池
+│   ├── utils.py                    # 工具函数
+│   └── skills/                     # 内置技能（SKILL.md）
+│       ├── computer-automation/    # 桌面自动化技能
+│       └── browser-automation/     # 浏览器自动化技能
+│
+├── hub/                            # WebSocket Hub
+│   └── server.py                   # 中心消息路由 + 房间管理
+│
+├── agent_memory/                   # 长期记忆 Markdown 文件
+├── chroma_db/                      # ChromaDB 持久化目录
+├── screenshots/                    # 桌面截图保存目录
+│
+├── client.py                       # FastAPI 服务端 + super_user 客户端
+├── client.html                     # Web 前端界面
+├── main.py                         # 应用入口
+│
+├── start_project.bat               # 一键启动（Windows）
+├── stop_project.bat                # 一键停止（Windows）
+├── clean_checkpoints.py            # 短期记忆清理脚本
+├── pyproject.toml                  # 项目配置与依赖
+├── ARCHITECTURE.md                 # 详细技术架构文档
+└── README.md
+```
 
-## 🗂️ 记忆系统
-- 短期记忆：由 checkpointer 自动保存每个对话线程的消息历史，支持重启恢复。
+---
 
-- 长期记忆：通过 remember_fact 技能存储用户事实到 ChromaDB，并同步为 Markdown 文件（agent_memory/<user_id>.md）。每日凌晨3点（可在main.py更改时间）自动整理，使用大模型去重和合并相似事实。
+## 记忆系统
 
-- 反思总结提炼经验： 智能体可对过去做过的复杂任务（不是所有任务）进行总结提炼出可复用的skill，减少重复任务的推理步骤。
+### 三层记忆架构
 
-## 📦 依赖管理
+```
+用户对话 / 智能体交互
+       │
+  ┌────▼─────────────┐
+  │ 短期记忆           │  PostgreSQL checkpoint
+  │ (对话历史持久化)    │  重启恢复上下文
+  └────┬─────────────┘
+       │
+  ┌────▼─────────────┐
+  │ 长期记忆           │  ChromaDB 向量存储
+  │ (用户画像 + 事件)   │  + Markdown 文件同步
+  │ 每 5 分钟后台提取   │  + 语义去重
+  └────┬─────────────┘
+       │
+  ┌────▼─────────────┐
+  │ 经验记忆           │  任务反思 → 技能生成
+  │ (可复用技能库)      │  每日凌晨 3:00 整合
+  └──────────────────┘
+```
 
-项目使用 uv 进行依赖管理，pyproject.toml 已列出所有必要依赖。你也可以使用 pip 安装。
+### 关键设计
 
-### 主要依赖（不全，建议按照pyproject.toml进行加载）：
+- **facts vs events**：facts 是用户画像（"用户是 Python 开发者"），events 是操作记录（"搜索了新闻"）。仅 facts 写入 Markdown 文件
+- **增量提取**：跟踪每个 thread 的处理进度，只提取新增消息
+- **语义去重**：cosine 相似度 < 0.15 视为重复，自动过滤
+- **每日整合**：凌晨 3:00 全量 LLM 去重合并，保持记忆库整洁
 
-- langchain>=1.2.10
+---
 
-- langchain-openai>=1.1.10
+## 技能系统
 
-- langgraph-checkpoint-postgres>=3.0.4
+Agent 通过**渐进式披露**获取操作指令——平时只在系统提示词中放一行"用 `load_skill` 加载技能"，需要时才加载完整 `SKILL.md`。这样既节省 token，又能随时扩展新能力。
 
-- deepagents>=0.4.5
+### 内置技能
 
-- chromadb>=1.5.2
+| 技能 | 触发词 | 说明 |
+|------|--------|------|
+| `computer-automation` | 打开应用、操作微信、电脑操作… | Windows 桌面自动化完整流程 |
+| `browser-automation` | 打开网页、浏览器操作… | Playwright 浏览器操控 |
 
-- apscheduler>=3.11.2
+### 技能生命周期
 
-- psycopg[binary]>=3.2.0
+```
+执行任务 → 完成 (task_complete=True)
+  → 反思 worker 分析成败
+  → 成功且可复用 → 生成 SKILL.md
+  → 向量化存入 ChromaDB
+  → 下次 search_skills 可检索
+  → 低价值技能自动归档
+```
 
-- httpx>=0.27.0
+---
 
-- websockets>=16.0
+## Computer Use（桌面自动化）
 
-- python-dotenv>=1.2.2
+AgentPro 具备完整的 **Windows 桌面自动化**能力，让 AI Agent 能像人一样操控电脑。
 
+### 能力矩阵
 
-## 运行清理脚本（删除指定或所有短期记忆）：
+| 类别 | 工具 | 能力 |
+|------|------|------|
+| **屏幕感知** | `computer_screenshot`、`computer_see_and_describe` | 截图 + 视觉模型理解屏幕内容 |
+| **精确定位** | `computer_ocr_find`、`computer_locate` | EasyOCR 文字定位 / 20×14 网格视觉定位 |
+| **UIA 操控** | `windows_automation`（22 种操作） | pywinauto 无障碍树，零坐标误差 |
+| **窗口管理** | `computer_find_window`、`computer_find_app` | 查找/激活窗口，搜索并启动应用 |
+| **鼠标操作** | `computer_move`/`click`/`double_click`/`right_click`/`scroll`/`drag` | 完整鼠标控制 |
+| **键盘操作** | `computer_type`/`key_press`/`paste` | 英文输入 / 热键 / 中文剪贴板粘贴 |
+| **命令执行** | `computer_execute` | Windows cmd，30s 超时 |
 
-   ```bash
-      # 清除指定的短期记忆线程
-    python clean_checkpoints.py --thread "agent_17_super_user_e2746f03-5136-42b4-9982-0173d4957e87"
-    
-    # 清除所有短期记忆线程
-    python clean_checkpoints.py --all
-    
-    # 清除指定群聊房间及其成员、短期记忆
-    python clean_checkpoints.py --room "room_id"
-    
-    # 清除所有群聊房间、成员及短期记忆
-    python clean_checkpoints.py --clear-rooms
-    
-    # 清除指定智能体的聊天记录
-    python clean_checkpoints.py --agent agent_main
-   
-   ```
+### 四级定位策略
 
-## 🤝 贡献指南
-### 欢迎贡献！请遵循以下步骤：
+```
+Tier 0: UIAutomation（最精确）─── 无障碍树直接操控，像素级精确
+  ↓ 非原生界面
+Tier 1: OCR 文字定位 ─── EasyOCR 识别屏幕文字，返回精确坐标
+  ↓ 文字不可见
+Tier 2: 窗口查找 ─── pygetwindow 标题匹配，返回窗口矩形
+  ↓ 无窗口标题
+Tier 3: 视觉网格定位 ─── 20×14 网格 + GLM-4.1V 视觉模型
+```
+
+> 详细文档：[ARCHITECTURE.md 第十二章](./ARCHITECTURE.md#十二computer-use--windows-桌面自动化)
+
+---
+
+## 清理脚本
+
+```bash
+# 清除指定线程的短期记忆
+python clean_checkpoints.py --thread "agent_17_super_user_xxxx"
+
+# 清除所有短期记忆
+python clean_checkpoints.py --all
+
+# 清除指定群聊房间及成员
+python clean_checkpoints.py --room "room_id"
+
+# 清除所有群聊房间
+python clean_checkpoints.py --clear-rooms
+
+# 清除指定智能体的聊天记录
+python clean_checkpoints.py --agent agent_main
+```
+
+---
+
+## 贡献指南
 
 1. Fork 仓库
-
-2. 创建功能分支 (git checkout -b feature/amazing-feature)
-
-3. 提交更改 (git commit -m 'Add amazing feature')
-
-4. 推送到分支 (git push origin feature/amazing-feature)
-
+2. 创建功能分支：`git checkout -b feature/amazing-feature`
+3. 提交更改：`git commit -m 'Add amazing feature'`
+4. 推送到分支：`git push origin feature/amazing-feature`
 5. 打开 Pull Request
 
-请确保代码符合 PEP 8 规范，并为新功能添加相应测试。
+代码请遵循 PEP 8 规范。
 
-## 📄 许可证
-本项目采用 MIT 许可证。详见 LICENSE 文件。
+---
 
-## 🙏 致谢
-LangChain 团队提供的强大框架
+## 许可证
 
-deepagents 项目带来的技能系统灵感
+本项目采用 [MIT 许可证](./LICENSE)。
 
-DeepSeek、智谱 AI 提供的优秀模型 API
+---
 
+## 致谢
 
-
+- [LangChain](https://www.langchain.com/) 和 [LangGraph](https://langchain-ai.github.io/langgraph/) 团队
+- [deepagents](https://github.com/hwchase17/deepagents) 技能系统
+- [Open Interpreter](https://github.com/OpenInterpreter/open-interpreter) Computer Use 范式
+- [智谱 AI](https://open.bigmodel.cn/) 和 [DeepSeek](https://www.deepseek.com/) 模型 API
