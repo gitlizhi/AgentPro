@@ -85,7 +85,7 @@ Agent (core.py)
   │     │     └── TodoListMiddleware
   │     ├── ConversationTracker (轮次计数+硬上限)
   │     ├── TaskBuffer (任务步骤缓冲)
-  │     ├── LongTermMemory (ChromaDB)
+  │     ├── LongTermMemory (ChromaDB + 按需加载)
   │     └── Tools (send_to_agent, launch_agent, log_memory, Computer Tools, ...)
   ├── Computer Tools (19 个桌面自动化工具)
   ├── DockerSandboxBackend (代码执行)
@@ -151,7 +151,7 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
 
 ## 四、记忆系统
 
-记忆系统由三条流水线组成：
+记忆系统由三条流水线组成，采用**按需加载**设计：
 
 ### 4.1 流水线总览
 
@@ -161,7 +161,7 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
 └────────────┬────────────────────────────────────────────┘
              │
     ┌────────▼──────────┐
-    │ 即时记忆（工具调用） │  log_memory(desc, result)
+    │ 即时记忆（工具调用）│  log_memory(desc, result)
     │ TaskBuffer        │  → 步骤缓冲 → task_complete 触发
     │ （内存中）         │
     └────────┬──────────┘
@@ -177,7 +177,7 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
     │ conversation_memory_worker()                         │
     │  → 扫描 PostgreSQL checkpoint 增量                   │
     │  → LLM 提取 facts（用户画像）+ events（事件记录）      │
-    │  → 语义去重后存入 ChromaDB + agent_memory/*.md        │
+    │  → facts → ChromaDB + MD / events → 仅 ChromaDB      │
     └──────────────┬──────────────────────────────────────┘
                    │
     ┌──────────────▼──────────────────────────────────────┐
@@ -187,6 +187,18 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
     │  → LLM 去重合并                                       │
     │  → 同步回 ChromaDB                                   │
     └─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  检索方式：按需加载（load_user_profile 工具）              │
+│                                                          │
+│  用户发消息                                               │
+│    → 系统提示词中不再注入记忆（节省 token）                │
+│    → Agent 判断需要用户背景时                              │
+│    → 调用 load_user_profile 工具                          │
+│    → 读取 agent_memory/super_user.md                      │
+│    → 返回去重后的用户画像（仅 facts，不含 events）          │
+│    → Agent 将用户信息融入回复                              │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ### 4.2 即时记忆（log_memory）
@@ -205,11 +217,12 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
 
 | 类型 | 说明 | 存储位置 |
 |------|------|---------|
-| facts | 用户身份、偏好、长期约定（必须以"用户"开头） | ChromaDB + MD 文件 |
+| facts | 用户身份、偏好、长期约定（必须以"用户"开头） | ChromaDB + MD 文件（仅用户画像） |
 | events | 任务执行记录、结果、用户反馈 | 仅 ChromaDB |
 
 - **fact 严禁内容**：会话操作记录（"用户启动了智能体X"）、临时指令、智能体行为、会话内容、系统状态
-- **去重**：cosine 语义相似度 < 0.15 视为重复，过滤
+- **MD 文件只存事实本身**：不再写入 source/type/thread_id 等元数据，保持文件纯净可读
+- **去重**：cosine 语义相似度 < 0.15 视为重复，过滤；`get_user_profile()` 还会在输出时二次去重
 - **频率控制**：同一 thread 增量不足 20 条消息时跳过
 
 ### 4.4 每日整合（memory_consolidation）
@@ -217,17 +230,40 @@ Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
 - **触发**：APScheduler cron，每天凌晨 3:00 UTC
 - **流程**：
   1. 遍历 `agent_memory/` 下所有 `.md` 文件
-  2. 解析每条 fact（含时间戳和元数据）
+  2. 解析每条 fact
   3. LLM 去重：合并语义相同、去除被包含的、保留更完整的
   4. 差分同步 ChromaDB：删除过时条目，添加新条目
-  5. 重写 MD 文件
+  5. 重写 MD 文件（纯事实格式，无元数据杂讯）
 
-### 4.5 存储
+### 4.5 检索方式：按需加载
+
+**设计理念**：不再每次对话都将记忆注入系统提示词（浪费 token），而是让 Agent 自行判断何时需要用户信息，通过 `load_user_profile` 工具按需获取。
+
+**工具实现**（`brain.py:_create_load_user_profile_tool`）：
+- 读取 `agent_memory/super_user.md` 文件
+- 解析所有 `- 事实：` 行
+- 去重后格式化返回
+
+**技能支持**（`agent/skills/user-profile/SKILL.md`）：
+- 教 Agent 何时应加载用户画像（个性化推荐、涉及用户身份、延续性对话）
+- 何时不需要加载（纯技术问答、当前对话已有足够信息）
+- 通过 `load_skill('user-profile')` 或 `search_skills` 发现
+
+**对比**：
+
+| 方面 | 旧方案（注入式） | 新方案（按需加载） |
+|------|-----------------|-------------------|
+| Token 消耗 | 每次对话都消耗 | 仅在需要时消耗 |
+| Agent 感知 | Agent 不知道有哪些记忆 | Agent 主动获取，知道用户画像内容 |
+| 信息范围 | 语义搜索 top-3（含 events） | 完整用户画像（仅 facts） |
+| 维护性 | 分散在 brain.py 两处 | 集中在 memory.py + 一个工具 |
+
+### 4.6 存储
 
 | 后端 | 路径 | 内容 |
 |------|------|------|
 | ChromaDB | `./chroma_db/` | 向量化的 facts + events + skills |
-| Markdown | `./agent_memory/{user_id}.md` | 仅 type="fact" 的用户画像 |
+| Markdown | `./agent_memory/{user_id}.md` | 仅 type="fact" 的用户画像（纯净格式） |
 | PostgreSQL | `checkpoints` 表 | LangGraph 对话状态 |
 | JSON | `agent/data/pending_tasks/` | 待反思的任务数据（临时） |
 
@@ -313,7 +349,7 @@ execute() 调用
 
 | 来源 | 路径 | 说明 |
 |------|------|------|
-| 内置技能 | `agent/skills/` | 预置的可复用技能（如 browser-automation） |
+| 内置技能 | `agent/skills/` | 预置的可复用技能（user-profile、computer-automation、browser-automation 等） |
 | 学习技能 | `agent/data/skills/` | 任务反思后自动生成 |
 
 ### 7.2 技能工具
@@ -389,7 +425,7 @@ brain.py: launch_agent 工具
   → brain.process(user_id="super_user", ...)
   → _classify_intent → COMPLEX_TASKS
   → _handle_with_agent (super_user 路径)
-  → 构建系统提示 + 长期记忆 + 群聊上下文
+  → 构建系统提示 + 群聊上下文（长期记忆改为按需加载）
   → LangGraph Agent astream
   → LLM 决策 → 工具调用 (TavilySearch)
   → AI 回复 → comm.send_to_agent(super_user, reply)
@@ -422,6 +458,7 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | 群聊上下文注入系统提示而非用户消息 | 保持用户消息干净，系统级指令不会被 LLM 当成"用户说的" |
 | Docker 容器每次 execute 后清理 | 沙箱是一次性执行环境，无状态，不留残留 |
 | 延迟合并 Agent 消息（5 秒缓冲） | 减少来回次数，避免 Agent 对每条消息单独回复 |
+| 长期记忆按需加载而非注入 | 每次对话都注入消耗大量 token；Agent 主动调用工具获取，仅在需要时加载，且 Agent 明确知道自己用了哪些信息 |
 
 ---
 
@@ -657,7 +694,7 @@ interrupt_on={
 | `agent/prompts.py` | 所有 LLM 提示词 |
 | `agent/conversation_tracker.py` | 智能体对话轮次控制 |
 | `agent/task_buffer.py` | 任务步骤缓冲 |
-| `agent/memory.py` | ChromaDB 记忆存储 |
+| `agent/memory.py` | ChromaDB 记忆存储 + 用户画像按需读取 |
 | `agent/conversation_memory_extractor.py` | 对话记忆后台提取 |
 | `agent/memory_consolidation.py` | 每日记忆去重整合 |
 | `agent/reflection.py` | 任务反思 + 技能生成 |
@@ -675,3 +712,6 @@ interrupt_on={
 | `hub/server.py` | WebSocket Hub |
 | `client.py` | FastAPI + super_user 客户端 |
 | `client.html` | Web 前端 |
+| `agent/skills/user-profile/SKILL.md` | 用户画像按需加载技能 |
+| `agent/skills/computer-automation/SKILL.md` | 桌面自动化技能文档 |
+| `agent/skills/browser-automation/SKILL.md` | 浏览器自动化技能文档 |

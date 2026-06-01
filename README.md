@@ -252,6 +252,7 @@ AgentPro/
 │   ├── db.py                       # PostgreSQL 连接池
 │   ├── utils.py                    # 工具函数
 │   └── skills/                     # 内置技能（SKILL.md）
+│       ├── user-profile/           # 用户画像按需加载技能
 │       ├── computer-automation/    # 桌面自动化技能
 │       └── browser-automation/     # 浏览器自动化技能
 │
@@ -289,20 +290,34 @@ AgentPro/
   └────┬─────────────┘
        │
   ┌────▼─────────────┐
-  │ 长期记忆           │  ChromaDB 向量存储
-  │ (用户画像 + 事件)   │  + Markdown 文件同步
-  │ 每 5 分钟后台提取   │  + 语义去重
+  │ 长期记忆           │  ChromaDB 向量存储（facts + events）
+  │ (后台自动提取)      │  + agent_memory/*.md（仅用户画像）
+  │ 每 5 分钟增量提取   │  + 语义去重
   └────┬─────────────┘
        │
   ┌────▼─────────────┐
   │ 经验记忆           │  任务反思 → 技能生成
   │ (可复用技能库)      │  每日凌晨 3:00 整合
   └──────────────────┘
+
+┌─────────────────────────────────────────┐
+│ 检索方式：按需加载（非注入式）             │
+│                                          │
+│ Agent 判断需要用户背景时                   │
+│   → 调用 load_user_profile 工具           │
+│   → 读取 agent_memory/super_user.md       │
+│   → 获取去重后的用户画像（仅 facts）        │
+│                                          │
+│ 对比旧方案：不再每次对话都注入记忆到提示词，  │
+│ 节省 token，Agent 按需主动获取。           │
+└─────────────────────────────────────────┘
 ```
 
 ### 关键设计
 
-- **facts vs events**：facts 是用户画像（"用户是 Python 开发者"），events 是操作记录（"搜索了新闻"）。仅 facts 写入 Markdown 文件
+- **按需加载**：记忆不再自动注入系统提示词，Agent 通过 `load_user_profile` 工具主动获取用户画像，节省 token 并让 Agent 明确知道自己有哪些用户信息
+- **facts vs events**：facts 是用户画像（"用户是 Python 开发者"），events 是操作记录（"搜索了新闻"）。仅 facts 写入 Markdown 文件，`load_user_profile` 仅返回 facts
+- **MD 文件纯净**：不再写入 source/type/thread_id 等元数据，每行只有时间戳和事实内容
 - **增量提取**：跟踪每个 thread 的处理进度，只提取新增消息
 - **语义去重**：cosine 相似度 < 0.15 视为重复，自动过滤
 - **每日整合**：凌晨 3:00 全量 LLM 去重合并，保持记忆库整洁
@@ -317,6 +332,7 @@ Agent 通过**渐进式披露**获取操作指令——平时只在系统提示�
 
 | 技能 | 触发词 | 说明 |
 |------|--------|------|
+| `user-profile` | 用户信息、个性化推荐、了解用户… | 按需加载用户画像（配合 `load_user_profile` 工具） |
 | `computer-automation` | 打开应用、操作微信、电脑操作… | Windows 桌面自动化完整流程 |
 | `browser-automation` | 打开网页、浏览器操作… | Playwright 浏览器操控 |
 
