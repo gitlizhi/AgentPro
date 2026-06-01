@@ -680,12 +680,13 @@ class Brain:
                                     if msg_id not in sent_ids:
                                         await self.comm.send_to_agent(self.user_id, {"text": msg.content})
                                         sent_ids.add(msg_id)
-                                if (hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent
-                                        and msg_id not in sent_ids):
+                                if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
                                     for tc in msg.tool_calls:
-                                        tool_call_info = f"🔧 调用工具: {tc}"
-                                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                                    sent_ids.add(msg_id)
+                                        tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
+                                        if tc_id not in sent_ids:
+                                            tool_call_info = f"🔧 调用工具: {tc}"
+                                            await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
+                                            sent_ids.add(tc_id)
                                 elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
                                     tool_result = f"🛠️ 工具返回: {msg.content}"
                                     await self.comm.send_to_agent(self.user_id, {"text": tool_result})
