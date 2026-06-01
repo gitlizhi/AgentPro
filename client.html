@@ -2262,7 +2262,7 @@ btnLaunch.onclick = async () => {
             launchForm.style.display = 'none';
             launchAgentId.value = '';
             launchAgentDesc.value = '';
-            await showDialog(`智能体 "${agentId}" 已启动 (PID: ${res.pid})，上线后将出现在侧边栏`);
+            await showDialog(`智能体 "${agentId}" 正在启动中 (PID: ${res.pid})，上线后将出现在侧边栏`);
         } else {
             await showDialog(`启动失败: ${res?.message || '未知错误'}`);
         }
