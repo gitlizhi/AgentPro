@@ -354,6 +354,20 @@ async def connect_to_hub():
                                     "allowed": payload.get("allowed"),
                                     "tool_call_id": payload.get("tool_call_id"),
                                 })
+                        elif inner_type in ('tool_call_start', 'tool_call_end'):
+                            for conn in frontend_connections:
+                                await conn.send_json({
+                                    "type": inner_type,
+                                    "from": sender,
+                                    "tool_name": payload.get("tool_name", ""),
+                                    "text": payload.get("text", ""),
+                                })
+                            # 同时作为聊天消息展示（保留历史记录）
+                            cleaned = clean_agent_response(text)
+                            if cleaned:
+                                msg = {"type": "message", "from": sender, "text": cleaned}
+                                for conn in frontend_connections:
+                                    await conn.send_json(msg)
                         else:
                             cleaned = clean_agent_response(text)
                             if not cleaned and not payload.get("image"):

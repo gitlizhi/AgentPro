@@ -996,6 +996,45 @@
         #stopBtn.visible { display: flex; }
         #stopBtn:hover { background: linear-gradient(135deg, #c0392b 0%, #a93226 100%); box-shadow: 0 4px 16px rgba(231,76,60,0.5); transform: translateY(-1px); }
         #stopBtn:active { transform: scale(0.95); }
+        #toolStatus {
+            display: none;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 12px;
+            margin-bottom: 6px;
+            border-radius: 7px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            font-size: 0.76rem;
+            color: var(--text-secondary);
+            transition: opacity 0.25s;
+        }
+        .tool-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--accent);
+            flex-shrink: 0;
+        }
+        .tool-dot.active { animation: dotPulse 1s ease-in-out infinite; }
+        .tool-dot.done { background: #27ae60; animation: none; }
+        @keyframes dotPulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.35; transform: scale(0.65); }
+        }
+        .tool-msg { opacity: 0.7; font-size: 0.84em; }
+        .tool-details { margin: 2px 0; opacity: 0.78; font-size: 0.84em; }
+        .tool-summary { cursor: pointer; color: var(--text-secondary); user-select: none; }
+        .tool-summary:hover { color: var(--text-primary); }
+        .tool-summary::marker { font-size: 0.8em; }
+        .tool-body {
+            margin-top: 4px; padding: 8px 10px;
+            background: var(--surface-2); border-radius: 6px;
+            font-size: 0.82em; line-height: 1.45;
+            max-height: 260px; overflow-y: auto;
+            white-space: pre-wrap; word-break: break-all;
+            font-family: var(--font-mono, 'Consolas','Courier New',monospace);
+        }
         .status {
             text-align: center;
             font-size: 0.68rem;
@@ -1357,7 +1396,7 @@
             <button class="invite-btn" id="inviteAgentBtn">+ 邀请</button>
             <button class="icon-btn" id="membersToggleBtn" style="display:none; width:auto; padding:0 10px; font-size:0.78rem;">成员</button>
             <div class="toggle-row">
-                <span>工具</span>
+                <span>详情</span>
                 <label class="switch">
                     <input type="checkbox" id="toggleToolCalls" checked>
                     <span class="slider"></span>
@@ -1379,6 +1418,10 @@
     </div>
 
     <div class="input-zone" id="inputZone">
+        <div id="toolStatus">
+            <span id="toolStatusDot" class="tool-dot active"></span>
+            <span id="toolStatusText"></span>
+        </div>
         <div class="input-flex">
             <div class="input-box">
                 <textarea id="messageInput" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" disabled></textarea>
@@ -1448,6 +1491,8 @@ let pendingApproval = null;
 let showToolCalls = true;
 let unreadAgents = new Set();
 let agentBusyStates = {};  // { agentId: "busy" | "idle" }
+let toolCallActive = 0;
+let toolCallDoneTimer = null;
 
 // conversations: { agentId: [{ thread_id, title, created_at, updated_at, is_archived }] }
 let conversations = {};
@@ -1511,7 +1556,31 @@ function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
 }
-function isToolMessage(text) { return text && (text.startsWith('🔧') || text.startsWith('🛠️')); }
+function isToolCall(text) { return text && text.startsWith('🔧'); }
+function isToolResult(text) { return text && text.startsWith('🛠️'); }
+function isToolMessage(text) { return isToolCall(text) || isToolResult(text); }
+
+function renderToolMessage(text) {
+    const firstBreak = text.indexOf('\n');
+    const isLong = text.length > 150;
+    if (!isLong && firstBreak < 0) {
+        return `<span class="tool-msg">${escapeHtml(text)}</span>`;
+    }
+    let summary, body;
+    if (firstBreak >= 0) {
+        summary = text.substring(0, firstBreak);
+        body = text.substring(firstBreak).trim();
+    } else {
+        summary = text.substring(0, 120) + '…';
+        body = text;
+    }
+    return `<details class="tool-details"><summary class="tool-summary">${escapeHtml(summary)}</summary><pre class="tool-body">${escapeHtml(body)}</pre></details>`;
+}
+
+function shouldShowToolMsg(text) {
+    // 详情开关：ON=显示全部工具信息，OFF=完全隐藏（状态条不受影响）
+    return showToolCalls;
+}
 
 // 在 marked.parse() 之前消毒文本，剥离可能破坏页面样式的 HTML 标签
 // 主要防范 browser get_content 返回的完整网页 HTML（含外部 CSS、style 等）
@@ -1840,7 +1909,7 @@ function renderMessages(threadId) {
         return;
     }
     msgs.forEach(m => {
-        if (!showToolCalls && isToolMessage(m.content)) return;
+        if (isToolMessage(m.content) && !shouldShowToolMsg(m.content)) return;
         const sender = m.role === 'user' ? '我' : (activeAgent || '智能体');
         const time = new Date(m.created_at).toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
         displayMessage(sender, m.content, time, m.image);
@@ -1880,7 +1949,7 @@ function displayMessage(sender, text, time, image = null) {
     const wasAtBottom = isScrolledToBottom();
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${isSelf ? 'self' : ''}`;
-    const rendered = marked.parse(sanitizeBeforeMarkdown(text));
+    const rendered = isToolMessage(text) ? renderToolMessage(text) : marked.parse(sanitizeBeforeMarkdown(text));
     const imageHtml = image ? `<img src="${escapeHtml(image)}" class="chat-image" onclick="viewFullImage(this.src)" loading="lazy">` : '';
     msgDiv.innerHTML = `<div class="message-meta">${escapeHtml(sender)} &middot; ${escapeHtml(time)}</div><div class="bubble">${imageHtml}${rendered}</div>`;
     messagesDiv.appendChild(msgDiv);
@@ -2115,7 +2184,7 @@ function loadRoomMessages(roomId) {
         return;
     }
     msgs.forEach(msg => {
-        if (!showToolCalls && isToolMessage(msg.text)) return;
+        if (isToolMessage(msg.text) && !shouldShowToolMsg(msg.text)) return;
         displayMessage(msg.sender, msg.text, msg.time, msg.image);
     });
     addCopyButtonsToCodeBlocks();
@@ -2273,6 +2342,18 @@ function connect() {
                 onlineAgentsSet.delete(aid);
                 renderAgentList();
                 if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
+                // 如果当前正在查看该智能体的会话，恢复到无会话状态
+                if (activeAgent === aid) {
+                    activeAgent = null;
+                    activeThreadId = null;
+                    messagesDiv.innerHTML = '<div class="empty-chat">选择一个智能体开始对话</div>';
+                    currentChatNameSpan.innerText = 'AgentPro';
+                    currentChatMetaSpan.innerText = '就绪';
+                    stopBtn.classList.remove('visible');
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('sendBtn').disabled = true;
+                    renderConvList();
+                }
             }
         } else if (data.type === 'message') {
             const from = data.from, text = data.text, image = data.image || null;
@@ -2304,7 +2385,7 @@ function connect() {
                 messageCache[targetThreadId].push({ role: 'assistant', content: text, created_at: new Date().toISOString(), image: image });
             }
             // Display if this agent is active
-            if (activeAgent === from && activeThreadId && (showToolCalls || !isToolMessage(text))) {
+            if (activeAgent === from && activeThreadId && (shouldShowToolMsg(text) || !isToolMessage(text))) {
                 displayMessage(from, text, time, image);
             }
         } else if (data.type === 'group_message') {
@@ -2316,7 +2397,7 @@ function connect() {
             const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
             if (!roomMessages[rid]) roomMessages[rid] = [];
             roomMessages[rid].push({ sender: from, text, time, image: image });
-            if (activeRoom === rid && (showToolCalls || !isToolMessage(text))) displayMessage(from, text, time, image);
+            if (activeRoom === rid && (shouldShowToolMsg(text) || !isToolMessage(text))) displayMessage(from, text, time, image);
             else if (rooms[rid]) rooms[rid].unread = true;
             renderRooms();
         } else if (data.type === 'room_members_update' || data.type === 'room_members') {
@@ -2342,6 +2423,33 @@ function connect() {
             const status = data.status;
             agentBusyStates[aid] = status;
             updateStopButton();
+        } else if (data.type === 'tool_call_start') {
+            toolCallActive++;
+            if (toolCallDoneTimer) { clearTimeout(toolCallDoneTimer); toolCallDoneTimer = null; }
+            const ts = document.getElementById('toolStatus');
+            const dot = document.getElementById('toolStatusDot');
+            const text = document.getElementById('toolStatusText');
+            dot.className = 'tool-dot active';
+            text.textContent = toolCallActive > 1
+                ? `正在执行 ${toolCallActive} 个工具...`
+                : `正在执行: ${data.tool_name}...`;
+            ts.style.display = 'flex';
+        } else if (data.type === 'tool_call_end') {
+            toolCallActive = Math.max(0, toolCallActive - 1);
+            const ts = document.getElementById('toolStatus');
+            const dot = document.getElementById('toolStatusDot');
+            const text = document.getElementById('toolStatusText');
+            if (toolCallActive <= 0) {
+                dot.className = 'tool-dot done';
+                text.textContent = '工具执行完成';
+                toolCallActive = 0;
+                toolCallDoneTimer = setTimeout(() => {
+                    ts.style.display = 'none';
+                    toolCallDoneTimer = null;
+                }, 1500);
+            } else {
+                text.textContent = `正在执行 ${toolCallActive} 个工具...`;
+            }
         }
     };
     ws.onclose = () => {

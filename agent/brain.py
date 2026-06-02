@@ -207,12 +207,22 @@ class Brain:
             self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
         return config, self.sent_msg_ids_by_thread[self.thread_id]
 
+    async def _safe_send(self, text: str, **extra) -> bool:
+        """安全发送消息给当前用户。WebSocket/网络异常仅记日志，不向上传播。"""
+        payload = {"text": text, **extra}
+        try:
+            await self.comm.send_to_agent(self.user_id, payload)
+            return True
+        except Exception as e:
+            logger.warning(f"发送消息失败 (user={self.user_id}): {e}")
+            return False
+
     async def _send_ai_message(self, msg, sent_ids: set) -> bool:
         """去重并发送 AI 消息到当前用户。返回 True 表示实际发送了。"""
         msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
         if msg.type == "ai" and msg.content and msg_id not in sent_ids:
             sent_ids.add(msg_id)
-            await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+            await self._safe_send(msg.content)
             return True
         return False
 
@@ -446,7 +456,7 @@ class Brain:
                                                      effective_thread_id, silent)
                 return response if not silent else ""
             except asyncio.CancelledError:
-                await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
+                await self._safe_send("⏹ 任务已停止。")
                 return "" if not silent else None
             finally:
                 self._current_task = None
@@ -461,11 +471,14 @@ class Brain:
     async def _notify_status(self, status: str):
         """通知前端智能体状态变化（busy / idle）"""
         if self.comm:
-            await self.comm.send({
-                "type": "agent_status",
-                "agent_id": self.agent_id,
-                "status": status,
-            })
+            try:
+                await self.comm.send({
+                    "type": "agent_status",
+                    "agent_id": self.agent_id,
+                    "status": status,
+                })
+            except Exception as e:
+                logger.warning(f"通知状态变化失败 ({status}): {e}")
 
     def stop_current_task(self):
         """取消当前正在执行的任务（由外部 stop_task 消息触发）"""
@@ -659,7 +672,11 @@ class Brain:
                             if attempt == max_retries - 1:
                                 raise
                             logger.warning(f"数据库连接错误，重试 {attempt + 1}/{max_retries}...")
-                            time.sleep(2**attempt)
+                            await asyncio.sleep(2**attempt)
+                        except Exception as e:
+                            logger.error(f"设置提醒失败 ({type(e).__name__}): {e}")
+                            responses.append(f"设置提醒失败: {e}")
+                            break
                 else:
                     responses.append(f"出错了，无法理解这个时间：{time_str}")
             else:
@@ -828,19 +845,25 @@ class Brain:
                                         for tc in msg.tool_calls:
                                             tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
                                             if tc_id not in sent_ids:
-                                                tool_call_info = f"🔧 调用工具: {tc}"
-                                                await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
                                                 sent_ids.add(tc_id)
+                                                await self._safe_send(
+                                                    f"🔧 调用工具: {tc['name']}",
+                                                    type="tool_call_start",
+                                                    tool_name=tc.get("name"),
+                                                    tool_args=tc.get("args", {}),
+                                                )
                                     elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
-                                        tool_result = f"🛠️ 工具返回: {msg.content}"
-                                        await self.comm.send_to_agent(self.user_id, {"text": tool_result})
                                         sent_ids.add(msg_id)
-                                        # 获取工具名称（可以从 msg.name 或 context 中，这里简单从 sent_ids 推断）
                                         tool_name = getattr(msg, 'name', 'unknown_tool')
+                                        await self._safe_send(
+                                            f"🛠️ 工具返回: {msg.content}",
+                                            type="tool_call_end",
+                                            tool_name=tool_name,
+                                        )
                                         self.task_buffer.add_step(
                                             self.thread_id,
                                             f"调用工具： {tool_name}",
-                                            msg.content[:500],  # 截断过长结果
+                                            msg.content[:500],
                                         )
 
                 else:
@@ -849,13 +872,17 @@ class Brain:
         except asyncio.TimeoutError:
             logger.error("Agent stream timed out in _handle_with_agent")
             if self.user_id == 'super_user' and not silent:
-                await self.comm.send_to_agent(self.user_id, {"text": "处理超时，请重试或简化请求。"})
+                await self._safe_send("处理超时，请重试或简化请求。")
         except asyncio.CancelledError:
             raise
         except (OSError, ConnectionError) as e:
             logger.error(f"Agent stream network error in _handle_with_agent: {e}")
             if self.user_id == 'super_user' and not silent:
-                await self.comm.send_to_agent(self.user_id, {"text": f"网络连接失败：{e}。请检查代理设置或网络连接后重试。"})
+                await self._safe_send(f"网络连接失败：{e}。请检查代理设置或网络连接后重试。")
+        except Exception as e:
+            logger.error(f"Agent stream error in _handle_with_agent: {type(e).__name__}: {e}", exc_info=True)
+            if self.user_id == 'super_user' and not silent:
+                await self._safe_send(f"处理请求时遇到错误 ({type(e).__name__})，请重试。")
     
     async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
         # ---- 使用 tracker 管理的 thread_id，每次新会话自动隔离 checkpoint ----
@@ -919,6 +946,8 @@ class Brain:
             raise
         except (OSError, ConnectionError) as e:
             logger.error(f"Agent stream network error in _process_agent_message: {e}")
+        except Exception as e:
+            logger.error(f"Agent stream error in _process_agent_message: {type(e).__name__}: {e}", exc_info=True)
 
     async def _handle_image(self, image_data: str) -> str | None:
         """处理图片输入，返回视觉模型的结果。失败时返回 None。"""
@@ -958,7 +987,10 @@ class Brain:
                     "allowed": allowed,
                     "tool_call_id": tool_call_id,
                 }
-                await self.comm.send_to_agent(self.user_id, msg)
+                try:
+                    await self.comm.send_to_agent(self.user_id, msg)
+                except Exception as e:
+                    logger.warning(f"发送审批请求失败: {e}")
                 # 等待用户决策
                 decision = await self._wait_for_user_decision(tool_call_id)
                 decisions.append(decision)
@@ -966,11 +998,13 @@ class Brain:
     
     async def _wait_for_user_decision(self, tool_call_id: str):
         future = asyncio.get_event_loop().create_future()
-        self._pending_approvals[tool_call_id] = future  # 用唯一 ID 存储
+        self._pending_approvals[tool_call_id] = future
         try:
             decision = await asyncio.wait_for(future, timeout=60)
             return decision
         except asyncio.TimeoutError:
+            return {"type": "reject"}
+        except asyncio.CancelledError:
             return {"type": "reject"}
     
     async def _complete_approval(self, tool_call_id: str, decision):
@@ -981,8 +1015,17 @@ class Brain:
             logger.warning(f"No pending approval for {tool_call_id}")
         
     def schedule_background_task(self, coro) -> asyncio.Task:
-        """创建带生命周期跟踪的后台任务，自动在完成时从集合中移除。"""
-        task = asyncio.create_task(coro)
+        """创建带生命周期跟踪的后台任务，异常自动记日志。"""
+
+        async def _wrapper():
+            try:
+                await coro
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"后台任务异常: {type(e).__name__}: {e}", exc_info=True)
+
+        task = asyncio.create_task(_wrapper())
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
         return task
@@ -1030,7 +1073,11 @@ class Brain:
         规则：将 AI 消息视为当前 Agent（self.agent_id），将 Human 消息视为对方 Agent。
         """
         configs = {"configurable": {"thread_id": thread_id}}
-        state = await self.agent.aget_state(configs)
+        try:
+            state = await self.agent.aget_state(configs)
+        except Exception as e:
+            logger.warning(f"读取对话历史失败 (thread={thread_id}): {e}")
+            return []
         if not state or not state.values:
             return []
 
