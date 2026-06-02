@@ -50,6 +50,7 @@ from agent.reflection import init_chroma, submit_task_for_reflection, get_skill_
 from agent.browser_tools import browser, close_browser_session
 from agent.computer_tools import COMPUTER_TOOLS
 from agent.task_buffer import TaskBuffer
+from agent.context_manager import ContextManager, ToolOutputCompactionMiddleware
 from agent.skill_version_manager import get_skill_latest_version, get_skill_file_path
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
 from langchain_core.runnables import RunnableConfig
@@ -110,6 +111,10 @@ class Brain:
         self._termination_cache = {}
         # 任务缓冲模块
         self.task_buffer = TaskBuffer()
+        # 上下文管理（token 预算 + 工具输出压缩）
+        self.context_manager = ContextManager()
+        # 加载 Agent 专属上下文文件（类似 Claude Code 的 CLAUDE.md）
+        self.agent_context = self._load_agent_context()
         
         # 1. 配置后端 (FilesystemBackend 允许技能脚本访问本地文件)
         #    这里需要根据你的项目结构调整根目录
@@ -173,10 +178,11 @@ class Brain:
             },
             middleware=[
                     SummarizationMiddleware(
-                    model=self.model,
-                    trigger=("tokens", 20000),  # 当历史超过 20000 token 时触发
-                    keep=("messages", 30),  # 保留最近 30 条消息，其余用摘要代替
-                ),
+                        model=self.model,
+                        trigger=("tokens", 20000),  # 当历史超过 20000 token 时触发
+                        keep=("messages", 30),  # 保留最近 30 条消息，其余用摘要代替
+                    ),
+                    ToolOutputCompactionMiddleware(self.context_manager),
             ]
         )
     
@@ -188,16 +194,42 @@ class Brain:
         else:
             return "Unknown OS"
 
-    async def _build_message_with_context(self, user_input: str, image_data: str = None) -> str:
-        """构建附加上下文的用户消息（group_context + image_desc + dynamic_context）。"""
-        group_context = self._build_group_context_prompt()
-        image_desc = None
+    async def _build_system_contexts(self, image_data: str = None) -> list:
+        """Build system-level context as a list of strings for SystemMessage injection.
+
+        These are things the agent needs to know *about* the current turn but
+        that are NOT part of what the user/other-agent said.  By putting them
+        in SystemMessages instead of prepending to HumanMessage we keep the
+        role boundary clean — the LLM can distinguish instruction from input.
+
+        Returns a list of non-empty context strings (may be empty).
+        """
+        parts = []
+
+        # -- conversation partner info -----------------------------------
+        if self.user_id == 'super_user':
+            parts.append("[当前对话] 你正在和人类用户 (id是super_user) 对话。")
+        else:
+            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
+            parts.append(
+                f"[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+            )
+            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
+            if warning:
+                parts.append(warning)
+
+        # -- group chat context -------------------------------------------
+        gc = self._build_group_context_prompt()
+        if gc:
+            parts.append(gc)
+
+        # -- image description --------------------------------------------
         if image_data:
             image_desc = await self._handle_image(image_data)
-        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
-        if context_prefix:
-            user_input = f"{context_prefix}\n\n{user_input}"
-        return user_input
+            if image_desc:
+                parts.append(f"[图片信息] 对方刚上传了一张图片，内容描述如下：\"{image_desc}\"")
+
+        return parts
 
     async def _prepare_agent_config(self) -> tuple:
         """创建 config、修复 checkpoint、加载 sent_ids。返回 (config, sent_ids)。"""
@@ -227,36 +259,30 @@ class Brain:
         return False
 
     def _build_system_prompt(self):
-        return build_brain_system_prompt(self.agent_id)
+        prompt = build_brain_system_prompt(self.agent_id)
+        if self.agent_context:
+            prompt += self.agent_context
+        return prompt
 
-    def _build_dynamic_context(self, group_context: str = "", image_desc: str = "") -> str:
+    def _load_agent_context(self) -> str:
+        """加载 Agent 专属上下文文件（类似 Claude Code 的 CLAUDE.md）。
+
+        文件路径：agent/agent_context/{agent_id}.md
+        如果文件不存在则返回空字符串。
         """
-        构建当前消息的动态上下文前缀（每轮可能不同）。
-        注意：静态系统提示词由 create_deep_agent 的 system_prompt 参数处理，
-        这里只构建随对话变化的上下文信息，作为用户消息的前缀传入。
-        """
-        parts = []
+        if not self.agent_id:
+            return ""
+        context_dir = Path(__file__).parent / "agent_context"
+        context_file = context_dir / f"{self.agent_id}.md"
+        if context_file.exists():
+            try:
+                content = context_file.read_text(encoding='utf-8')
+                logger.info(f"已加载 Agent 上下文文件: {context_file}")
+                return f"\n\n## Agent 专属上下文\n\n{content}"
+            except Exception as e:
+                logger.warning(f"读取 Agent 上下文文件失败 ({context_file}): {e}")
+        return ""
 
-        # 告知 AI 当前在和谁对话
-        if self.user_id == 'super_user':
-            parts.append(f"[当前对话] 你正在{'群聊内' if group_context else ''}和人类用户 (id是super_user) 对话。")
-        else:
-            status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
-            parts.append(f"[当前对话] 你正在{'群聊内' if group_context else ''}和智能体 {self.user_id} 对话。对方当前状态：{status}。")
-            # 注入轮次警告
-            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
-            if warning:
-                parts.append(warning)
-
-        # 群聊上下文
-        if group_context:
-            parts.append(group_context)
-
-        # 图片信息
-        if image_desc:
-            parts.append(f"[图片信息] 对方刚上传了一张图片，内容描述如下：\"{image_desc}\"")
-
-        return "\n\n".join(parts) if parts else ""
 
     def _build_group_context_prompt(self) -> str:
         """构建群聊上下文提示，用于注入到系统提示词中。"""
@@ -778,22 +804,32 @@ class Brain:
         else:
             # 已有任务，只记录步骤并刷新活跃时间
             self.task_buffer.add_step(self.thread_id, "用户继续输入（补充信息或修正指令）", user_input[:500])
-        # 保存原始用户输入（在注入上下文前缀之前），用于精确的技能检索
+        # 保存原始用户输入，用于精确的技能检索
         original_user_input = user_input
 
-        user_input = await self._build_message_with_context(user_input, image_data)
+        # Build system-level context as dedicated SystemMessages (not user message prefixes).
+        # Inspired by Claude Code: system instructions stay in system role,
+        # user messages contain only what the user actually said.
+        system_contexts = await self._build_system_contexts(image_data)
 
-        # 程序化注入相关技能经验：搜索过去踩过的坑，不依赖 Agent 自觉
-        # 使用原始用户输入进行检索，避免上下文前缀污染查询语义
+        # 程序化注入相关技能经验：作为系统消息而非用户消息后缀
         if self.user_id == 'super_user':
             skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
             if skill_lessons:
-                user_input = f"{user_input}\n\n{skill_lessons}"
+                system_contexts.append(skill_lessons)
 
-        messages = [
-            {"role": "user", "content": user_input}
-        ]
-        
+        messages = []
+        for ctx in system_contexts:
+            if ctx:
+                messages.append({"role": "system", "content": ctx})
+        messages.append({"role": "user", "content": user_input})
+
+        # Proactive token budget check (one-time, before the stream loop)
+        if self.user_id == 'super_user' and not silent:
+            budget_warning = self.context_manager.check_budget(messages)
+            if budget_warning:
+                await self._safe_send(budget_warning)
+
         config, sent_ids = await self._prepare_agent_config()
         
         # HITL 循环：初始输入为 messages
@@ -909,11 +945,13 @@ class Brain:
 
         config, sent_ids = await self._prepare_agent_config()
 
-        user_input = await self._build_message_with_context(user_input, image_data)
-        
-        messages = [
-            {"role": "user", "content": user_input}
-        ]
+        system_contexts = await self._build_system_contexts(image_data)
+
+        messages = []
+        for ctx in system_contexts:
+            if ctx:
+                messages.append({"role": "system", "content": ctx})
+        messages.append({"role": "user", "content": user_input})
         
         input_state = {"messages": messages}
         command = None

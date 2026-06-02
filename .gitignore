@@ -9,6 +9,8 @@
 *.json
 *.md
 !ARCHITECTURE.md
+!agent/agent_context/*.md
+agent/agent_temp/
 /agent/data/*
 /agent/chroma_db/*
 /pgdata
