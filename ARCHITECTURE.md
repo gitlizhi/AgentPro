@@ -134,18 +134,41 @@ Agent A 发群消息
 
 ### 3.3 Agent 消息缓冲机制
 
-Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
+`agent/message_buffer.py` 的 `MessageBuffer` 类实现了延迟合并策略——Agent 接收到其他 Agent 的私聊消息时，不立即处理，而是：
 
-1. 消息累积到 `agent_msg_cache[sender]`
+1. 消息累积到缓冲区（按发送者分组）
 2. 如果有正在处理中的任务 → 只累积，不打断
-3. 如果 timer 在 sleep → 取消旧 timer，启动新的 5 秒 timer
+3. 如果 timer 在等待 → 取消旧 timer，启动新的 5 秒 timer
 4. 5 秒后合并所有累积消息，一次送入 LLM
+
+```python
+class MessageBuffer:
+    def __init__(self, delay_seconds: float = 5.0)
+    def enqueue(self, user_id, user_input, group_context, on_process_callback) -> None
+    def cancel(self, user_id) -> None
+    def cancel_all(self) -> None
+    def is_processing(self, user_id) -> bool
+```
 
 这样避免 Agent 对每一条消息都立即回复，减少来回次数。
 
 ### 3.4 对话轮次限制
 
 参见 [五、智能体私聊管控](#五智能体私聊管控)。
+
+### 3.5 WebSocket 自动重连
+
+`agent/communication.py` 内置指数退避重连机制，确保网络中断后自动恢复：
+
+```
+连接断开 → 等待 1s → 重连 → 失败 → 等待 2s → 重连 → … → 最大 60s
+成功连接后重置计数器，持续监听直至 _running=False
+```
+
+**关键设计：**
+- 接收循环内的非致命错误（JSON 解析失败、单条消息处理异常）不触发重连，仅记录日志并继续
+- 只有 `ConnectionClosed` 才退出接收循环触发重连
+- `close()` 设置 `_running=False` 后循环自然退出，不会无限重连
 
 ---
 
@@ -461,6 +484,9 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | 长期记忆按需加载而非注入 | 每次对话都注入消耗大量 token；Agent 主动调用工具获取，仅在需要时加载，且 Agent 明确知道自己用了哪些信息 |
 | 任务可中断（Stop Task + 消息覆盖） | 通过 asyncio Task 取消 + agent_status 协议实现；支持手动停止按钮和发送新消息自动中断两种方式 |
 | 新消息自动中断当前任务 | 用户发送新消息时，若 Agent 正忙，自动取消当前任务并以新消息开始，保持同一 thread_id 保证上下文连续 |
+| astream 超时保护（ensure_future+wait） | Python 3.12 的 `asyncio.wait_for` 会将任务内部的 `CancelledError`（如 LLM HTTP 层抛出）错误掩码为 `TimeoutError`，导致 Agent 误判超时而崩溃。改用 `ensure_future`+`asyncio.wait` 组合，正确保持 `CancelledError` 的传播语义 |
+| LLM 流处理中的网络异常捕获 | `_handle_with_agent` 和 `_process_agent_message` 原只捕获 `TimeoutError`/`CancelledError`，但 `httpx.ConnectError` 等网络异常直接使 Agent 崩溃。新增 `except (OSError, ConnectionError)` 兜底，确保网络中断时 Agent 优雅降级 |
+| 浏览器多层反检测体系 | 单层反检测（如仅修改 navigator.webdriver）已无法应对现代检测。采用纵深防御：Chrome 启动参数 + 真实 UA + playwright-stealth JS 注入 + CDP 连接系统 Chrome（TLS 指纹匹配），逐层加码直至通过 |
 
 ### 11.1 任务中断机制（Stop Task）
 
@@ -878,11 +904,104 @@ function displayMessage(sender, text, time, image = null) {
 
 ### 14.1 概述
 
-AgentPro 内置基于 Playwright 的 Chromium 浏览器，支持 18 种网页操作。使用持久化会话 (`launch_persistent_context`)，cookie 和登录态自动保持。
+AgentPro 内置基于 Playwright 的浏览器自动化系统，支持 19 种网页操作。默认使用系统安装的 Chrome 浏览器（`channel="chrome"`），cookie 和登录态通过持久化会话目录 (`browser_data/`) 自动保持。
 
 详见 `agent/skills/browser-automation/SKILL.md`。
 
-### 14.2 任务完成后自动关闭
+### 14.2 反自动化检测体系
+
+现代网站（如 BOSS 直聘）广泛部署了自动化检测机制（navigator.webdriver 检测、WebGL 指纹、Chrome 自动化标志等）。AgentPro 采用**多层纵深防御**策略绕过检测：
+
+#### 第一层：Chrome 启动参数伪装
+
+```python
+_STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",   # 隐藏 navigator.webdriver
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--no-first-run", "--no-default-browser-check",
+    "--disable-infobars", "--disable-sync",
+    "--disable-default-apps", "--disable-translate",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-update",
+    "--password-store=basic", "--use-mock-keychain",
+]
+```
+
+#### 第二层：真实 Chrome User-Agent
+
+```python
+_STEALTH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+```
+
+#### 第三层：playwright-stealth 注入
+
+使用 `playwright-stealth` 库（2.x API）修改浏览器 JavaScript 环境，消除可被检测的自动化痕迹：
+
+```python
+from playwright_stealth import Stealth
+
+_stealth = Stealth()
+# 对现有页面注入
+for p in self._context.pages:
+    _stealth.apply_stealth_sync(p)
+# 对后续新页面自动注入
+self._context.on("page", lambda p: _stealth.apply_stealth_sync(p))
+```
+
+Stealth 修改的内容包括：`navigator.webdriver` → `false`、`navigator.plugins` 数组填充、`navigator.permissions.query` 行为修正、WebGL vendor/renderer 改为真实 GPU 值、`chrome.runtime` 对象注入等。
+
+#### 第四层：系统 Chrome + CDP 连接（终极方案）
+
+前三层防护对部分站点仍不够，因为它们检测 TLS 握手指纹（JA3/JA4）——Playwright 自带 Chromium 的 TLS 指纹与真实 Chrome 不同。
+
+**解决方案**：使用系统安装的真实 Chrome，通过 CDP (Chrome DevTools Protocol) 连接：
+
+```
+用户手动启动 Chrome：
+  chrome.exe --remote-debugging-port=9222
+
+AgentPro 设置环境变量：
+  BROWSER_CDP_PORT=9222
+
+AgentPro 通过 connect_over_cdp() 连接，
+使用用户已登录的 Chrome 会话，
+TLS 指纹、cookie、登录态完全真实。
+```
+
+CDP 模式的代码路径（`browser_tools.py:164-181`）：
+
+```python
+if _BROWSER_CDP_PORT:
+    cdp_url = f"http://127.0.0.1:{_BROWSER_CDP_PORT}"
+    self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+    contexts = self._browser.contexts
+    self._context = contexts[0] if contexts else self._browser.new_context()
+    pages = self._context.pages
+    self._page = pages[-1] if pages else self._context.new_page()
+    # 用已有标签页，无需新建
+```
+
+**CDP 模式关键行为**：
+- 浏览器由用户手动管理（标签页、登录、cookie 等）
+- AgentPro 仅接管单个标签页，不影响用户其他标签
+- `close()` 仅断开 CDP 连接，不关闭浏览器
+- 页面新开时，`playwright-stealth` 自动注入所有标签页
+
+### 14.3 浏览器环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `BROWSER_HEADLESS` | 设为 `1` 启用无头模式（不显示窗口） | `0`（可见） |
+| `BROWSER_CHANNEL` | 浏览器通道：`chrome`（系统 Chrome）或 `chromium`（Playwright 自带） | `chrome` |
+| `BROWSER_CDP_PORT` | CDP 远程调试端口，设置后连接已有 Chrome 而非启动新实例 | 空（不启用） |
+| `CHROME_PATH` | Chrome 可执行文件路径（`channel="chrome"` 时自动从注册表查找，也可手动指定） | 空（自动查找） |
+
+### 14.4 任务完成后自动关闭
 
 Agent 完成浏览器任务后必须关闭浏览器释放资源。机制：
 
@@ -893,12 +1012,10 @@ BRAIN_BASE_PROMPT 明确指示：
 Agent 操作流程：
   → browser.screenshot → 保存最终截图
   → 回复中包含 markdown 截图展示
-  → browser.close → 关闭 Chromium 进程
+  → browser.close → 关闭/断开浏览器会话
 ```
 
-技能文档中约定的关闭流程与提示词中的强制指令双重保障。
-
-### 14.3 DPI 缩放问题修复
+### 14.5 DPI 缩放问题修复
 
 **问题**：Windows 上拖拽 Playwright 浏览器窗口导致前端 UI 整体放大。
 
@@ -910,12 +1027,22 @@ Agent 操作流程：
 - 无头模式仍保留 `--disable-gpu`（无头模式不涉及窗口渲染）
 
 ```python
-# agent/browser_tools.py
 args=[
     "--no-sandbox", "--disable-setuid-sandbox",
     "--disable-dev-shm-usage", "--force-device-scale-factor=1",
 ] + (["--disable-gpu"] if self.headless else []),
 ```
+
+### 14.6 架构要点
+
+| 要点 | 说明 |
+|------|------|
+| 单线程执行器 | Playwright 同步 API 要求所有 greenlet 操作在同一线程；使用 `ThreadPoolExecutor(max_workers=1)` 确保线程亲和性 |
+| 全局单例 | `_browser_session` 全局唯一切片，多次工具调用共享同一浏览器会话 |
+| 懒初始化 | 首次调用 `browser` 工具时才启动浏览器，避免无浏览器任务时资源浪费 |
+| 优雅降级 | `launch_persistent_context` 失败 → 自动降级为普通 `launch` + `new_context` |
+| 线程安全 | `_lock` 双重检查锁保证延迟初始化线程安全 |
+| Windows 兼容 | `sync_playwright()` 子进程需要 `ProactorEventLoop`，初始化后恢复原策略 |
 
 ---
 
@@ -939,6 +1066,8 @@ args=[
 | `agent/skill_version_manager.py` | 技能版本管理 |
 | `agent/sandboxed_backend.py` | Docker 沙箱 |
 | `agent/browser_tools.py` | Playwright 浏览器工具 |
+| `agent/message_buffer.py` | Agent 间消息缓冲队列 |
+| `agent/tools_factory.py` | 工具工厂函数（send_to_agent、room_tools 等） |
 | `agent/computer_tools.py` | 19 个桌面自动化工具（Computer Use） |
 | `agent/tools.py` | 自定义 LangChain 工具（含 windows_automation） |
 | `agent/scheduler.py` | APScheduler 调度 |

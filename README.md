@@ -207,6 +207,10 @@ python main.py
 | `HUB_PORT` | Hub 服务器端口 | `8765` |
 | `MEMORY_MARKDOWN_DIR` | 长期记忆 Markdown 目录 | `./agent_memory` |
 | `CHROMA_PERSIST_DIR` | ChromaDB 持久化目录 | `./chroma_db` |
+| `BROWSER_HEADLESS` | 设为 `1` 启用无头模式（不显示浏览器窗口） | `0` |
+| `BROWSER_CHANNEL` | 浏览器通道：`chrome`（系统 Chrome）或 `chromium`（Playwright 自带） | `chrome` |
+| `BROWSER_CDP_PORT` | CDP 远程调试端口，设置后连接已有 Chrome（如 `9222`），不启动新实例 | 空（不启用） |
+| `CHROME_PATH` | Chrome 可执行文件路径，不设置则自动从注册表查找 | 空（自动查找） |
 
 ### 模型配置
 
@@ -235,6 +239,8 @@ AgentPro/
 │   ├── computer_tools.py           # Computer Use：19 个桌面自动化工具
 │   ├── tools.py                    # LangChain 工具（含 UIAutomation 封装）
 │   ├── browser_tools.py            # Playwright 浏览器自动化
+│   ├── message_buffer.py           # Agent 间消息缓冲队列
+│   ├── tools_factory.py            # 工具工厂函数
 │   ├── sandboxed_backend.py        # Docker 沙箱执行环境
 │   ├── model_config.py             # 多模型配置管理
 │   ├── prompts.py                  # 集中式提示词管理
