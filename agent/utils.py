@@ -11,7 +11,7 @@ from config import config
 
 async def call_big_model_chat(
     user_input: str,
-    model: str = "glm-5",
+    model: str = "deepseek-chat",
     temperature: float = 1.0,
     stream: bool = False,
     max_tokens: Optional[int] = None,
@@ -20,11 +20,12 @@ async def call_big_model_chat(
     """
     调用大模型的API的接口。
 
-    :param messages: 消息列表，例如 [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]
-    :param model: 模型名称，如 "glm-5", "glm-4-flash" 等
+    :param user_input: 用户输入字符串，会自动包装为 messages 格式
+    :param model: 模型名称，如 "deepseek-chat", "deepseek-reasoner" 等
     :param temperature: 温度参数，控制随机性
-    :param stream: 是否使用流式输出
+    :param stream: 是否使用流式输出（当前不支持，请使用 False）
     :param max_tokens: 最大生成token数
+    :param is_json: 是否启用 JSON 模式输出
     :return: API 返回的 JSON 数据（字典）
     """
     api_key = config.model.api_key

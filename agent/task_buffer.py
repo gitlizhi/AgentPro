@@ -70,4 +70,4 @@ class TaskBuffer:
         idle_seconds = time.time() - last_active
         if idle_seconds >= max_idle_seconds:
             return False
-        return False
+        return True

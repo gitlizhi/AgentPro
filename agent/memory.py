@@ -146,7 +146,7 @@ class LongTermMemory:
             metadatas=metadatas,
             ids=ids
         )
-        if metadata.get("type") == "fact":
+        if base_meta.get("type") == "fact":
             self._append_to_markdown(user_id, facts, metadatas)
     
     def _append_to_markdown(self, user_id: str, facts: List[str], metadatas: List[dict]):
