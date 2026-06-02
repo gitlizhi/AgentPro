@@ -487,6 +487,38 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | astream 超时保护（ensure_future+wait） | Python 3.12 的 `asyncio.wait_for` 会将任务内部的 `CancelledError`（如 LLM HTTP 层抛出）错误掩码为 `TimeoutError`，导致 Agent 误判超时而崩溃。改用 `ensure_future`+`asyncio.wait` 组合，正确保持 `CancelledError` 的传播语义 |
 | LLM 流处理中的网络异常捕获 | `_handle_with_agent` 和 `_process_agent_message` 原只捕获 `TimeoutError`/`CancelledError`，但 `httpx.ConnectError` 等网络异常直接使 Agent 崩溃。新增 `except (OSError, ConnectionError)` 兜底，确保网络中断时 Agent 优雅降级 |
 | 浏览器多层反检测体系 | 单层反检测（如仅修改 navigator.webdriver）已无法应对现代检测。采用纵深防御：Chrome 启动参数 + 真实 UA + playwright-stealth JS 注入 + CDP 连接系统 Chrome（TLS 指纹匹配），逐层加码直至通过 |
+| `_safe_send` 统一 WebSocket 发送 | 原有代码中多处裸调 `send_to_agent`，一次 WebSocket 异常即可中断整个 astream 流或抑制 CancelledError。`_safe_send` 将异常降级为日志警告，适用于通知类消息（状态、错误提示、工具进度）；关键消息（审批请求）仍独立 try/except |
+| 工具进度双通道架构 | 工具调用信息通过两条独立的通道到达前端：① `tool_call_start`/`tool_call_end` 结构化事件 → 输入框上方状态条（实时进度）；② 同一条消息的 text 字段 → 聊天记录中的可折叠条目（历史回溯）。两通道在 `client.py` 中通过 `payload.type` 分流，互不干扰 |
+
+### 11.3 工具调用进度流
+
+```
+brain.py: _handle_with_agent 事件循环
+  │
+  ├── 检测 AIMessage.tool_calls
+  │     └── _safe_send("🔧 {name}", type="tool_call_start", tool_name=...)
+  │           │
+  │           └── send_to_agent(user_id, {text, type, tool_name, ...})
+  │                 │
+  │                 └── Hub → client.py
+  │                       │
+  │                       ├── payload.type == "tool_call_start"
+  │                       │     ├── {"type": "tool_call_start", ...} → 前端 WS
+  │                       │     │     └── 状态条: "正在执行: {tool_name}..."
+  │                       │     └── {"type": "message", ...} → 前端 WS
+  │                       │           └── 聊天记录: 可折叠条目
+  │                       │
+  ├── 检测 ToolMessage
+  │     └── _safe_send("🛠️ {content}", type="tool_call_end", tool_name=...)
+  │           │
+  │           └── (同上双通道) → 状态条"完成" + 聊天记录可折叠
+  │
+  └── 检测 AIMessage.content（普通文本回复）
+        └── _send_ai_message(msg) → _safe_send(content)
+              └── 无 type 字段 → client.py else 分支 → 纯聊天消息
+```
+
+**折叠规则**：短单行（≤150 字符）直接展示；长单行截取前 120 字符 + `…` 做摘要；多行以第一行为摘要。用户点击 `<details>` 展开查看完整内容。
 
 ### 11.1 任务中断机制（Stop Task）
 
