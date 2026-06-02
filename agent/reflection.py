@@ -105,7 +105,10 @@ def _index_builtin_skills():
             continue
 
         doc_id = f"builtin_{name}"
-        embed_text = f"技能名称：{name}\n触发词：{', '.join(triggers)}\n描述：{description}"
+        # 将技能正文的关键部分也纳入向量化，提升检索相关性
+        body = parts[2].strip() if len(parts) > 2 else ""
+        body_snippet = body[:800] if body else ""
+        embed_text = f"技能名称：{name}\n触发词：{', '.join(triggers)}\n描述：{description}\n内容概要：{body_snippet}"
         _skill_collection.upsert(
             documents=[embed_text],
             metadatas=[{
@@ -177,9 +180,8 @@ async def create_skill_from_reflection(task_data: Dict, reflection: Dict) -> Opt
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(skill_doc)
 
-    # 向量化：使用技能文档的前两部分作为检索内容
-    # 提取名称、描述、触发短语用于检索
-    embed_text = f"技能名称：{skill_name}\n触发词：{', '.join(trigger_phrases)}\n描述：{skill_doc[:500]}"
+    # 向量化：纳入技能名称、触发词、关键教训和文档概要，提升检索相关性
+    embed_text = f"技能名称：{skill_name}\n触发词：{', '.join(trigger_phrases)}\n关键教训：{key_lessons}\n内容概要：{skill_doc[:600]}"
     collection = get_skill_collection()
     if collection:
         doc_id = f"skill_{skill_name}"

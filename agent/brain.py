@@ -8,6 +8,8 @@ import random
 import time
 import os
 import asyncio
+
+from agent.conversation_tracker import ConversationTracker
 from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -276,6 +278,64 @@ class Brain:
                 parts.append(f"**{header}**: {text}")
         return "\n".join(parts) if parts else ""
 
+    async def _sanitize_checkpoint(self, config: dict) -> bool:
+        """检查并修复 checkpoint 中的悬空 tool_calls。
+
+        当用户中断任务（停止按钮/新消息取消）时，checkpoint 可能保存了 AI 的
+        tool_calls 消息但对应工具尚未响应，导致 LLM API 报 400 错误：
+        "insufficient tool messages following tool_calls message"
+
+        此方法检测该情况并移除悬空的 tool_calls 消息。
+        返回 True 表示执行了修复。
+        """
+        try:
+            state = await self.agent.aget_state(config)
+            if not state or not state.values:
+                return False
+            messages = list(state.values.get("messages", []))
+            if not messages:
+                return False
+
+            # 收集所有 tool 消息已响应的 tool_call_id
+            responded_ids = set()
+            for msg in messages:
+                tc_id = getattr(msg, 'tool_call_id', None)
+                if tc_id:
+                    responded_ids.add(tc_id)
+
+            # 从后往前找第一个包含悬空 tool_calls 的 AI 消息
+            fixed = False
+            clean_messages = list(messages)
+            for i in range(len(clean_messages) - 1, -1, -1):
+                msg = clean_messages[i]
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    tool_call_ids = {
+                        tc.get('id') if isinstance(tc, dict) else getattr(tc, 'id', '')
+                        for tc in msg.tool_calls
+                    }
+                    pending = tool_call_ids - responded_ids
+                    if pending and tool_call_ids and pending == tool_call_ids:
+                        # 所有 tool_calls 都没有响应，移除整条 AI 消息
+                        clean_messages.pop(i)
+                        fixed = True
+                        logger.info(f"移除悬空 tool_calls 消息 (ids={pending})")
+                    elif pending:
+                        # 部分有响应，移除无响应的 tool_call（保守处理：移除整条消息）
+                        clean_messages.pop(i)
+                        fixed = True
+                        logger.info(f"移除部分悬空 tool_calls 消息 (pending={pending})")
+                    # 一旦处理了一个悬空消息就停止（只修复最末尾的）
+                    if fixed:
+                        break
+
+            if fixed:
+                await self.agent.aupdate_state(config, {"messages": clean_messages})
+                logger.info(f"已修复 checkpoint {config.get('configurable', {}).get('thread_id', '?')}")
+            return fixed
+        except Exception as e:
+            logger.warning(f"检查 checkpoint 有效性失败: {e}")
+            return False
+
     async def _get_relevant_skill_lessons(self, user_input: str) -> str:
         """搜索与用户输入相关的技能，提取经验教训注入上下文。
         程序化强制执行，不依赖 Agent 自觉调用 search_skills。"""
@@ -288,9 +348,17 @@ class Brain:
             if not results.get('metadatas') or not results['metadatas'][0]:
                 return ""
 
+            # 提取相似度距离，过滤低相关性的结果
+            # cosine 距离：0=完全相同, 1=正交无关, 2=完全相反。阈值 0.5 以下视为相关
+            distances = results.get('distances', [[]])[0] if results.get('distances') else []
+
             lessons = []
             seen = set()
-            for meta in results['metadatas'][0]:
+            for idx, meta in enumerate(results['metadatas'][0]):
+                # 检查相似度：距离超过阈值则跳过
+                if distances and idx < len(distances) and distances[idx] > 0.5:
+                    logger.debug(f"技能 {meta.get('skill_name', '?')} 距离={distances[idx]:.3f} 超过阈值，跳过")
+                    continue
                 skill_name = meta.get('skill_name', '')
                 source = meta.get('source', 'learned')
                 if not skill_name or skill_name in seen:
@@ -348,7 +416,7 @@ class Brain:
         user_input = self._inject_time_context(user_input)
         try:
             self.user_id = user_id
-            effective_thread_id = thread_id_override if thread_id_override else self.thread_id
+            effective_thread_id = thread_id_override if thread_id_override is not None else self.thread_id
             if self.user_id != 'super_user':
                 intent_data = IntentType.COMPLEX_TASKS.value
             else:
@@ -408,27 +476,36 @@ class Brain:
             logger.info(f"Task cancelled for agent {self.agent_id}")
 
     def get_thread_id(self, new_thread, chat_id):
-        # 如果前端已经显式传了 thread_id，直接使用（无论 new_thread 标志）
+        # new_thread 优先级最高：强制开启新对话
+        if new_thread:
+            # 仅当 thread_id 是前端通过 createConversation 预生成的唯一 ID（含 UUID 后缀）时才保留
+            # core.py 的兜底格式 "private_agent_user" 不含 UUID，排除之，避免复用旧 checkpoint
+            bare_default = f"private_{chat_id}"
+            if self.thread_id and self.thread_id != bare_default and chat_id in self.thread_id:
+                print(f'使用前端指定的新 thread_id: {self.thread_id}', flush=True)
+                self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+                return
+            # 否则生成新 ID
+            print(f'new_thread: 生成新 ID', flush=True)
+            self.thread_id = f"{chat_id}_{uuid.uuid4()}"
+            self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
+            return
+
+        # 如果前端显式传了 thread_id（非 new_thread 情况），直接使用
         if self.thread_id and chat_id in self.thread_id:
             print(f'使用前端指定的 thread_id: {self.thread_id}', flush=True)
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
             return
-        if new_thread:
-            # 用户要求新对话：生成新 ID，并更新元数据
-            print(f'new_thread: {new_thread}', flush=True)
+
+        # 尝试从长期记忆恢复上次的 thread_id
+        last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
+        if last_thread:
+            print(f'加载从长期记忆中的last_thread_id')
+            self.thread_id = last_thread
+        else:
+            print(f'首次对话，生成新 ID')
             self.thread_id = f"{chat_id}_{uuid.uuid4()}"
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
-        else:
-            # 尝试从长期记忆恢复上次的 thread_id
-            last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
-            if last_thread:
-                print(f'加载从长期记忆中的last_thread_id')
-                self.thread_id = last_thread
-            else:
-                print(f'首次对话，生成新 ID')
-                # 首次对话，生成新 ID
-                self.thread_id = f"{chat_id}_{uuid.uuid4()}"
-                self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
 
     async def _detect_reminder_intent(self, user_input: str) -> dict:
         """调用模型判断是否是定时任务，并提取时间和消息"""
@@ -507,6 +584,8 @@ class Brain:
         original_thread_id = self.thread_id
         if thread_id:
             self.thread_id = thread_id
+        elif new_thread:
+            self.thread_id = None  # 清除残留旧值，由 get_thread_id 生成新 ID
         try:
             if intent == IntentType.SET_REMINDER.value:
                 reminders = await self._detect_reminder_intent(user_input)
@@ -685,6 +764,9 @@ class Brain:
         else:
             # 已有任务，只记录步骤并刷新活跃时间
             self.task_buffer.add_step(self.thread_id, "用户继续输入（补充信息或修正指令）", user_input[:500])
+        # 保存原始用户输入（在注入上下文前缀之前），用于精确的技能检索
+        original_user_input = user_input
+
         # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
         group_context = self._build_group_context_prompt()
         image_desc = None
@@ -695,8 +777,9 @@ class Brain:
             user_input = f"{context_prefix}\n\n{user_input}"
 
         # 程序化注入相关技能经验：搜索过去踩过的坑，不依赖 Agent 自觉
+        # 使用原始用户输入进行检索，避免上下文前缀污染查询语义
         if self.user_id == 'super_user':
-            skill_lessons = await self._get_relevant_skill_lessons(user_input)
+            skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
             if skill_lessons:
                 user_input = f"{user_input}\n\n{skill_lessons}"
 
@@ -706,6 +789,8 @@ class Brain:
         
         # 注意：必须使用同一个 thread_id，不能动态生成
         config = {"configurable": {"thread_id": self.thread_id}}
+        # 修复 checkpoint 中的悬空 tool_calls（防止中断任务残留导致 LLM 400 错误）
+        await self._sanitize_checkpoint(config)
         if self.thread_id not in self.sent_msg_ids_by_thread:
             self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
         sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
@@ -805,6 +890,8 @@ class Brain:
         # ----------------------
 
         config = {"configurable": {"thread_id": self.thread_id}}
+        # 修复 checkpoint 中的悬空 tool_calls（防止中断任务残留导致 LLM 400 错误）
+        await self._sanitize_checkpoint(config)
 
         # 加载已发送消息 ID 集合（可选，用于去重）
         if self.thread_id not in self.sent_msg_ids_by_thread:

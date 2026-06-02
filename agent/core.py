@@ -161,8 +161,11 @@ class Agent:
 
     async def _process_message(self, sender, user_input, image_data, new_thread, thread_id=None):
         """后台处理普通消息（包括可能触发 HITL 的任务）"""
-        # 优先使用前端传来的 thread_id，没有则用旧格式兜底
-        effective_thread_id = thread_id if thread_id else f"private_{self.agent_id}_{sender}"
+        # 前端显式传了 thread_id 则使用；new_thread 时不制造兜底值，交给 brain 生成
+        if new_thread:
+            effective_thread_id = thread_id  # None 或前端 createConversation 生成的 UUID
+        else:
+            effective_thread_id = thread_id if thread_id else f"private_{self.agent_id}_{sender}"
         try:
             response = await self.brain.process(
                 user_id=sender,
