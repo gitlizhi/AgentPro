@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 class Agent:
     def __init__(self, agent_id: str, db_pool=None, custom_system_prompt: str = None):
         self.agent_id = agent_id
-        self._think_task = None
         self.comm = Communication(
             agent_id=agent_id,
             hub_url=f"ws://{config.hub.hub_host}:{config.hub.hub_port}",
@@ -34,6 +33,15 @@ class Agent:
         self.brain.online_agents = self._online_agents
         # 本地缓存房间成员信息 (可选)
         self._room_members = {}
+        # 后台任务生命周期跟踪
+        self._bg_tasks: set[asyncio.Task] = set()
+
+    def _schedule_task(self, coro) -> asyncio.Task:
+        """创建带生命周期跟踪的后台任务，自动在完成时从集合中移除。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
     async def _handle_message(self, data: dict):
         try:
@@ -54,7 +62,7 @@ class Agent:
                     if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
                         logger.info(f"对话 {self.agent_id}<->{sender} 已截断，丢弃消息于入口处")
                         return
-                    asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
+                    self._schedule_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
                     return
                 if user_input.startswith("/approve"):
                     tool_call_id = user_input.split()[1] if len(user_input.split()) > 1 else None
@@ -87,10 +95,15 @@ class Agent:
                 # 这样用户在任务执行中发消息 = 中断当前任务 + 按新指令执行。
                 if self.brain.is_busy and sender == 'super_user':
                     logger.info(f"Agent busy, cancelling current task for new message")
+                    old_task = self.brain._current_task
                     self.brain.stop_current_task()
-                    await asyncio.sleep(0.15)  # 让旧任务的取消和清理有机会执行
-                asyncio.create_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
-                # 可选：立即回复“已收到”
+                    if old_task and not old_task.done():
+                        try:
+                            await asyncio.wait_for(old_task, timeout=3.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            pass  # 任务已取消或超时，可以继续
+                self._schedule_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
+                # 可选：立即回复”已收到”
                 # await self.comm.send_to_agent(sender, {"text": "✅ 已收到，正在处理..."})
             
             elif msg_type == "group_message":
@@ -99,7 +112,7 @@ class Agent:
                 user_input = payload.get("text", "")
                 image_data = payload.get("image")
                 sender = data.get("from")
-                asyncio.create_task(self._process_group_message(room_id, sender, user_input, image_data))
+                self._schedule_task(self._process_group_message(room_id, sender, user_input, image_data))
                 return
             
             elif msg_type == "invite_to_room":
@@ -212,20 +225,17 @@ class Agent:
                 response[:500]
             )
     
-    async def _periodic_think(self):
-        while self._running:
-            await asyncio.sleep(random.randint(60, 600))
-            await self.brain._think_and_act()
-
     async def run(self):
         self._running = True
-        # self._think_task = asyncio.create_task(self._periodic_think())
         logger.info(f"Agent {self.agent_id} starting...")
         await self.comm.connect()
 
     async def stop(self):
         self._running = False
-        # if self._think_task:
-        #     self._think_task.cancel()
+        # 取消并等待所有后台任务
+        for task in list(self._bg_tasks):
+            task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
         await self.comm.close()
         await self.brain.close()

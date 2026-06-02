@@ -7,12 +7,15 @@
 """
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import asyncio
 import math
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 import chromadb
 
@@ -216,7 +219,7 @@ async def consolidate_skills_job():
                     collection.delete([doc_id])
                 except:
                     pass
-            print(f"[SKILL] Archived low-value skill: {skill_name} (value={value})")
+            logger.info(f"Archived low-value skill: {skill_name} (value={value})")
         else:
             # 高价值技能可增加检索权重（通过更新 metadata 中的 boost）
             collection = get_skill_collection()

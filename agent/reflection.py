@@ -10,10 +10,13 @@ import asyncio
 import os
 import json
 import uuid
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from agent.skill_version_manager import create_new_skill_version, update_skill_usage
+
+logger = logging.getLogger(__name__)
 
 # 假设你的项目已有这些配置
 from config import config
@@ -196,7 +199,7 @@ async def create_skill_from_reflection(task_data: Dict, reflection: Dict) -> Opt
             ids=[doc_id]
         )
 
-    print(f"[SKILL] Created skill: {skill_name}")
+    logger.info(f"Created skill: {skill_name}")
     # 使用版本管理创建新版本
     await create_new_skill_version(skill_name, skill_doc, reflection.get("reflection", ""))
     return filename
@@ -238,15 +241,13 @@ async def process_pending_task(filepath: Path):
 
         # 删除 pending 文件
         filepath.unlink()
-        print(f"[REFLECTION] Processed task {task_data['task_id']} -> {reflection.get('outcome')}")
+        logger.info(f"Processed task {task_data['task_id']} -> {reflection.get('outcome')}")
     except Exception as e:
-        print(f"[ERROR] Failed to process task file {filepath.name}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Failed to process task file {filepath.name}: {e}", exc_info=True)
 
 async def reflection_worker():
     """后台任务：轮询 pending_tasks 目录并处理"""
-    print("Starting reflection worker...")
+    logger.info("Starting reflection worker...")
     while True:
         for filepath in PENDING_TASKS_DIR.glob("*.json"):
             await process_pending_task(filepath)

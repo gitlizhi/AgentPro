@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Literal
 from langchain.tools import tool
+from playwright_stealth import Stealth
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,16 @@ _playwright_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 # 默认显示浏览器窗口（设 BROWSER_HEADLESS=1 可切换为无头模式）
 _BROWSER_HEADLESS = os.environ.get("BROWSER_HEADLESS", "0") == "1"
+
+# 浏览器通道：设为 "chromium" 使用 Playwright 自带 Chromium，默认 "chrome" 使用系统 Chrome
+_BROWSER_CHANNEL = os.environ.get("BROWSER_CHANNEL", "chrome")
+
+# Chrome 可执行路径（channel="chrome" 时自动从注册表查找，也可手动指定）
+_CHROME_EXECUTABLE_PATH = os.environ.get("CHROME_PATH", "") or None
+
+# CDP 远程调试端口：设为 9222 则连接到已有 Chrome 而非启动新实例（终极反检测方案）
+# 使用方式：先手动启动 Chrome 并添加参数 --remote-debugging-port=9222
+_BROWSER_CDP_PORT = os.environ.get("BROWSER_CDP_PORT", "")
 
 # 浏览器会话单例
 _browser_session = None
@@ -33,6 +44,32 @@ BROWSER_DATA_DIR = Path(__file__).parent.parent / "browser_data"
 
 # 截图保存目录
 SCREENSHOT_DIR = Path(__file__).parent.parent / "screenshots"
+
+# 反自动化检测：Chrome 启动参数
+_STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-infobars",
+    "--disable-background-networking",
+    "--disable-sync",
+    "--disable-translate",
+    "--disable-default-apps",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-update",
+    "--password-store=basic",
+    "--use-mock-keychain",
+]
+
+# 真实 Chrome 131 Windows User-Agent
+_STEALTH_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
 
 
 def _install_chromium():
@@ -124,38 +161,69 @@ class BrowserSession:
 
                 self._playwright = sync_playwright().start()
 
+                # ========== CDP 模式：连接到已有 Chrome 实例（终极反检测） ==========
+                if _BROWSER_CDP_PORT:
+                    cdp_url = f"http://127.0.0.1:{_BROWSER_CDP_PORT}"
+                    logger.info(f"通过 CDP 连接到已有 Chrome: {cdp_url}")
+                    self._browser = self._playwright.chromium.connect_over_cdp(cdp_url)
+                    contexts = self._browser.contexts
+                    if contexts:
+                        self._context = contexts[0]
+                    else:
+                        self._context = self._browser.new_context()
+                    pages = self._context.pages
+                    if pages:
+                        self._page = pages[-1]  # 使用最近打开的标签页
+                    else:
+                        self._page = self._context.new_page()
+                    self._initialized = True
+                    logger.info(f"已连接到已有 Chrome 会话（{len(pages)} 个标签页）")
+                    return
+
                 launch_error = None
                 try:
-                    self._context = self._playwright.chromium.launch_persistent_context(
+                    launch_kwargs = dict(
                         user_data_dir=str(BROWSER_DATA_DIR),
                         headless=self.headless,
+                        channel=_BROWSER_CHANNEL,
                         args=[
                             "--no-sandbox",
                             "--disable-setuid-sandbox",
                             "--disable-dev-shm-usage",
                             "--force-device-scale-factor=1",
-                        ] + (["--disable-gpu"] if self.headless else []),
+                        ] + _STEALTH_ARGS + (["--disable-gpu"] if self.headless else []),
                         viewport={"width": 1280, "height": 800},
                         locale="zh-CN",
+                        user_agent=_STEALTH_USER_AGENT,
+                        ignore_https_errors=True,
                     )
+                    if _CHROME_EXECUTABLE_PATH:
+                        launch_kwargs["executable_path"] = _CHROME_EXECUTABLE_PATH
+                    self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
                 except Exception as e:
                     launch_error = e
                     logger.warning(f"持久化上下文启动失败: {type(e).__name__}: {e}，尝试普通启动...")
 
                 if launch_error is not None:
                     try:
-                        self._browser = self._playwright.chromium.launch(
+                        fallback_kwargs = dict(
                             headless=self.headless,
+                            channel=_BROWSER_CHANNEL,
                             args=[
                                 "--no-sandbox",
                                 "--disable-setuid-sandbox",
                                 "--disable-dev-shm-usage",
                                 "--force-device-scale-factor=1",
-                            ] + (["--disable-gpu"] if self.headless else []),
+                            ] + _STEALTH_ARGS + (["--disable-gpu"] if self.headless else []),
                         )
+                        if _CHROME_EXECUTABLE_PATH:
+                            fallback_kwargs["executable_path"] = _CHROME_EXECUTABLE_PATH
+                        self._browser = self._playwright.chromium.launch(**fallback_kwargs)
                         self._context = self._browser.new_context(
                             viewport={"width": 1280, "height": 800},
                             locale="zh-CN",
+                            user_agent=_STEALTH_USER_AGENT,
+                            ignore_https_errors=True,
                         )
                     except Exception as e2:
                         logger.error(f"浏览器启动完全失败: {type(e2).__name__}: {e2}")
@@ -171,8 +239,19 @@ class BrowserSession:
                 else:
                     self._page = self._context.new_page()
 
+                # playwright-stealth：对所有页面（现有+新建）应用反检测补丁
+                _stealth = Stealth()
+                for p in self._context.pages:
+                    try:
+                        _stealth.apply_stealth_sync(p)
+                    except Exception as e:
+                        logger.warning(f"stealth 注入失败: {e}")
+
+                # 注册新页面事件：后续打开的任何新页面也自动注入
+                self._context.on("page", lambda p: _stealth.apply_stealth_sync(p))
+
                 self._initialized = True
-                logger.info("浏览器会话已启动")
+                logger.info("浏览器会话已启动（playwright-stealth 已注入）")
             finally:
                 if sys.platform == "win32":
                     asyncio.set_event_loop_policy(_old_policy)
@@ -377,9 +456,9 @@ class BrowserSession:
         return self._page.locator(selector)
 
     def close(self):
-        """关闭浏览器会话"""
+        """关闭浏览器会话（CDP 模式下仅断开连接，不关浏览器）"""
         try:
-            if self._context:
+            if not _BROWSER_CDP_PORT and self._context:
                 self._context.close()
             if self._browser:
                 self._browser.close()

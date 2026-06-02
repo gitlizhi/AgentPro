@@ -4,9 +4,6 @@
 from enum import Enum
 from typing import Dict, Any
 
-class IntentType(Enum):
-    SET_REMINDER = 1
-
 class IntentType(str, Enum):
     SET_REMINDER = "set_reminder"
     QUERY_REMINDER = "query_reminder"

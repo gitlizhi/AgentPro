@@ -4,11 +4,14 @@
 import os
 import json
 import asyncio
+import logging
 from datetime import datetime
 from agent.memory import get_memory
 from agent.utils import call_big_model_chat  # 使用异步版本
 from agent.prompts import build_memory_dedup_prompt
 from config import config
+
+logger = logging.getLogger(__name__)
 
 async def extract_facts_from_markdown(file_path: str) -> list:
     """从 Markdown 文件中提取所有事实内容（异步版，但这里只是读取文件，可以保持同步，但为了统一，可以用同步）"""
@@ -51,7 +54,7 @@ async def deduplicate_facts_with_llm(facts: list) -> list:
         if isinstance(new_facts, list) and all(isinstance(f, str) for f in new_facts):
             return new_facts
         else:
-            print("LLM返回格式错误，使用简单去重")
+            logger.warning("LLM返回格式错误，使用简单去重")
             return list(set(facts))
     except Exception as e:
         # print(f" LLM去重失败: {e}，使用简单去重")
@@ -107,10 +110,10 @@ async def consolidate_user_memory(user_id: str):
     # 5. 执行增量更新
     if to_delete_ids:
         coll.delete(ids=to_delete_ids)
-        print(f"[CONSOLIDATE] Deleted {len(to_delete_ids)} old facts for user {user_id}")
+        logger.info(f"Deleted {len(to_delete_ids)} old facts for user {user_id}")
     if to_add_contents:
         memory.add_facts_batch(to_add_contents, user_id, {"source": "consolidated"})
-        print(f"[CONSOLIDATE] Added {len(to_add_contents)} new facts for user {user_id}")
+        logger.info(f"Added {len(to_add_contents)} new facts for user {user_id}")
 
     # 6. 重写 Markdown 文件，与最终事实列表保持一致
     write_facts_to_markdown(markdown_path, unique_facts)

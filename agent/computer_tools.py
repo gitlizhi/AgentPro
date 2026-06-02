@@ -11,11 +11,14 @@ import os
 import io
 import json
 import base64
+import logging
 import subprocess
 import traceback
 import warnings
 from typing import Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PIL import Image, ImageGrab, ImageDraw, ImageFont
 from langchain.tools import tool
@@ -72,7 +75,7 @@ try:
     _pyautogui.FAILSAFE = True  # 鼠标移到角落时触发异常，安全机制
     _pyautogui_available = True
 except ImportError:
-    print("[computer_tools] pyautogui 未安装，部分功能不可用")
+    logger.warning("pyautogui 未安装，部分功能不可用")
 
 # 临时文件目录
 _TEMP_DIR = Path(os.getcwd()) / "screenshots"

@@ -5,8 +5,11 @@ import os
 os.environ['CHROMA_CACHE_DIR'] = os.path.join(os.path.dirname(__file__), '..', 'chroma_cache')
 import chromadb
 import uuid
+import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 class LongTermMemory:
     def __init__(self, persist_directory="./chroma_db", markdown_dir="./agent_memory"):
@@ -51,7 +54,7 @@ class LongTermMemory:
             results = coll.query(query_texts=[query], n_results=n_results)
         except Exception as e:
             if "Error creating hnsw segment reader" in str(e):
-                print(f"⚠️ 记忆索引损坏，尝试重建 collection for user {user_id}")
+                logger.warning(f"记忆索引损坏，尝试重建 collection for user {user_id}")
                 # 删除并重建 collection
                 self.client.delete_collection(f"user_memories_{user_id}")
                 coll = self.client.create_collection(f"user_memories_{user_id}")
@@ -205,7 +208,7 @@ class LongTermMemory:
             result = coll.get(limit=n)
             return result.get('documents', [])
         except Exception as e:
-            print(f"获取随机记忆失败: {e}")
+            logger.warning(f"获取随机记忆失败: {e}")
             return []
 
 # 全局单例

@@ -189,21 +189,6 @@ def build_intent_classification_prompt(user_input: str, intent_options: str, int
 # 四、主动聊天生成提示词
 # ============================================================
 
-def build_proactive_chat_prompt(thought_type: str, memories_text: str, recent_text: str) -> str:
-    """构建主动聊天生成提示词"""
-    return f"""你是一个有内在思考能力的AI。请根据以下背景生成一个简短的闲聊的口语内容，用于主动和用户沟通（不超过50字）。
-
-背景信息：
-- 当前时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-- 思考类型：{thought_type}
-- 用户的长期记忆：
-{memories_text}
-- 最近对话：
-{recent_text}
-
-请生成一个自然、有温度、可能带有好奇心的内心想法。不要以"作为AI"开头，直接说出想法。"""
-
-
 # ============================================================
 # 五、对话终止判断提示词
 # ============================================================

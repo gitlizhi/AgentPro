@@ -2,10 +2,13 @@
 数据库连接池
 """
 from typing import Optional
+import logging
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from config import config
+
+logger = logging.getLogger(__name__)
 
 _pool: Optional[AsyncConnectionPool] = None
 
@@ -49,7 +52,7 @@ async def ensure_database_exists(uri: str):
             # else:
             #     print(f"ℹ️ Database '{target_db}' already exists.")
     except Exception as e:
-        print(f"❌ Error connecting to default database: {e}")
+        logger.error(f"Error connecting to default database: {e}")
         raise
     finally:
         if conn:
@@ -139,7 +142,7 @@ async def init_db_pool():
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)
         await checkpointer.setup()
-        print("✅ 数据库连接池已初始化，表已创建")
+        logger.info("数据库连接池已初始化，表已创建")
     return _pool
 
 
@@ -149,7 +152,7 @@ async def close_db_pool():
     if _pool:
         await _pool.close()
         _pool = None
-        print("✅ Database pool closed.")
+        logger.info("Database pool closed.")
 
 
 def get_pool() -> AsyncConnectionPool:

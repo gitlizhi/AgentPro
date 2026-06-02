@@ -1,1 +1,0 @@
-INFO:__main__:Routing message from 111 to super_user: {'text': '处理出错: Error code: 400 - {\'error\': {\'message\': "An assistant message with \'tool_calls\' must be followed by tool messages responding to each \'tool_call_id\'. (insufficient tool messages following tool_calls message)", \'type\': \'invalid_request_error\', \'param\': None, \'code\': \'invalid_request_error\'}}'}

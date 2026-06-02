@@ -18,6 +18,14 @@ from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain.agents.middleware import SummarizationMiddleware
 from agent.model_config import model_config  # 导入配置
 from agent.memory import get_memory
+from agent.message_buffer import MessageBuffer
+from agent.tools_factory import (
+    create_load_user_profile_tool,
+    create_list_online_agents_tool,
+    create_send_to_agent_tool,
+    create_room_tools,
+    create_log_memory_tool,
+)
 from deepagents import create_deep_agent, SubAgent
 # from deepagents.backends.filesystem import FilesystemBackend
 # from deepagents.backends import LocalShellBackend
@@ -30,7 +38,6 @@ from agent.prompts import (
     build_brain_system_prompt,
     build_reminder_detection_prompt,
     build_intent_classification_prompt,
-    build_proactive_chat_prompt,
     build_termination_judge_prompt,
 )
 from config import config
@@ -74,8 +81,6 @@ class Brain:
         self.is_busy = False  # 标记是否正在处理用户请求
         self._current_task = None  # 当前正在运行的 asyncio Task（用于外部取消）
         self.last_run_time = datetime.now()
-        self.recent_active_messages = {}  # AI主动发起的对话记录 格式 {user_id: {"content": str, "timestamp": datetime}}
-        
         self.memory = get_memory() if use_long_term_memory else None
         # # 初始化反思模块的向量库
         init_chroma(self.memory.client)
@@ -89,19 +94,19 @@ class Brain:
         self.conversation_tracker = ConversationTracker()
         self.group_context = None  # 当前消息的群聊上下文
         # 和其他Agent交互工具
-        self.send_to_agent_tool = self._create_send_to_agent_tool()
+        self.send_to_agent_tool = create_send_to_agent_tool(self)
         # 创建群组相关的工具
-        room_tools = self._create_room_tools()
+        room_tools = create_room_tools(self)
         
-        self.agent_msg_cache = {}  # user_id -> 累积的消息文本
-        self.agent_msg_group_ctx = {}  # user_id -> 群聊上下文（与消息一同缓存，避免延迟处理时丢失）
-        self.agent_msg_pending = {}  # user_id -> asyncio.Task (sleep 中，可安全取消)
-        self.agent_msg_processing = set()  # 正在处理中的 user_id 集合
-        
+        self.msg_buffer = MessageBuffer(delay_seconds=5)
+        self._process_lock = asyncio.Lock()
+
         self._pending_approvals = {}
+        # 后台任务生命周期跟踪
+        self._bg_tasks: set[asyncio.Task] = set()
         # 用于去重
         self.sent_msg_ids_by_thread = {}  # thread_id -> set
-        
+
         self._termination_cache = {}
         # 任务缓冲模块
         self.task_buffer = TaskBuffer()
@@ -151,7 +156,7 @@ class Brain:
         # ========== 反思子代理定义结束 ==========
 
         # 自定义工具
-        tools = [self.send_to_agent_tool, self._create_list_online_agents_tool(), TavilySearch(max_results=5), self._create_log_memory(), self._create_load_user_profile_tool(), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -183,18 +188,33 @@ class Brain:
         else:
             return "Unknown OS"
 
-    def _create_load_user_profile_tool(self):
-        """创建 load_user_profile 工具：按需加载用户画像"""
-        brain_ref = self
-        @tool
-        async def load_user_profile() -> str:
-            """加载人类用户（super_user）的个人画像信息，包括身份、偏好、习惯、长期约定等。
-            当需要了解用户背景以提供个性化回复时调用此工具。
-            返回格式化的用户画像文本，可直接用于个性化对话。"""
-            if not brain_ref.memory:
-                return "记忆系统未启用，无法获取用户画像。"
-            return brain_ref.memory.get_user_profile("super_user")
-        return load_user_profile
+    async def _build_message_with_context(self, user_input: str, image_data: str = None) -> str:
+        """构建附加上下文的用户消息（group_context + image_desc + dynamic_context）。"""
+        group_context = self._build_group_context_prompt()
+        image_desc = None
+        if image_data:
+            image_desc = await self._handle_image(image_data)
+        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
+        if context_prefix:
+            user_input = f"{context_prefix}\n\n{user_input}"
+        return user_input
+
+    async def _prepare_agent_config(self) -> tuple:
+        """创建 config、修复 checkpoint、加载 sent_ids。返回 (config, sent_ids)。"""
+        config = {"configurable": {"thread_id": self.thread_id}}
+        await self._sanitize_checkpoint(config)
+        if self.thread_id not in self.sent_msg_ids_by_thread:
+            self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
+        return config, self.sent_msg_ids_by_thread[self.thread_id]
+
+    async def _send_ai_message(self, msg, sent_ids: set) -> bool:
+        """去重并发送 AI 消息到当前用户。返回 True 表示实际发送了。"""
+        msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+        if msg.type == "ai" and msg.content and msg_id not in sent_ids:
+            sent_ids.add(msg_id)
+            await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+            return True
+        return False
 
     def _build_system_prompt(self):
         return build_brain_system_prompt(self.agent_id)
@@ -332,8 +352,8 @@ class Brain:
                 await self.agent.aupdate_state(config, {"messages": clean_messages})
                 logger.info(f"已修复 checkpoint {config.get('configurable', {}).get('thread_id', '?')}")
             return fixed
-        except Exception as e:
-            logger.warning(f"检查 checkpoint 有效性失败: {e}")
+        except Exception:
+            logger.warning("检查 checkpoint 有效性失败", exc_info=True)
             return False
 
     async def _get_relevant_skill_lessons(self, user_input: str) -> str:
@@ -409,56 +429,34 @@ class Brain:
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
                       thread_id_override: str = None, silent: bool = False,
                       group_context: dict = None) -> str:
-        self.is_busy = True
-        self._current_task = asyncio.current_task()
-        await self._notify_status("busy")
-        self.group_context = group_context  # 群聊上下文，注入系统提示词
-        user_input = self._inject_time_context(user_input)
-        try:
-            self.user_id = user_id
-            effective_thread_id = thread_id_override if thread_id_override is not None else self.thread_id
-            if self.user_id != 'super_user':
-                intent_data = IntentType.COMPLEX_TASKS.value
-            else:
-                intent_data = await self._classify_intent(user_input)
-            response = await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread,
-                                                 effective_thread_id, silent)
-            return response if not silent else ""
-        except asyncio.CancelledError:
-            await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
-            return "" if not silent else None
-        finally:
-            self._current_task = None
-            self.is_busy = False
-            self.last_run_time = datetime.now()
-            await self._notify_status("idle")
+        async with self._process_lock:
+            self.is_busy = True
+            self._current_task = asyncio.current_task()
+            await self._notify_status("busy")
+            self.group_context = group_context  # 群聊上下文，注入系统提示词
+            user_input = self._inject_time_context(user_input)
+            try:
+                self.user_id = user_id
+                effective_thread_id = thread_id_override if thread_id_override is not None else self.thread_id
+                if self.user_id != 'super_user':
+                    intent_data = IntentType.COMPLEX_TASKS.value
+                else:
+                    intent_data = await self._classify_intent(user_input)
+                response = await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread,
+                                                     effective_thread_id, silent)
+                return response if not silent else ""
+            except asyncio.CancelledError:
+                await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
+                return "" if not silent else None
+            finally:
+                self._current_task = None
+                self.is_busy = False
+                self.last_run_time = datetime.now()
+                await self._notify_status("idle")
             # 注意：不在这里清除 group_context，因为 agent 消息走延迟处理路径，
             # 实际处理在 delayed_process 中异步发生，此时 group_context 仍需保留。
             # group_context 在 _process_agent_message / _handle_with_agent 使用后由下次
             # process() 调用覆盖，或在 _process_agent_message 中主动清除。
-
-    async def process_group_message(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False) -> str:
-        # 处理群组消息
-        self.is_busy = True
-        self._current_task = asyncio.current_task()
-        await self._notify_status("busy")
-        user_input = self._inject_time_context(user_input)
-        try:
-            self.user_id = user_id
-            if self.user_id != 'super_user':        # 如果是Agent之间的交互，则跳过意图识别，直接认为是复杂任务
-                intent_data = IntentType.COMPLEX_TASKS.value
-            else:
-                intent_data = await self._classify_intent(user_input)
-            # print(f'意图识别为：{intent_data}')
-            return await self._handle_intent(intent_data, user_id, user_input, image_data, new_thread)
-        except asyncio.CancelledError:
-            await self.comm.send_to_agent(self.user_id, {"text": "⏹ 任务已停止。"})
-            return None
-        finally:
-            self._current_task = None
-            self.is_busy = False
-            self.last_run_time = datetime.now()
-            await self._notify_status("idle")
 
     async def _notify_status(self, status: str):
         """通知前端智能体状态变化（busy / idle）"""
@@ -482,28 +480,28 @@ class Brain:
             # core.py 的兜底格式 "private_agent_user" 不含 UUID，排除之，避免复用旧 checkpoint
             bare_default = f"private_{chat_id}"
             if self.thread_id and self.thread_id != bare_default and chat_id in self.thread_id:
-                print(f'使用前端指定的新 thread_id: {self.thread_id}', flush=True)
+                logger.debug(f'使用前端指定的新 thread_id: {self.thread_id}')
                 self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
                 return
             # 否则生成新 ID
-            print(f'new_thread: 生成新 ID', flush=True)
+            logger.debug('new_thread: 生成新 ID')
             self.thread_id = f"{chat_id}_{uuid.uuid4()}"
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
             return
 
         # 如果前端显式传了 thread_id（非 new_thread 情况），直接使用
         if self.thread_id and chat_id in self.thread_id:
-            print(f'使用前端指定的 thread_id: {self.thread_id}', flush=True)
+            logger.debug(f'使用前端指定的 thread_id: {self.thread_id}')
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
             return
 
         # 尝试从长期记忆恢复上次的 thread_id
         last_thread = self.memory.get_user_metadata(f'{chat_id}', "last_thread_id")
         if last_thread:
-            print(f'加载从长期记忆中的last_thread_id')
+            logger.debug('加载从长期记忆中的last_thread_id')
             self.thread_id = last_thread
         else:
-            print(f'首次对话，生成新 ID')
+            logger.debug('首次对话，生成新 ID')
             self.thread_id = f"{chat_id}_{uuid.uuid4()}"
             self.memory.set_user_metadata(chat_id, "last_thread_id", self.thread_id)
 
@@ -532,7 +530,7 @@ class Brain:
                 data["has_other"] = False
             return data
         except Exception as e:
-            print(f"意图识别失败: {e}")
+            logger.warning(f"意图识别失败: {e}")
             # 出错时默认当作普通任务处理
             return {"reminders": [], "has_other": True}
     
@@ -575,8 +573,8 @@ class Brain:
             content = response["choices"][0]["message"]["content"]
             return content
         except Exception as e:
-            print(f"意图分类失败: {e}")
-            return IntentType.CHAT.value
+            logger.warning(f"意图分类失败: {e}")
+            return IntentType.COMPLEX_TASKS.value
     
     async def _handle_intent(self, intent: str, user_id: str, user_input: str, image_data: str = None,
                              new_thread: bool = False, thread_id: str = None, silent: bool = False) -> str:
@@ -589,10 +587,20 @@ class Brain:
         try:
             if intent == IntentType.SET_REMINDER.value:
                 reminders = await self._detect_reminder_intent(user_input)
-                if reminders:
-                    return await self._handle_set_reminder(reminders)
-                else:
-                    return "未能理解提醒的时间和内容，请重新描述。"
+                reminder_list = reminders.get('reminders', [])
+                has_other = reminders.get('has_other', False)
+
+                if not reminder_list:
+                    # 未提取到提醒内容：如果夹杂其他意图，交给 Agent 正常处理；
+                    # 纯粹无法解析时才返回错误。
+                    return await self._handle_with_agent(user_input, image_data, new_thread, silent) if has_other \
+                        else "未能理解提醒的时间和内容，请重新描述。"
+
+                reminder_response = await self._handle_set_reminder(reminders)
+                if has_other:
+                    # 提醒之外还有其他内容，继续交给 Agent 处理
+                    await self._handle_with_agent(user_input, image_data, new_thread, silent)
+                return reminder_response
             elif intent == IntentType.QUERY_REMINDER.value:
                 return await self._handle_query_reminder(user_id)
             else:
@@ -650,7 +658,7 @@ class Brain:
                         except OperationalError as e:
                             if attempt == max_retries - 1:
                                 raise
-                            print(f"数据库连接错误，重试 {attempt + 1}/{max_retries}...")
+                            logger.warning(f"数据库连接错误，重试 {attempt + 1}/{max_retries}...")
                             time.sleep(2**attempt)
                 else:
                     responses.append(f"出错了，无法理解这个时间：{time_str}")
@@ -672,7 +680,7 @@ class Brain:
                     )
                     updated = cur.rowcount
                     if updated > 0:
-                        print(f"已标记 {updated} 条过期提醒", flush=True)
+                        logger.info(f"已标记 {updated} 条过期提醒")
                 
                 # 查询未触发且未过期的提醒
                 async with conn.cursor(row_factory=dict_row) as cur:
@@ -692,6 +700,35 @@ class Brain:
             result += f"- {dt} UTC：{row['message']}\n"
         return result
      
+    async def _astream_with_timeout(self, input_state, config, stream_mode="updates",
+                                     per_event_timeout: float = 300):
+        """对 agent.astream 的每次 __anext__ 调用增加超时保护，避免流永久挂起。
+        使用 asyncio.wait 代替 wait_for，避免 Python 3.12 将内部 CancelledError 掩码为 TimeoutError。"""
+        agen = self.agent.astream(input_state, config, stream_mode=stream_mode)
+        deadline = asyncio.get_event_loop().time() + per_event_timeout
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(f"astream ({stream_mode}) timed out after {per_event_timeout}s")
+
+            next_task = asyncio.ensure_future(agen.__anext__())
+            try:
+                done, _ = await asyncio.wait([next_task], timeout=min(remaining, 120))
+            except asyncio.CancelledError:
+                next_task.cancel()
+                raise
+
+            if not done:
+                next_task.cancel()
+                raise asyncio.TimeoutError(f"astream ({stream_mode}) timed out waiting for next event")
+
+            exc = next_task.exception()
+            if exc is not None:
+                if isinstance(exc, StopAsyncIteration):
+                    break
+                raise exc
+            yield next_task.result()
+
     async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
                                     silent: bool = False):
         # ---- P0: 用户消息自动解除该智能体的所有对话限制 ----
@@ -703,54 +740,14 @@ class Brain:
             logger.info(f"对话 {self.agent_id}<->{self.user_id} 已截断，丢弃收到的消息")
             return
 
-        # 如果是 Agent 之间的对话，执行缓存合并逻辑
+        # 如果是 Agent 之间的对话，委托给 MessageBuffer 延迟合并
         if self.user_id != 'super_user':
-            # 累积消息
-            if self.user_id not in self.agent_msg_cache:
-                self.agent_msg_cache[self.user_id] = user_input
-            else:
-                self.agent_msg_cache[self.user_id] += "\n" + user_input
-
-            # 保存群聊上下文（与消息一同缓存，避免 process() 返回后被清除）
-            if self.group_context:
-                self.agent_msg_group_ctx[self.user_id] = self.group_context
-
-            # 如果正在处理中，不打断——消息已累积到 cache 中，
-            # 当前处理结束后如果 cache 还有内容会启动新 timer
-            if self.user_id in self.agent_msg_processing:
-                return
-
-            # 取消还在 sleep 的旧 timer（安全，未进入 LLM 调用）
-            if self.user_id in self.agent_msg_pending:
-                self.agent_msg_pending[self.user_id].cancel()
-
-            async def delayed_process():
-                await asyncio.sleep(5)
-                # 标记进入处理阶段，从 pending 移除
-                self.agent_msg_pending.pop(self.user_id, None)
-                self.agent_msg_processing.add(self.user_id)
-                # 恢复缓存的群聊上下文（process() 返回后可能已被覆盖）
-                saved_ctx = self.agent_msg_group_ctx.pop(self.user_id, None)
+            async def on_process(full_text: str, saved_ctx: dict):
                 if saved_ctx:
                     self.group_context = saved_ctx
-                try:
-                    if hasattr(self, 'agent_msg_cache'):
-                        full_input = self.agent_msg_cache.pop(self.user_id, "")
-                        if full_input:
-                            await self._process_agent_message(full_input, image_data, new_thread)
-                finally:
-                    self.agent_msg_processing.discard(self.user_id)
-                    # 如果处理期间有新消息累积，自动启动新 timer
-                    if (hasattr(self, 'agent_msg_cache')
-                            and self.user_id in self.agent_msg_cache
-                            and self.agent_msg_cache[self.user_id]
-                            and self.user_id not in self.agent_msg_pending):
-                        t = asyncio.create_task(delayed_process())
-                        self.agent_msg_pending[self.user_id] = t
+                await self._process_agent_message(full_text, image_data, new_thread)
 
-            if user_input:
-                t = asyncio.create_task(delayed_process())
-                self.agent_msg_pending[self.user_id] = t
+            self.msg_buffer.enqueue(self.user_id, user_input, self.group_context, on_process)
             return  # 等待定时器，不立即处理
         
         
@@ -767,14 +764,7 @@ class Brain:
         # 保存原始用户输入（在注入上下文前缀之前），用于精确的技能检索
         original_user_input = user_input
 
-        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
-        group_context = self._build_group_context_prompt()
-        image_desc = None
-        if image_data:
-            image_desc = await self._handle_image(image_data)
-        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
-        if context_prefix:
-            user_input = f"{context_prefix}\n\n{user_input}"
+        user_input = await self._build_message_with_context(user_input, image_data)
 
         # 程序化注入相关技能经验：搜索过去踩过的坑，不依赖 Agent 自觉
         # 使用原始用户输入进行检索，避免上下文前缀污染查询语义
@@ -787,84 +777,85 @@ class Brain:
             {"role": "user", "content": user_input}
         ]
         
-        # 注意：必须使用同一个 thread_id，不能动态生成
-        config = {"configurable": {"thread_id": self.thread_id}}
-        # 修复 checkpoint 中的悬空 tool_calls（防止中断任务残留导致 LLM 400 错误）
-        await self._sanitize_checkpoint(config)
-        if self.thread_id not in self.sent_msg_ids_by_thread:
-            self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
-        sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
+        config, sent_ids = await self._prepare_agent_config()
         
         # HITL 循环：初始输入为 messages
         input_state = {"messages": messages}
         command = None
         
-        while True:
-            # 如果有恢复命令，则使用 Command 作为输入
-            if command:
-                input_state = Command(resume=command)
-            
-            async for event in self.agent.astream(input_state, config, stream_mode="updates"):
-                # print(f"DEBUG event: {event}")  # 添加这一行
-                # 中断可能在 event 的某个节点值中
-                interrupt_data = None
-                for key, node_output in event.items():
-                    if node_output is None:
-                        continue
-                    if "__interrupt__" == key:
-                        interrupt_data = node_output
-                        break
-                if interrupt_data:
-                    # 处理中断
-                    decisions = await self._process_interrupts(interrupt_data)
-                    if decisions:
-                        command = {"decisions": decisions}
-                    else:
-                        command = None
-                    break
-                else:
-                    # 正常消息：遍历所有节点输出中的 messages
-                    for node_output in event.values():
+        try:
+            while True:
+                # 如果有恢复命令，则使用 Command 作为输入
+                if command:
+                    input_state = Command(resume=command)
+
+                async for event in self._astream_with_timeout(input_state, config, stream_mode="updates"):
+                    # 中断可能在 event 的某个节点值中
+                    interrupt_data = None
+                    for key, node_output in event.items():
                         if node_output is None:
                             continue
-                        if "messages" in node_output:
-                            messages_obj = node_output["messages"]
-                            if messages_obj is None:  # 也检查 messages 是否为 None
+                        if "__interrupt__" == key:
+                            interrupt_data = node_output
+                            break
+                    if interrupt_data:
+                        # 处理中断
+                        decisions = await self._process_interrupts(interrupt_data)
+                        if decisions:
+                            command = {"decisions": decisions}
+                        else:
+                            command = None
+                        break
+                    else:
+                        # 正常消息：遍历所有节点输出中的 messages
+                        for node_output in event.values():
+                            if node_output is None:
                                 continue
-                            # 处理 Overwrite 对象
-                            if hasattr(messages_obj, 'value') and not isinstance(messages_obj, list):
-                                messages_list = messages_obj.value
-                            else:
-                                messages_list = messages_obj
-                            
-                            for msg in messages_list:
-                                msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
-                                if msg.type == "ai" and msg.content:
-                                    if msg_id not in sent_ids:
-                                        await self.comm.send_to_agent(self.user_id, {"text": msg.content})
+                            if "messages" in node_output:
+                                messages_obj = node_output["messages"]
+                                if messages_obj is None:  # 也检查 messages 是否为 None
+                                    continue
+                                # 处理 Overwrite 对象
+                                if hasattr(messages_obj, 'value') and not isinstance(messages_obj, list):
+                                    messages_list = messages_obj.value
+                                else:
+                                    messages_list = messages_obj
+
+                                for msg in messages_list:
+                                    await self._send_ai_message(msg, sent_ids)
+                                    msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+                                    if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
+                                        for tc in msg.tool_calls:
+                                            tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
+                                            if tc_id not in sent_ids:
+                                                tool_call_info = f"🔧 调用工具: {tc}"
+                                                await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
+                                                sent_ids.add(tc_id)
+                                    elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
+                                        tool_result = f"🛠️ 工具返回: {msg.content}"
+                                        await self.comm.send_to_agent(self.user_id, {"text": tool_result})
                                         sent_ids.add(msg_id)
-                                if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
-                                    for tc in msg.tool_calls:
-                                        tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
-                                        if tc_id not in sent_ids:
-                                            tool_call_info = f"🔧 调用工具: {tc}"
-                                            await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                                            sent_ids.add(tc_id)
-                                elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
-                                    tool_result = f"🛠️ 工具返回: {msg.content}"
-                                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
-                                    sent_ids.add(msg_id)
-                                    # 获取工具名称（可以从 msg.name 或 context 中，这里简单从 sent_ids 推断）
-                                    tool_name = getattr(msg, 'name', 'unknown_tool')
-                                    self.task_buffer.add_step(
-                                        self.thread_id,
-                                        f"调用工具： {tool_name}",
-                                        msg.content[:500],  # 截断过长结果
-                                    )
-            
-            else:
-                # 没有中断，流正常结束
-                break
+                                        # 获取工具名称（可以从 msg.name 或 context 中，这里简单从 sent_ids 推断）
+                                        tool_name = getattr(msg, 'name', 'unknown_tool')
+                                        self.task_buffer.add_step(
+                                            self.thread_id,
+                                            f"调用工具： {tool_name}",
+                                            msg.content[:500],  # 截断过长结果
+                                        )
+
+                else:
+                    # 没有中断，流正常结束
+                    break
+        except asyncio.TimeoutError:
+            logger.error("Agent stream timed out in _handle_with_agent")
+            if self.user_id == 'super_user' and not silent:
+                await self.comm.send_to_agent(self.user_id, {"text": "处理超时，请重试或简化请求。"})
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ConnectionError) as e:
+            logger.error(f"Agent stream network error in _handle_with_agent: {e}")
+            if self.user_id == 'super_user' and not silent:
+                await self.comm.send_to_agent(self.user_id, {"text": f"网络连接失败：{e}。请检查代理设置或网络连接后重试。"})
     
     async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
         # ---- 使用 tracker 管理的 thread_id，每次新会话自动隔离 checkpoint ----
@@ -889,23 +880,9 @@ class Brain:
             return
         # ----------------------
 
-        config = {"configurable": {"thread_id": self.thread_id}}
-        # 修复 checkpoint 中的悬空 tool_calls（防止中断任务残留导致 LLM 400 错误）
-        await self._sanitize_checkpoint(config)
+        config, sent_ids = await self._prepare_agent_config()
 
-        # 加载已发送消息 ID 集合（可选，用于去重）
-        if self.thread_id not in self.sent_msg_ids_by_thread:
-            self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
-        sent_ids = self.sent_msg_ids_by_thread[self.thread_id]
-
-        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
-        group_context = self._build_group_context_prompt()
-        image_desc = None
-        if image_data:
-            image_desc = await self._handle_image(image_data)
-        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
-        if context_prefix:
-            user_input = f"{context_prefix}\n\n{user_input}"
+        user_input = await self._build_message_with_context(user_input, image_data)
         
         messages = [
             {"role": "user", "content": user_input}
@@ -914,95 +891,35 @@ class Brain:
         input_state = {"messages": messages}
         command = None
         
-        while True:
-            if command:
-                input_state = Command(resume=command)
-            
-            async for event in self.agent.astream(input_state, config, stream_mode="values"):
-                if "__interrupt__" in event:
-                    interrupts = event["__interrupt__"]
-                    decisions = await self._process_interrupts(interrupts)
-                    command = decisions if decisions else None
-                    break
-                else:
-                    if "messages" in event:
-                        for msg in event["messages"]:
-                            # 只发送新消息（AI 内容）
-                            if msg.type == "ai" and msg.content:
-                                msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
-                                if msg_id not in sent_ids:
-                                    sent_ids.add(msg_id)
-                                    # 发送给目标 Agent（self.user_id 是其他 Agent ID）
-                                    await self.comm.send_to_agent(self.user_id, {"text": msg.content})
-                                    # ===== 新增：记录本 Agent 发送的消息 =====
+        try:
+            while True:
+                if command:
+                    input_state = Command(resume=command)
+
+                async for event in self._astream_with_timeout(input_state, config, stream_mode="values"):
+                    if "__interrupt__" in event:
+                        interrupts = event["__interrupt__"]
+                        decisions = await self._process_interrupts(interrupts)
+                        command = decisions if decisions else None
+                        break
+                    else:
+                        if "messages" in event:
+                            for msg in event["messages"]:
+                                if await self._send_ai_message(msg, sent_ids):
                                     self.task_buffer.add_step(
                                         self.thread_id,
                                         f"向 {self.user_id} 发送消息",
                                         msg.content[:500]
                                     )
-            else:
-                break
-                
-    async def _handle_chat(self, user_input: str, image_data: str = None, new_thread: bool = False, silent: bool = False):
-        """聊天"""
-        chat_id = f'{self.agent_id}_{self.user_id}'
-        self.get_thread_id(new_thread, chat_id)
-        # 构建动态上下文（附在用户消息前，系统提示词已由 create_deep_agent 处理）
-        group_context = self._build_group_context_prompt()
-        image_desc = None
-        if image_data:
-            image_desc = await self._handle_image(image_data)
-        
-        # 添加最近主动消息（60分钟内有效）
-        recent = self.recent_active_messages.get(self.user_id)
-        if recent and (datetime.now() - recent["timestamp"]) < timedelta(minutes=60):
-            recent_context = f"\n\n[主动消息] AI刚才主动对用户说过：\u201c{recent['content']}\u201d"
-            del self.recent_active_messages[self.user_id]
-        else:
-            recent_context = ""
-        
-        context_prefix = self._build_dynamic_context(group_context, image_desc or "")
-        if context_prefix:
-            user_input = f"{context_prefix}{recent_context}\n\n{user_input}"
-        
-        messages = [
-            {"role": "user", "content": user_input}
-        ]
-        
-        current_ai_message = ""  # 累积当前 AI 消息的文本
-        async for chunk, metadata in self.agent.astream(
-                {"messages": messages},
-                {"configurable": {"thread_id": self.thread_id}},
-                stream_mode="messages",
-        ):
-            # 处理 AI 消息块（可能是文本片段或工具调用）
-            if chunk.type == "AIMessageChunk":
-                if chunk.content:
-                    # 实时发送每个文本片段给用户（打字机效果）
-                    current_ai_message += chunk.content
-                if chunk.tool_calls:
-                    if current_ai_message and not silent:
-                        await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
-                        current_ai_message = ""
-                    # 发送工具调用信息
-                    if self.user_id == 'super_user' and not silent:  # 只有和人类交互才返回工具调用信息
-                        tool_call_info = f"🔧 调用工具: {chunk.tool_calls}"
-                        # tool_call_info = tool_call_info[:40] + '......(已省略部分消息)'
-                        await self.comm.send_to_agent(self.user_id, {"text": tool_call_info})
-                    # 工具调用本身可能不包含文本，但如果有内容也累积
-            # 处理工具返回消息块
-            elif chunk.type == "ToolMessageChunk":
-                if current_ai_message and not silent:
-                    await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
-                    current_ai_message = ""
-                if self.user_id == 'super_user' and not silent:
-                    tool_result = f"🛠️ 工具返回: {chunk.content}"
-                    await self.comm.send_to_agent(self.user_id, {"text": tool_result})
-        # 流结束后，current_ai_message 即为完整的 AI 回复（包含思考和最终答案）
-        # if current_ai_message and not silent:
-        #     await self.comm.send_to_agent(self.user_id, {"text": current_ai_message})
-        return current_ai_message if not silent else ""
-    
+                else:
+                    break
+        except asyncio.TimeoutError:
+            logger.error("Agent stream timed out in _process_agent_message")
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ConnectionError) as e:
+            logger.error(f"Agent stream network error in _process_agent_message: {e}")
+
     async def _handle_image(self, image_data: str) -> str | None:
         """处理图片输入，返回视觉模型的结果。失败时返回 None。"""
         model = model_config.get_model("vision")
@@ -1018,97 +935,6 @@ class Brain:
             logger.error(f"图片处理失败: {e}")
             return None
         
-    async def _generate_thought(self, user_id: str = "super_user") -> str:
-        """生成一个随机想法，结合记忆和最近对话"""
-        thought_types = [
-            "基于用户的长期记忆，给用户一个生活建议或提醒，或者找一个有趣的事实，然后以此为主题闲聊。",
-            "反思一下今天的对话，有没有什么可以改进的地方。",
-            "想一个搞笑的笑话，活跃一下气氛",
-            "提出一个哲学问题，和用户一起讨论",
-            "找一个近期的网络热点话题，进行讨论",
-            "提出关于未来畅想的讨论",
-            "回忆过去的事情，童年的趣事",
-        ]
-        
-        thought_type = random.choice(thought_types)
-        
-        if thought_type in [thought_types[0], thought_types[1]]:
-            # 获取长期记忆
-            memories_text = "暂无"
-            if self.memory:
-                facts = self.memory.get_random_facts(user_id, n=3)
-                if facts:
-                    memories_text = "\n".join([f"- {fact}" for fact in facts])
-            
-            # 获取最近对话
-            recent_msgs = await self._get_recent_messages(user_id, limit=3)
-            recent_text = "\n".join([f"- {msg}" for msg in recent_msgs]) if recent_msgs else "暂无"
-        else:
-            memories_text = recent_text = "暂无"
-        
-        prompt = build_proactive_chat_prompt(thought_type, memories_text, recent_text)
-        try:
-            response = await call_big_model_chat(prompt, model=config.model.default_model, temperature=0.8)      # temperature高一点
-            return response["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            # print(f"生成想法失败: {e}")
-            return "今天天气不错，想出去走走。"
-    
-    async def _think_and_act(self):
-        """思考并采取行动（如主动发送消息）"""
-        if self.is_busy:
-            return  # 正在忙，跳过
-        if datetime.now() - self.last_run_time < timedelta(minutes=5):  # 刚忙完五分钟内不主动发消息
-            return
-        self.last_run_time = datetime.now()
-        thought = await self._generate_thought()
-        # print(thought)
-        target_user = "super_user"
-        if self.comm:
-            await self.send_ai_message(target_user, f"{thought}")
-
-    async def _get_recent_messages(self, user_id: str, limit: int = 5) -> list:
-        """获取用户最近对话的最后 limit 条消息内容"""
-        # 获取用户的 last_thread_id
-        thread_id = self.memory.get_user_metadata(f"{self.agent_id}_{user_id}", "last_thread_id")
-        if not thread_id:
-            return []
-        config = {"configurable": {"thread_id": thread_id}}
-        try:
-            state = await self.checkpointer.aget_tuple(config)
-            if not state:
-                return []
-            # 从 checkpoint 中提取消息
-            # state 是 CheckpointTuple 对象，其 checkpoint 字段包含 channel_values
-            if hasattr(state, 'checkpoint') and state.checkpoint:
-                channel_values = state.checkpoint.get('channel_values', {})
-                messages = channel_values.get('messages', [])
-            else:
-                messages = []
-            
-            recent = []
-            for msg in reversed(messages):
-                if len(recent) >= limit:
-                    break
-                # msg 可能是 BaseMessage 对象，有 type 和 content 属性
-                if hasattr(msg, 'type') and hasattr(msg, 'content') and msg.type in ["human", "ai"]:
-                    recent.insert(0, msg.content)
-            return recent
-        except Exception as e:
-            print(f"获取最近消息失败: {e}")
-            return []
-    
-    async def send_ai_message(self, user_id: str, content: str):
-        """主动发送消息并记录到内存"""
-        from datetime import datetime
-        self.recent_active_messages[user_id] = {
-            "content": content,
-            "timestamp": datetime.now()
-        }
-        # 发送消息
-        await self.comm.send_to_agent(user_id, {"text": content})
-        print(f"[主动消息已记录] {content}")
-    
     async def _process_interrupts(self, interrupts):
         """处理中断列表，返回决策列表"""
         decisions = []
@@ -1152,163 +978,29 @@ class Brain:
             self._pending_approvals[tool_call_id].set_result(decision)
             del self._pending_approvals[tool_call_id]
         else:
-            print(f"[WARN] No pending approval for {tool_call_id}")
-    
-    def _create_list_online_agents_tool(self):
-        """创建查询在线智能体的工具"""
-        brain_ref = self  # 闭包持有 Brain 实例引用
-        @tool
-        def list_online_agents() -> str:
-            """
-            查询当前在线的 Agent 列表。
-            用于在和其他 Agent 协作前判断对方是否在线，避免向离线的 Agent 发送消息。
-            :return: JSON 格式的在线 Agent 列表
-            """
-            agents = brain_ref.online_agents
-            if agents is None:
-                return '{"error": "在线列表未初始化", "agents": []}'
-            import json as _json
-            return _json.dumps({"agents": sorted(list(agents)), "count": len(agents)}, ensure_ascii=False)
-        return list_online_agents
+            logger.warning(f"No pending approval for {tool_call_id}")
+        
+    def schedule_background_task(self, coro) -> asyncio.Task:
+        """创建带生命周期跟踪的后台任务，自动在完成时从集合中移除。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
 
-    def _create_send_to_agent_tool(self):
-        max_rounds = self.conversation_tracker.default_max_rounds
-        _send_desc = (
-            f"向指定的 Agent 发送消息，不等待对方回复。"
-            f"注意：你与每个 Agent 的对话有轮次上限（默认 {max_rounds} 轮），请高效沟通。"
-            f"建议在发送前先调用 list_online_agents 检查目标 Agent 是否在线。"
-            f"参数 target_agent_id: 目标 Agent 的 ID。"
-            f"参数 message: 要发送的消息内容。"
-            f"返回: 发送结果，包含轮次提醒"
-        )
-        @tool(description=_send_desc)
-        async def send_to_agent(target_agent_id: str, message: str) -> str:
-            if message and '[停止交流]' in message:
-                self.conversation_tracker.reset(self.agent_id, target_agent_id)
-                return f'已和 {target_agent_id} 停止交流'
-
-            # ---- P0: 轮次门控 ----
-            can_send, reject_reason = self.conversation_tracker.can_send(self.agent_id, target_agent_id)
-            if not can_send:
-                logger.warning(f"send_to_agent 被拦截: {self.agent_id} -> {target_agent_id}: {reject_reason}")
-                # 通知用户
-                try:
-                    await self.comm.send_to_agent("super_user", {
-                        "text": f"🔒 [对话限制] {self.agent_id} 尝试向 {target_agent_id} 发送消息被拦截：{reject_reason}"
-                    })
-                except Exception:
-                    pass
-                return f"❌ 发送失败：{reject_reason}"
-
-            online = self.online_agents
-            if online is not None and target_agent_id not in online:
-                logger.warning(f"向离线 Agent 发送消息: {target_agent_id}")
-            await self.comm.send_to_agent(target_agent_id, {"text": message})
-
-            # ---- P0: 记录轮次 ----
-            level, warning = self.conversation_tracker.record_send(self.agent_id, target_agent_id)
-
-            hint = "" if (online is None or target_agent_id in online) else f"（注意：{target_agent_id} 当前可能离线）"
-            if hint:
-                return f'消息发送失败，{hint}'
-
-            # ---- P0: 达到上限时通知用户 ----
-            if level == "capped":
-                state = self.conversation_tracker.get_state(self.agent_id, target_agent_id)
-                try:
-                    await self.comm.send_to_agent("super_user", {
-                        "text": (
-                            f"🔒 [对话达上限] {self.agent_id} 与 {target_agent_id} 的对话已达到 "
-                            f"{state.max_rounds} 轮上限，已自动限制。如需继续，请发送消息指示。"
-                        )
-                    })
-                except Exception:
-                    pass
-                return (
-                    f"⚠️ 消息已发送，但你与 {target_agent_id} 的对话已达 {state.max_rounds} 轮上限，"
-                    f"后续消息将被限制。请等待用户指示或使用其他方式协作。"
-                )
-
-            result = f'消息已经发送给了 Agent : {target_agent_id}，请等待对方回复。'
-            if warning:
-                result += f"\n{warning}"
-            return result
-        return send_to_agent
-    
     async def close(self):
-        for task in self.agent_msg_pending.values():
+        self.msg_buffer.cancel_all()
+        # 取消并等待 Brain 自身的后台任务
+        for task in list(self._bg_tasks):
             task.cancel()
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
         for thread_id, task in list(self.task_buffer.buffers.items()):
             if task.get("status") == "in_progress":
                 idle = time.time() - task.get("last_active_time", 0)
                 if idle > 3600:  # 1小时无活动
                     self.task_buffer.finish_task(thread_id, "timeout", user_feedback="任务因长时间无活动而终止")
         await close_browser_session()
-    
-    def _create_room_tools(self):
-        # @tool
-        # async def create_room(room_id: str) -> str:
-        #     """创建一个新群组。"""
-        #     await self.comm.send({"type": "create_room", "room_id": room_id, "agent_id": self.agent_id})
-        #     return f"已创建群组 {room_id}"
-        
-        @tool
-        async def join_room(room_id: str) -> str:
-            """加入一个已有群组。"""
-            await self.comm.send({"type": "join_room", "room_id": room_id, "agent_id": self.agent_id})
-            return f"已请求加入群组 {room_id}"
-        
-        @tool
-        async def leave_room(room_id: str) -> str:
-            """离开群组。"""
-            await self.comm.send({"type": "leave_room", "room_id": room_id, "agent_id": self.agent_id})
-            return f"已离开群组 {room_id}"
-        
-        @tool
-        async def send_group_message(room_id: str, message: str) -> str:
-            """向群组发送消息。"""
-            await self.comm.send({
-                "type": "group_message",
-                "room_id": room_id,
-                "from": self.agent_id,
-                "payload": {"text": message}
-            })
-            return f"消息已发送到群组 {room_id}"
-        
-        # return [create_room, join_room, leave_room, send_group_message]
-        return [join_room, leave_room, send_group_message]
-    
-    def _create_log_memory(self):
-        @tool
-        async def log_memory(description: str, result: str, task_complete: bool = False, config: RunnableConfig = None) -> str:
-            """
-            记录当前任务的执行步骤或最终总结。
-            当 task_complete=True 时，将整个任务提交给反思模块进行离线分析。
-
-            :param description: 步骤描述或任务总结
-            :param result: 执行结果
-            :param task_complete: 是否完成任务
-            :return: 提示信息
-            """
-            # 从 config 中提取 thread_id
-            thread_id = config.get("configurable", {}).get("thread_id") if config else None
-            if not thread_id:
-                return "错误：无法获取当前对话 ID。"
-
-            self.task_buffer.add_step(thread_id, description, result)
             
-            if task_complete:
-                final_result = "success" if "成功" in result else "failure"
-                task_data = self.task_buffer.finish_task(thread_id, final_result)
-                if task_data:
-                    # 启动后台任务（不等待）
-                    asyncio.create_task(self._process_reflection(task_data))
-                return f"步骤已记录，任务结束，将进行经验反思。"
-            else:
-                return "步骤已记录。"
-        
-        return log_memory
-    
     async def _process_reflection(self, task_data):
         """异步处理反思（避免在工具内部阻塞）"""
         await asyncio.to_thread(submit_task_for_reflection, task_data)
@@ -1328,7 +1020,7 @@ class Brain:
                         ids.add(hash(msg.content))
                 return ids
         except Exception as e:
-            print(f"加载已发送ID失败: {e}")
+            logger.warning(f"加载已发送ID失败: {e}")
         return set()
     
     async def _get_conversation_history_for_termination(self, thread_id: str, max_messages: int = 20):
@@ -1413,10 +1105,13 @@ class Brain:
                 content = "\n".join(lines)
             data = json.loads(content)
             terminate = data.get("should_terminate", False)
-            # 缓存结果
-            self._termination_cache[thread_id] = (terminate, time.time())
+            # 缓存结果（先清理过期条目，防止内存无限增长）
+            if len(self._termination_cache) > 100:
+                cutoff = now - 300  # 5 分钟
+                self._termination_cache = {k: v for k, v in self._termination_cache.items() if v[1] > cutoff}
+            self._termination_cache[thread_id] = (terminate, now)
             return terminate
         except Exception as e:
-            print(f"终止判断失败: {e}")
+            logger.warning(f"终止判断失败: {e}")
             return False  # 出错时不终止
 

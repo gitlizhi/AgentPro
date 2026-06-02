@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Set
 
@@ -14,6 +15,8 @@ from agent.memory import get_memory
 from agent.db import get_pool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from config import config
+
+logger = logging.getLogger(__name__)
 
 # ---------- 配置 ----------
 EXTRACT_INTERVAL_SECONDS = 300       # 每5分钟扫描一次
@@ -137,7 +140,7 @@ async def process_user_conversation(user_id: str, thread_id: str, force: bool = 
                 "thread_id": thread_id,
                 "type": "fact"
             })
-            print(f"[MEM] Extracted {len(final_facts)} new facts for {user_id} ({len(new_facts) - len(final_facts)} duplicates filtered)")
+            logger.info(f"Extracted {len(final_facts)} new facts for {user_id} ({len(new_facts) - len(final_facts)} duplicates filtered)")
 
     # 处理 events：直接存储（可用相似度去重，但事件通常不重复）
     if new_events:
@@ -157,7 +160,7 @@ async def process_user_conversation(user_id: str, thread_id: str, force: bool = 
                     "extracted_at": datetime.now().isoformat()
                 }
             )
-        print(f"[MEM] Extracted {len(new_events)} new events for {user_id}")
+        logger.info(f"Extracted {len(new_events)} new events for {user_id}")
         
     # 更新记录：保存新的消息总数
     memory.set_user_metadata("__system__", f"last_msg_count_{user_id}_{thread_id}", str(current_count))
@@ -165,16 +168,16 @@ async def process_user_conversation(user_id: str, thread_id: str, force: bool = 
 
 async def conversation_memory_worker():
     """后台工作器：定期扫描活跃线程并提取记忆"""
-    print("[MEM] Starting conversation memory extractor worker...")
+    logger.info("Starting conversation memory extractor worker...")
     pool = get_pool()
     while True:
         try:
             active_threads = await get_active_threads(pool)
-            print(f"[MEM] Found {len(active_threads)} active threads to check")
+            logger.debug(f"Found {len(active_threads)} active threads to check")
             for thread_id, user_id in active_threads:
                 await process_user_conversation(user_id, thread_id)
             # 等待下一次扫描
             await asyncio.sleep(EXTRACT_INTERVAL_SECONDS)
         except Exception as e:
-            print(f"[MEM] Error in conversation memory worker: {e}")
+            logger.error(f"Error in conversation memory worker: {e}", exc_info=True)
             await asyncio.sleep(EXTRACT_INTERVAL_SECONDS)
