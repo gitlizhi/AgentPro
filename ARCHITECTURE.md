@@ -65,6 +65,7 @@ AgentPro 是一个基于 LangGraph + LangChain 的多智能体协作平台。多
 |------|------|------|
 | **Agent 主控** | `agent/core.py` | WebSocket 连接管理、消息路由分发、房间成员缓存 |
 | **Brain 决策层** | `agent/brain.py` | LLM 调用、意图识别、工具注册、对话管理、任务缓冲 |
+| **Context 管理** | `agent/context_manager.py` | Token 预算跟踪、工具输出压缩、上下文中间件 |
 | **Communication** | `agent/communication.py` | WebSocket 客户端，与 Hub 通信 |
 | **Prompt 管理** | `agent/prompts.py` | 所有 LLM 提示词集中管理 |
 | **模型配置** | `agent/model_config.py` | 多模型兼容（DeepSeek、OpenAI、Anthropic、Ollama）+视觉模型 |
@@ -80,9 +81,12 @@ Agent (core.py)
   ├── Brain (brain.py)
   │     ├── LangGraph Agent (deepagents)
   │     │     ├── SubAgents (反思、技能)
-  │     │     ├── SummarizationMiddleware
+  │     │     ├── SummarizationMiddleware (历史消息摘要)
+  │     │     ├── ToolOutputCompactionMiddleware (工具输出压缩)
   │     │     ├── FilesystemMiddleware
   │     │     └── TodoListMiddleware
+  │     ├── ContextManager (token 预算 + 工具输出压缩)
+  │     ├── Agent 专属上下文 (agent/agent_context/{agent_id}.md)
   │     ├── ConversationTracker (轮次计数+硬上限)
   │     ├── TaskBuffer (任务步骤缓冲)
   │     ├── LongTermMemory (ChromaDB + 按需加载)
@@ -169,6 +173,154 @@ class MessageBuffer:
 - 接收循环内的非致命错误（JSON 解析失败、单条消息处理异常）不触发重连，仅记录日志并继续
 - 只有 `ConnectionClosed` 才退出接收循环触发重连
 - `close()` 设置 `_running=False` 后循环自然退出，不会无限重连
+
+### 3.6 上下文管理（Context Management）
+
+上下文管理系统借鉴了 Claude Code 的分层上下文模型，将系统指令、动态上下文、用户输入清晰地分离到不同的消息角色中，并通过主动的 token 预算跟踪和工具输出压缩来维持上下文窗口的健康状态。
+
+**核心理念**：系统级信息走 `SystemMessage`，用户输入走 `HumanMessage`，角色边界清晰——LLM 能够区分"指令"和"输入"。
+
+#### 3.6.1 上下文分层模型
+
+```
+┌──────────────────────────────────────────────┐
+│  Layer 1: 静态系统提示词 (System Prompt)       │
+│  - BRAIN_BASE_PROMPT（角色、工具、规则）       │
+│  - BRAIN_REFLECTION_GUIDE（反思指南）          │
+│  - BRAIN_DESKTOP_INSTRUCTIONS（桌面指令）      │
+│  - Agent 专属上下文文件（*.md）                 │
+├──────────────────────────────────────────────┤
+│  Layer 2: 动态上下文 (SystemMessage)           │
+│  - 对话对象信息（人类/其他 Agent）              │
+│  - 对话轮次警告（ConversationTracker）         │
+│  - 群聊上下文（房间 ID、成员列表、规则）        │
+│  - 图片描述（视觉模型输出）                     │
+│  - 相关技能经验（ChromaDB 检索注入）            │
+├──────────────────────────────────────────────┤
+│  Layer 3: 用户消息 (HumanMessage)             │
+│  - 仅包含用户实际输入的内容                     │
+│  - 不再混入任何系统级上下文前缀或后缀            │
+├──────────────────────────────────────────────┤
+│  Layer 4: 工具输出后处理                       │
+│  - ToolOutputCompactionMiddleware            │
+│  - 超过 2000 字符的工具结果自动压缩              │
+│  - 完整输出保存到 agent/agent_temp/tool_outputs/ │
+└──────────────────────────────────────────────┘
+```
+
+**对比旧方案**：
+
+| 方面 | 旧方案（注入式） | 新方案（分层式） |
+|------|-----------------|-------------------|
+| 系统上下文位置 | 拼接到 HumanMessage 前缀 | 独立的 SystemMessage |
+| 技能经验注入 | 拼接到 HumanMessage 后缀 | 追加到 SystemMessage 列表 |
+| Token 预算感知 | 无 | 主动跟踪，80% 警告，85% 触发压缩 |
+| 工具输出控制 | 无全局策略 | 自动压缩超长输出（>2000 字符） |
+| Agent 上下文文件 | 无 | `agent/agent_context/{agent_id}.md` |
+
+#### 3.6.2 消息构建流程
+
+```
+Brain._handle_with_agent() / _process_agent_message()
+  │
+  ├── 1. _build_system_contexts(image_data)
+  │     ├── 对话对象信息（人类/Agent + 在线状态）
+  │     ├── 对话轮次警告（如有）
+  │     ├── 群聊上下文（如有）
+  │     └── 图片描述（如有）
+  │
+  ├── 2. 追加技能经验（super_user 路径）
+  │     └── _get_relevant_skill_lessons() → ChromaDB 语义检索
+  │
+  ├── 3. 构建消息列表
+  │     ├── {"role": "system", "content": ctx1}
+  │     ├── {"role": "system", "content": ctx2}
+  │     └── {"role": "user", "content": user_input}  ← 纯净的用户输入
+  │
+  └── 4. Token 预算检查（仅 super_user）
+        └── context_manager.check_budget() → 超出 80% 时通知用户
+```
+
+#### 3.6.3 Token 预算管理
+
+`agent/context_manager.py` 中的 `TokenBudget` 类使用字符计数启发式估算 token 用量：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `DEFAULT_TOKEN_BUDGET` | 80,000 | 总预算（DeepSeek V4 上下文窗口 128K，保守预算） |
+| `CHARS_PER_TOKEN` | 2.8 | 字符/token 比率（中英文混合的保守估计） |
+| `WARN_THRESHOLD` | 80% | 超过此比例通过 `_safe_send` 提醒用户 |
+| `COMPACT_THRESHOLD` | 85% | 超过此比例触发 SummarizationMiddleware 提前压缩 |
+
+预算检查在每次 `_handle_with_agent` 调用时执行（仅在 super_user 路径），一次性提醒，不在每次流事件中重复。
+
+#### 3.6.4 工具输出压缩
+
+`ToolOutputCompactionMiddleware` 作为 LangChain AgentMiddleware 注册在中间件链中，在**每次工具执行后**拦截 `ToolMessage`，检查内容长度：
+
+```
+工具执行 → handler(request) 返回 ToolMessage
+  → ToolOutputCompactionMiddleware.awrap_tool_call
+    → content > 2000 字符？
+      ├── 否 → 原样返回
+      └── 是 → 压缩处理：
+            ├── 保留前 2000 字符
+            ├── 保留末尾 300 字符（通常含状态/错误信息）
+            ├── 中间标注省略字符数
+            ├── 完整输出写入 agent/agent_temp/tool_outputs/{tool}_{hash}.txt
+            └── 返回压缩后的 ToolMessage
+```
+
+**压缩格式示例**：
+```
+[前 2000 字符内容...]
+
+[... 中间省略 15234 字符 ...]
+
+[末尾 300 字符内容...]
+
+[完整输出已保存至 agent/agent_temp/tool_outputs/tavily_search_a1b2c3d4.txt，共 17534 字符]
+```
+
+#### 3.6.5 Agent 专属上下文文件
+
+类似 Claude Code 的 `CLAUDE.md`，每个 Agent 可以在 `agent/agent_context/{agent_id}.md` 中定义专属的持久化上下文：
+
+- **加载时机**：Agent 启动时（`Brain.__init__`）
+- **注入位置**：静态系统提示词末尾（`_build_system_prompt` 方法）
+- **格式**：自由 Markdown，建议包含角色定义、工作原则、约束条件等
+- **缺失处理**：文件不存在时静默跳过，不影响正常启动
+
+**示例**（`agent/agent_context/agent_main.md`）：
+```markdown
+## 角色
+你是 AgentPro 平台的主智能体，负责协调其他子智能体完成复杂任务。
+
+## 工作原则
+- 优先复用已有技能，避免重复造轮子
+- 复杂任务优先考虑委派给子智能体
+- 保持回复简洁专业
+```
+
+**注意事项**：上下文文件的内容会在**每一轮对话**中都占用 token，应保持精简。如需大量操作指南，应使用技能系统（`load_skill`）按需加载。
+
+#### 3.6.6 上下文管理的中间件链
+
+`Brain.__init__` 中注册的中间件按顺序执行：
+
+```
+1. SummarizationMiddleware
+   - 触发条件：历史 token > 20,000
+   - 保留策略：最近 30 条消息 + 保持 AI/Tool 消息对完整性
+   - 行为：旧消息替换为摘要 HumanMessage
+
+2. ToolOutputCompactionMiddleware
+   - 触发条件：每次工具调用后
+   - 保留策略：>2000 字符的工具输出压缩为头+尾+引用
+   - 行为：返回压缩后的 ToolMessage
+```
+
+两条中间件互补：`SummarizationMiddleware` 处理**历史消息的总量控制**，`ToolOutputCompactionMiddleware` 处理**单条工具输出的粒度控制**。
 
 ---
 
@@ -489,6 +641,10 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | 浏览器多层反检测体系 | 单层反检测（如仅修改 navigator.webdriver）已无法应对现代检测。采用纵深防御：Chrome 启动参数 + 真实 UA + playwright-stealth JS 注入 + CDP 连接系统 Chrome（TLS 指纹匹配），逐层加码直至通过 |
 | `_safe_send` 统一 WebSocket 发送 | 原有代码中多处裸调 `send_to_agent`，一次 WebSocket 异常即可中断整个 astream 流或抑制 CancelledError。`_safe_send` 将异常降级为日志警告，适用于通知类消息（状态、错误提示、工具进度）；关键消息（审批请求）仍独立 try/except |
 | 工具进度双通道架构 | 工具调用信息通过两条独立的通道到达前端：① `tool_call_start`/`tool_call_end` 结构化事件 → 输入框上方状态条（实时进度）；② 同一条消息的 text 字段 → 聊天记录中的可折叠条目（历史回溯）。两通道在 `client.py` 中通过 `payload.type` 分流，互不干扰 |
+| 系统上下文 SystemMessage 而非 HumanMessage | 借鉴 Claude Code 的分层上下文模型。动态上下文（对话对象、轮次警告、群聊信息、图片描述、技能经验）作为 `SystemMessage` 注入，用户消息仅包含用户实际输入。LLM 能清晰区分"指令"和"输入"，避免角色边界模糊 |
+| Token 预算主动跟踪 | 使用字符计数启发式估计 token 用量（保守比率 2.8 字符/token），在 80% 时主动通知用户，85% 时触发 SummarizationMiddleware 提前压缩。相比纯被动等待中间件触发（20K token），主动预算让用户有心理预期 |
+| 工具输出自动压缩 | 单条工具输出超 2000 字符时自动压缩为头+尾+省略标记+文件引用的格式。防止单次大结果（如网页抓取 50KB HTML）撑爆上下文窗口。完整输出保存到临时文件供后续查阅 |
+| Agent 专属上下文文件（CLAUDE.md 模式） | 每个 Agent 在 `agent/agent_context/{agent_id}.md` 中定义持久化上下文，启动时注入系统提示词。内容需精简（每轮都消耗 token），大量操作指南应使用技能系统按需加载 |
 
 ### 11.3 工具调用进度流
 
@@ -1085,9 +1241,11 @@ args=[
 | `main.py` | 入口，初始化数据库/调度器/智能体/后台 worker |
 | `config.py` | 全局配置 |
 | `agent/core.py` | Agent 主控，消息路由 |
-| `agent/brain.py` | LLM 决策，工具注册，对话管理 |
+| `agent/brain.py` | LLM 决策，工具注册，对话管理，上下文编排 |
+| `agent/context_manager.py` | Token 预算跟踪 + 工具输出压缩 + 上下文中间件 |
 | `agent/communication.py` | WebSocket 客户端 |
 | `agent/prompts.py` | 所有 LLM 提示词 |
+| `agent/agent_context/*.md` | Agent 专属上下文文件（类似 Claude Code 的 CLAUDE.md） |
 | `agent/conversation_tracker.py` | 智能体对话轮次控制 |
 | `agent/task_buffer.py` | 任务步骤缓冲 |
 | `agent/memory.py` | ChromaDB 记忆存储 + 用户画像按需读取 |

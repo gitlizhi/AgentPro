@@ -42,6 +42,7 @@ AgentPro 是一个**生产级多智能体协作平台**。多个 AI Agent 通过
         ├── 💬  多智能体私聊 / 群聊协作
         ├── 🧠  长期记忆（ChromaDB）+ 短期记忆（PostgreSQL）
         ├── 🔄  记忆转经验 → 自动生成可复用技能
+        ├── 📐  上下文管理（SystemMessage 分层 + Token 预算 + 工具输出压缩）
         ├── 🖥️  Computer Use（桌面自动化：鼠标/键盘/OCR/视觉定位）
         ├── 🌐  浏览器自动化（Playwright）
         ├── 📦  Docker 沙箱代码执行
@@ -89,6 +90,7 @@ AgentPro 是一个**生产级多智能体协作平台**。多个 AI Agent 通过
 | **技能系统** | `SKILL.md` + 脚本定义可扩展技能，渐进式披露，按需加载 |
 | **多模型支持** | DeepSeek / 智谱 GLM / OpenAI / Anthropic / Ollama，一键切换 |
 | **多模态** | 支持视觉模型（GLM-4.6V / GLM-4.1V-Thinking-Flash）处理图片 |
+| **上下文管理** | 借鉴 Claude Code 分层模型：SystemMessage/HumanMessage 角色分离、Token 预算主动跟踪、工具输出自动压缩、Agent 专属上下文文件 |
 
 ---
 
@@ -120,6 +122,7 @@ AgentPro 是一个**生产级多智能体协作平台**。多个 AI Agent 通过
    │     ├── Computer Tools (19 个桌面自动化工具)
    │     ├── Browser Tools (Playwright)
    │     ├── DockerSandboxBackend
+   │     ├── ContextManager (token 预算 + 工具压缩)
    │     ├── ConversationTracker (轮次控制)
    │     ├── TaskBuffer (任务缓冲)
    │     └── ChromaDB Memory
@@ -234,6 +237,7 @@ python main.py
 AgentPro/
 ├── agent/                          # 核心智能体模块
 │   ├── brain.py                    # 大脑决策层（LLM 调用、意图识别、工具注册）
+│   ├── context_manager.py          # 上下文管理（Token 预算 + 工具输出压缩）
 │   ├── core.py                     # 智能体主类（WebSocket 管理、消息路由）
 │   ├── communication.py            # WebSocket 客户端
 │   ├── computer_tools.py           # Computer Use：19 个桌面自动化工具
@@ -266,6 +270,7 @@ AgentPro/
 │   └── server.py                   # 中心消息路由 + 房间管理
 │
 ├── agent_memory/                   # 长期记忆 Markdown 文件
+├── agent/agent_context/            # Agent 专属上下文文件（CLAUDE.md 模式）
 ├── chroma_db/                      # ChromaDB 持久化目录
 ├── screenshots/                    # 桌面截图保存目录
 │
