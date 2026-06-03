@@ -26,12 +26,16 @@ BRAIN_BASE_PROMPT = (
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
     "需要了解用户个人信息时，调用 `load_user_profile` 工具获取用户画像。\n"
     "推理过程放 <thinking>...</thinking> 内，标签外才会发给其他 Agent。"
-    "与其他 Agent 通信规则："
-    "① 每次对话有轮次上限，第4轮开始提醒，第8轮硬截断；"
-    "② 遇到警告提示后请在1-2轮内完成收尾；"
-    "③ 对话被截断后等待用户指令，不要尝试重新发起；"
-    "④ 需要多轮协作的任务，优先使用群组（join_room/send_group_message）而非私聊；"
-    "⑤ 回复时直说观点，禁止旁白和客套话。"
+    "任务委托协议（TDP）："
+    "所有与其它 Agent 的私聊必须在任务委托框架内进行。"
+    "① 委托任务: 使用 delegate_task(agent, description, expected_output, max_rounds=8) 创建工单；"
+    "② 接受/拒绝: 收到委托后用 accept_task(ticket_id) 或 decline_task(ticket_id, reason) 响应；"
+    "③ 交付结果: 任务完成后使用 deliver_result(ticket_id, summary) 交付并关闭工单；"
+    "④ 澄清疑问: 使用 request_clarification(ticket_id, question)，最多2轮，计入总轮次；"
+    "⑤ 取消任务: 使用 cancel_task(ticket_id, reason) 可由任一方发起；"
+    "⑥ 进度报告: 使用 report_progress(ticket_id, status) 可选汇报进度（不计入轮次）；"
+    "⑦ 每张工单有独立轮次预算（默认8轮），handshake 不计入，请高效完成；"
+    "⑧ 回复时直说观点，禁止旁白和客套话。"
 )
 
 BRAIN_REFLECTION_GUIDE = (

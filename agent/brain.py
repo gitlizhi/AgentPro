@@ -10,6 +10,7 @@ import os
 import asyncio
 
 from agent.conversation_tracker import ConversationTracker
+from agent.delegation import DelegationManager, TaskTicket, TicketState, TicketError
 from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -25,6 +26,7 @@ from agent.tools_factory import (
     create_send_to_agent_tool,
     create_room_tools,
     create_log_memory_tool,
+    create_delegation_tools,
 )
 from deepagents import create_deep_agent, SubAgent
 # from deepagents.backends.filesystem import FilesystemBackend
@@ -91,8 +93,13 @@ class Brain:
             db_pool = get_pool()
         self.checkpointer = AsyncPostgresSaver(db_pool)
         
-        # 智能体对话追踪器（轮次计数 + 逐级降级 + 硬上限）
+        # 智能体对话追踪器（轮次计数 + 逐级降级 + 硬上限）— 旧兜底机制
         self.conversation_tracker = ConversationTracker()
+        # TDP 任务委托管理器（主控制机制）
+        self.delegation_manager = DelegationManager()
+        self._tdp_notification = None  # 当前待处理的 TDP 通知 payload
+        self._timeout_loop_started = False  # 工单超时循环惰性启动
+        self._in_flight_tools = []  # 当前正在执行的工具名称列表（用于中断时清理）
         self.group_context = None  # 当前消息的群聊上下文
         # 和其他Agent交互工具
         self.send_to_agent_tool = create_send_to_agent_tool(self)
@@ -161,7 +168,8 @@ class Brain:
         # ========== 反思子代理定义结束 ==========
 
         # 自定义工具
-        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS
+        delegation_tools = create_delegation_tools(self)
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -214,9 +222,33 @@ class Brain:
             parts.append(
                 f"[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
             )
-            warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
-            if warning:
-                parts.append(warning)
+
+            # ── TDP 工单上下文注入 ──
+            ticket = self.delegation_manager.get_active_ticket(self.agent_id, self.user_id)
+            if ticket:
+                role = "委托方" if ticket.issuer == self.agent_id else "被委托方"
+                parts.append(
+                    f"\n[任务委托上下文]"
+                    f"\n工单ID: {ticket.ticket_id}"
+                    f"\n你的角色: {role}"
+                    f"\n任务描述: {ticket.description}"
+                    f"\n期望产出: {ticket.expected_output}"
+                    f"\n轮次进度: {ticket.round_count}/{ticket.max_rounds}"
+                    f"\n当前状态: {ticket.state.value}"
+                )
+                if ticket.state == TicketState.PENDING and ticket.assignee == self.agent_id:
+                    parts.append("⚠️ 请使用 accept_task 接受此委托，或 decline_task 拒绝。")
+                elif ticket.state == TicketState.ACCEPTED and ticket.assignee == self.agent_id:
+                    parts.append("委托已接受，请开始执行任务。完成后使用 deliver_result 交付结果。")
+
+                tdp_warning = ticket.get_warning_hint(self.user_id)
+                if tdp_warning:
+                    parts.append(tdp_warning)
+            else:
+                # 无活跃工单时使用旧 ConversationTracker 警告
+                warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
+                if warning:
+                    parts.append(warning)
 
         # -- group chat context -------------------------------------------
         gc = self._build_group_context_prompt()
@@ -239,9 +271,25 @@ class Brain:
             self.sent_msg_ids_by_thread[self.thread_id] = await self._load_sent_ids_from_checkpoint(config)
         return config, self.sent_msg_ids_by_thread[self.thread_id]
 
+    async def _cleanup_in_flight_tools(self):
+        """清理所有未完成的工具调用状态，发送 tool_call_end 通知前端。"""
+        if not self._in_flight_tools:
+            return
+        tools = list(self._in_flight_tools)
+        self._in_flight_tools.clear()
+        for tool_name in tools:
+            await self._safe_send(
+                f"🛠️ {tool_name} 因任务中断而终止",
+                type="tool_call_end",
+                tool_name=tool_name,
+            )
+
     async def _safe_send(self, text: str, **extra) -> bool:
-        """安全发送消息给当前用户。WebSocket/网络异常仅记日志，不向上传播。"""
+        """安全发送消息给当前用户。WebSocket/网络异常仅记日志，不向上传播。
+        自动附加 thread_id，供前端正确路由消息到对应会话。"""
         payload = {"text": text, **extra}
+        if self.user_id == 'super_user' and self.thread_id:
+            payload['thread_id'] = self.thread_id
         try:
             await self.comm.send_to_agent(self.user_id, payload)
             return True
@@ -512,6 +560,48 @@ class Brain:
             self._current_task.cancel()
             logger.info(f"Task cancelled for agent {self.agent_id}")
 
+    def _ensure_timeout_loop_started(self):
+        """惰性启动工单超时检测后台循环（仅首次调用生效）"""
+        if not self._timeout_loop_started:
+            self._timeout_loop_started = True
+            self.schedule_background_task(self._ticket_timeout_loop())
+
+    async def _ticket_timeout_loop(self, interval_seconds: int = 60):
+        """后台循环：定期检查工单是否空闲超时并自动终止。"""
+        from agent.delegation import DEFAULT_IDLE_TIMEOUT_MINUTES
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                timed_out = self.delegation_manager.check_timeouts(DEFAULT_IDLE_TIMEOUT_MINUTES)
+                for ticket in timed_out:
+                    logger.info(f"工单 {ticket.ticket_id} 空闲超时，自动终止")
+                    await self._safe_send(
+                        f"⏰ 工单 {ticket.ticket_id}（{ticket.description[:50]}...）空闲超时，已自动终止。"
+                    )
+                    # 通知双方
+                    try:
+                        other = ticket.issuer if self.agent_id == ticket.assignee else ticket.assignee
+                        await self.comm.send_to_agent(other, {
+                            "text": f"[TDP] 工单 {ticket.ticket_id} 因 {DEFAULT_IDLE_TIMEOUT_MINUTES} 分钟无活动而自动超时。",
+                            "_tdp": "cancel",
+                            "ticket_id": ticket.ticket_id,
+                        })
+                    except Exception:
+                        pass
+                    try:
+                        await self.comm.send_to_agent("super_user", {
+                            "text": (
+                                f"⏰ [TDP超时] 工单 {ticket.ticket_id} "
+                                f"({ticket.issuer} -> {ticket.assignee}) 因 {DEFAULT_IDLE_TIMEOUT_MINUTES} 分钟无活动而超时。"
+                            )
+                        })
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"工单超时检测异常: {e}")
+
     def get_thread_id(self, new_thread, chat_id):
         # new_thread 优先级最高：强制开启新对话
         if new_thread:
@@ -744,32 +834,66 @@ class Brain:
         return result
      
     async def _astream_with_timeout(self, input_state, config, stream_mode="updates",
-                                     per_event_timeout: float = 300):
+                                     per_event_timeout: float = 180,
+                                     idle_timeout: float = 300,
+                                     max_total_timeout: float = 1800):
         """对 agent.astream 的每次 __anext__ 调用增加超时保护，避免流永久挂起。
-        使用 asyncio.wait 代替 wait_for，避免 Python 3.12 将内部 CancelledError 掩码为 TimeoutError。"""
+
+        三层超时设计（按优先级）：
+        1. per_event_timeout (180s): 单次 __anext__() 最大等待时间，覆盖慢 LLM/tool 调用
+        2. idle_timeout (300s): 持续无事件的空闲时间，每次 yield 事件后重置
+        3. max_total_timeout (1800s): 整条流的最大生存时间，绝对安全网
+
+        核心理念：只要在持续产出事件（工具调用/LLM响应），就视为"健康推进"，
+        idle_timer 不断刷新。只有彻底无响应时才判定为挂死。
+
+        使用 asyncio.wait 代替 wait_for，避免 Python 3.12 将内部 CancelledError 掩码为 TimeoutError。
+        """
         agen = self.agent.astream(input_state, config, stream_mode=stream_mode)
-        deadline = asyncio.get_event_loop().time() + per_event_timeout
+        total_deadline = asyncio.get_event_loop().time() + max_total_timeout
+        last_event_time = asyncio.get_event_loop().time()
+
         while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError(f"astream ({stream_mode}) timed out after {per_event_timeout}s")
+            now = asyncio.get_event_loop().time()
+
+            # ── 检查总安全网 ──
+            if now >= total_deadline:
+                elapsed = int(max_total_timeout)
+                raise asyncio.TimeoutError(
+                    f"astream ({stream_mode}) 达到最大总时长限制 ({elapsed}s)，任务可能过于复杂，请拆分后重试。"
+                )
+
+            # ── 检查空闲超时（自上次事件以来的沉寂时间）──
+            idle_elapsed = now - last_event_time
+            if idle_elapsed >= idle_timeout:
+                raise asyncio.TimeoutError(
+                    f"astream ({stream_mode}) 已 {int(idle_elapsed)}s 无响应（空闲阈值 {idle_timeout}s），判定为挂死。"
+                )
+
+            # ── 本次等待的事件级超时：取 per_event 和 剩余空闲时间的最小值 ──
+            event_wait = min(per_event_timeout, idle_timeout - idle_elapsed)
 
             next_task = asyncio.ensure_future(agen.__anext__())
             try:
-                done, _ = await asyncio.wait([next_task], timeout=min(remaining, 120))
+                done, _ = await asyncio.wait([next_task], timeout=event_wait)
             except asyncio.CancelledError:
                 next_task.cancel()
                 raise
 
             if not done:
                 next_task.cancel()
-                raise asyncio.TimeoutError(f"astream ({stream_mode}) timed out waiting for next event")
+                raise asyncio.TimeoutError(
+                    f"astream ({stream_mode}) 等待下一个事件超过 {event_wait:.0f}s，超时。"
+                )
 
             exc = next_task.exception()
             if exc is not None:
                 if isinstance(exc, StopAsyncIteration):
                     break
                 raise exc
+
+            # 事件产出 → 刷新空闲计时器
+            last_event_time = asyncio.get_event_loop().time()
             yield next_task.result()
 
     async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
@@ -785,6 +909,64 @@ class Brain:
 
         # 如果是 Agent 之间的对话，委托给 MessageBuffer 延迟合并
         if self.user_id != 'super_user':
+            # 惰性启动工单超时循环
+            self._ensure_timeout_loop_started()
+
+            # ── TDP 通知处理：检测委托/接受/拒绝/交付/取消/澄清/进度通知 ──
+            tdp = self._tdp_notification
+            if tdp:
+                tdp_type = tdp.get("_tdp", "")
+                tdp_ticket_id = tdp.get("ticket_id", "")
+                dm = self.delegation_manager
+
+                if tdp_type == "delegation" and tdp_ticket_id:
+                    # 收到委托通知 — 在 assignee 侧创建镜像工单
+                    existing = dm.get_ticket(tdp_ticket_id)
+                    if not existing:
+                        # 用描述中的关键信息创建工单（assignee 侧视角）
+                        desc = tdp.get("text", user_input)[:500]
+                        try:
+                            # 不使用 create_ticket（会检测 pair 冲突），直接创建
+                            import uuid as _uuid
+                            ticket = TaskTicket(
+                                ticket_id=tdp_ticket_id,
+                                issuer=self.user_id,
+                                assignee=self.agent_id,
+                                description=desc,
+                                expected_output=tdp.get("expected_output", "未指定"),
+                                max_rounds=tdp.get("max_rounds", 8),
+                            )
+                            dm._by_id[tdp_ticket_id] = ticket
+                            dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
+                            logger.info(f"TDP 镜像工单已创建: {tdp_ticket_id} (assignee={self.agent_id})")
+                        except Exception as e:
+                            logger.warning(f"创建 TDP 镜像工单失败: {e}")
+                elif tdp_type == "delivery" and tdp_ticket_id:
+                    # 收到交付通知 — issuer 侧确认
+                    ticket = dm.get_ticket(tdp_ticket_id)
+                    if ticket and ticket.is_active:
+                        try:
+                            dm.transition(tdp_ticket_id, TicketState.CLOSED)
+                            ticket.result_summary = user_input[:500]
+                        except TicketError:
+                            pass
+                elif tdp_type == "acceptance" and tdp_ticket_id:
+                    ticket = dm.get_ticket(tdp_ticket_id)
+                    if ticket and ticket.state == TicketState.PENDING:
+                        try:
+                            dm.transition(tdp_ticket_id, TicketState.ACCEPTED)
+                        except TicketError:
+                            pass
+                elif tdp_type in ("decline", "cancel") and tdp_ticket_id:
+                    ticket = dm.get_ticket(tdp_ticket_id)
+                    if ticket and ticket.is_active:
+                        try:
+                            dm.cancel_ticket(tdp_ticket_id, f"TDP {tdp_type} 通知", self.user_id)
+                        except TicketError:
+                            pass
+
+                self._tdp_notification = None  # 消费后清空
+
             async def on_process(full_text: str, saved_ctx: dict):
                 if saved_ctx:
                     self.group_context = saved_ctx
@@ -882,15 +1064,22 @@ class Brain:
                                             tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
                                             if tc_id not in sent_ids:
                                                 sent_ids.add(tc_id)
+                                                tool_name = tc.get("name")
+                                                self._in_flight_tools.append(tool_name)
                                                 await self._safe_send(
-                                                    f"🔧 调用工具: {tc['name']}",
+                                                    f"🔧 调用工具: {tool_name}",
                                                     type="tool_call_start",
-                                                    tool_name=tc.get("name"),
+                                                    tool_name=tool_name,
                                                     tool_args=tc.get("args", {}),
                                                 )
                                     elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
                                         sent_ids.add(msg_id)
                                         tool_name = getattr(msg, 'name', 'unknown_tool')
+                                        # 从 in-flight 列表中移除匹配的工具
+                                        try:
+                                            self._in_flight_tools.remove(tool_name)
+                                        except ValueError:
+                                            pass  # 可能已被清理
                                         await self._safe_send(
                                             f"🛠️ 工具返回: {msg.content}",
                                             type="tool_call_end",
@@ -909,37 +1098,42 @@ class Brain:
             logger.error("Agent stream timed out in _handle_with_agent")
             if self.user_id == 'super_user' and not silent:
                 await self._safe_send("处理超时，请重试或简化请求。")
+            await self._cleanup_in_flight_tools()
         except asyncio.CancelledError:
+            await self._cleanup_in_flight_tools()
             raise
         except (OSError, ConnectionError) as e:
             logger.error(f"Agent stream network error in _handle_with_agent: {e}")
             if self.user_id == 'super_user' and not silent:
                 await self._safe_send(f"网络连接失败：{e}。请检查代理设置或网络连接后重试。")
+            await self._cleanup_in_flight_tools()
         except Exception as e:
             logger.error(f"Agent stream error in _handle_with_agent: {type(e).__name__}: {e}", exc_info=True)
             if self.user_id == 'super_user' and not silent:
                 await self._safe_send(f"处理请求时遇到错误 ({type(e).__name__})，请重试。")
+            await self._cleanup_in_flight_tools()
     
     async def _process_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
-        # ---- 使用 tracker 管理的 thread_id，每次新会话自动隔离 checkpoint ----
-        self.thread_id = self.conversation_tracker.get_or_create_thread_id(self.agent_id, self.user_id)
-        
-        # ===== 新增：记录收到的消息（有助于任务活跃检测） =====
+        # ---- TDP 优先：使用活跃工单的 thread_id ----
+        active_ticket = self.delegation_manager.get_active_ticket(self.agent_id, self.user_id)
+        if active_ticket and active_ticket.thread_id:
+            self.thread_id = active_ticket.thread_id
+            active_ticket.last_activity = time.time()
+        else:
+            # 兜底：使用旧 tracker 管理的 thread_id
+            self.thread_id = self.conversation_tracker.get_or_create_thread_id(self.agent_id, self.user_id)
+
+        # ===== 记录收到的消息（有助于任务活跃检测） =====
         if hasattr(self, 'task_buffer') and self.thread_id:
             self.task_buffer.add_step(
                 self.thread_id,
                 f"收到来自 {self.user_id} 的消息",
                 user_input[:500]
             )
-            
-        # ---- P0: 检查对话是否已被硬截断 ----
-        if self.conversation_tracker.is_capped(self.agent_id, self.user_id):
-            logger.info(f"对话 {self.agent_id}<->{self.user_id} 已截断，跳过消息处理")
-            return
 
-        # ---- P0: 对话上限检查（轮次硬截断 + 逐级警告） ----
+        # ---- P0: 双重门控（TDP + 旧 tracker）----
         if self.conversation_tracker.is_capped(self.agent_id, self.user_id):
-            logger.info(f"对话 {self.thread_id} 已达轮次上限，终止处理")
+            logger.info(f"对话 {self.agent_id}<->{self.user_id} 已被旧 tracker 截断，跳过处理")
             return
         # ----------------------
 
@@ -952,16 +1146,18 @@ class Brain:
             if ctx:
                 messages.append({"role": "system", "content": ctx})
         messages.append({"role": "user", "content": user_input})
-        
+
         input_state = {"messages": messages}
         command = None
-        
+        message_sent = False  # 追踪本轮是否发了 AI 消息
+
         try:
             while True:
                 if command:
                     input_state = Command(resume=command)
 
-                async for event in self._astream_with_timeout(input_state, config, stream_mode="values"):
+                async for event in self._astream_with_timeout(input_state, config, stream_mode="values",
+                    per_event_timeout=120, idle_timeout=180, max_total_timeout=600):
                     if "__interrupt__" in event:
                         interrupts = event["__interrupt__"]
                         decisions = await self._process_interrupts(interrupts)
@@ -971,6 +1167,7 @@ class Brain:
                         if "messages" in event:
                             for msg in event["messages"]:
                                 if await self._send_ai_message(msg, sent_ids):
+                                    message_sent = True
                                     self.task_buffer.add_step(
                                         self.thread_id,
                                         f"向 {self.user_id} 发送消息",
@@ -986,6 +1183,30 @@ class Brain:
             logger.error(f"Agent stream network error in _process_agent_message: {e}")
         except Exception as e:
             logger.error(f"Agent stream error in _process_agent_message: {type(e).__name__}: {e}", exc_info=True)
+
+        # ---- TDP 轮次记录：Agent 发了消息就记录一轮 ----
+        if message_sent and active_ticket and active_ticket.is_active:
+            try:
+                self.delegation_manager.record_round(active_ticket.ticket_id)
+            except TicketError:
+                pass
+
+        # ---- 对话终止检测（语义停滞）----
+        if active_ticket and active_ticket.is_active and active_ticket.round_count >= 3:
+            should_end = await self._should_terminate_conversation(active_ticket.thread_id)
+            if should_end:
+                try:
+                    self.delegation_manager.cancel_ticket(
+                        active_ticket.ticket_id,
+                        "语义停滞检测：对话陷入重复循环",
+                        "system"
+                    )
+                    await self._safe_send(
+                        f"⚠️ 工单 {active_ticket.ticket_id} 检测到对话停滞，已自动终止。"
+                        f"如需继续，请创建新工单。"
+                    )
+                except TicketError:
+                    pass
 
     async def _handle_image(self, image_data: str) -> str | None:
         """处理图片输入，返回视觉模型的结果。失败时返回 None。"""
@@ -1070,6 +1291,8 @@ class Brain:
 
     async def close(self):
         self.msg_buffer.cancel_all()
+        # 取消所有活跃工单
+        self.delegation_manager.cancel_all_for_agent(self.agent_id, "Agent shutting down")
         # 取消并等待 Brain 自身的后台任务
         for task in list(self._bg_tasks):
             task.cancel()
@@ -1087,7 +1310,7 @@ class Brain:
         await asyncio.to_thread(submit_task_for_reflection, task_data)
         
     async def _load_sent_ids_from_checkpoint(self, config):
-        """从 checkpoint 加载已发送的消息 ID 集合"""
+        """从 checkpoint 加载已发送的消息 ID 集合（含 tool_call ID）。"""
         try:
             state = await self.agent.aget_state(config)
             if state and state.values and "messages" in state.values:
@@ -1099,6 +1322,11 @@ class Brain:
                     elif hasattr(msg, 'content') and msg.content:
                         # 备用方案：内容哈希
                         ids.add(hash(msg.content))
+                    # 恢复 tool_call ID，防止对话恢复时重发 tool_call_start 事件
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
+                            ids.add(tc_id)
                 return ids
         except Exception as e:
             logger.warning(f"加载已发送ID失败: {e}")

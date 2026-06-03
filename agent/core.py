@@ -58,7 +58,46 @@ class Agent:
                 sender = data.get("from")
                 # 如果是来自其他 Agent 的消息（非自身），也作为新消息处理
                 if user_input and sender not in [self.agent_id, 'super_user']:
-                    # ---- P0: 已被截断的对话直接丢弃，不创建异步任务 ----
+                    dm = self.brain.delegation_manager
+                    is_tdp = payload.get("_tdp", "")
+
+                    # ── TDP Gate 1: 协议消息（delegation/acceptance/decline 等）直接放行 ──
+                    if not is_tdp:
+                        # ── TDP Gate 2: 检查是否有活跃工单 ──
+                        ticket = dm.get_active_ticket(self.agent_id, sender)
+                        if ticket and ticket.is_terminal:
+                            logger.info(
+                                f"拒绝 {sender} 的消息: 工单 {ticket.ticket_id} 已终止 ({ticket.state.value})"
+                            )
+                            try:
+                                await self.comm.send_to_agent("super_user", {
+                                    "text": (
+                                        f"🚫 [TDP] {sender} 尝试在已终止的工单 {ticket.ticket_id} "
+                                        f"({ticket.state.value}) 中向 {self.agent_id} 发消息，已拒绝。"
+                                    )
+                                })
+                            except Exception:
+                                pass
+                            return
+                        if not ticket:
+                            # ── TDP Gate 3: 无活跃工单，检查旧 tracker 限制 ──
+                            if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
+                                logger.info(f"TDP: {self.agent_id}<->{sender} 无工单且被旧 tracker 截断，丢弃")
+                                return
+                            # 允许通过（兼容旧 send_to_agent 无工单行为），但记录警告
+                            logger.info(f"TDP: {self.agent_id} 收到 {sender} 的无工单消息，允许通过（兼容模式）")
+                    else:
+                        # ── TDP 协议消息：存储 metadata 供 brain 处理 ──
+                        self.brain._tdp_notification = {
+                            "_tdp": is_tdp,
+                            "ticket_id": payload.get("ticket_id", ""),
+                            "text": user_input,
+                            "max_rounds": payload.get("max_rounds", 8),
+                            "expected_output": payload.get("expected_output", ""),
+                        }
+                        logger.debug(f"TDP 协议消息: {is_tdp} ticket={payload.get('ticket_id')}")
+
+                    # ---- P0: 已被截断的对话直接丢弃（兜底） ----
                     if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
                         logger.info(f"对话 {self.agent_id}<->{sender} 已截断，丢弃消息于入口处")
                         return
