@@ -22,7 +22,9 @@
 
 import os
 import re
+import time
 import logging
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from langchain.agents.middleware.types import AgentMiddleware
@@ -55,6 +57,30 @@ MAX_TOOL_OUTPUT_CHARS = 2000
 
 # Directory for storing full tool outputs (created lazily).
 TOOL_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "agent_temp", "tool_outputs")
+
+_cleaned_up = False
+
+
+def cleanup_old_tool_outputs(days: int = 7):
+    """删除超过指定天数的工具输出文件（会话内仅执行一次）。"""
+    global _cleaned_up
+    if _cleaned_up:
+        return
+    _cleaned_up = True
+    dir_path = Path(TOOL_OUTPUT_DIR)
+    if not dir_path.exists():
+        return
+    cutoff = time.time() - days * 86400
+    deleted = 0
+    for f in dir_path.iterdir():
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+    if deleted > 0:
+        logger.info(f"已清理 {deleted} 个过期工具输出文件（>{days}天）")
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +208,7 @@ def compact_tool_output(content: str, tool_name: str = "",
     if len(content) <= max_chars:
         return content
 
+    cleanup_old_tool_outputs()
     os.makedirs(TOOL_OUTPUT_DIR, exist_ok=True)
 
     # Unique filename based on hash of content

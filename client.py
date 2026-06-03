@@ -73,6 +73,64 @@ def init_db():
         cur.execute("""
             ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image TEXT
         """)
+        # ── 编排系统表 ──
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orchestration_plans (
+                plan_id VARCHAR(64) PRIMARY KEY,
+                description TEXT NOT NULL,
+                issuer VARCHAR(255) NOT NULL,
+                state VARCHAR(32) NOT NULL DEFAULT 'planning',
+                completed_count INTEGER DEFAULT 0,
+                failed_count INTEGER DEFAULT 0,
+                created_at DOUBLE PRECISION,
+                updated_at DOUBLE PRECISION
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orchestration_subtasks (
+                plan_id VARCHAR(64) REFERENCES orchestration_plans(plan_id) ON DELETE CASCADE,
+                subtask_id VARCHAR(16) NOT NULL,
+                description TEXT NOT NULL,
+                assigned_to VARCHAR(255),
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                depends_on JSONB DEFAULT '[]',
+                result TEXT,
+                ticket_id VARCHAR(32),
+                suggested_role VARCHAR(128),
+                PRIMARY KEY (plan_id, subtask_id)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_orch_subtasks_ticket
+            ON orchestration_subtasks (ticket_id) WHERE ticket_id IS NOT NULL
+        """)
+        # ── 委托系统表 ──
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS delegation_tickets (
+                ticket_id VARCHAR(32) PRIMARY KEY,
+                issuer VARCHAR(255) NOT NULL,
+                assignee VARCHAR(255) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                expected_output TEXT NOT NULL DEFAULT '',
+                max_rounds INTEGER DEFAULT 8,
+                state VARCHAR(32) NOT NULL DEFAULT 'pending',
+                round_count INTEGER DEFAULT 0,
+                clarification_count INTEGER DEFAULT 0,
+                result_summary TEXT,
+                cancel_reason TEXT,
+                cancelled_by VARCHAR(255),
+                thread_id VARCHAR(255),
+                created_at DOUBLE PRECISION,
+                accepted_at DOUBLE PRECISION,
+                completed_at DOUBLE PRECISION,
+                last_activity DOUBLE PRECISION DEFAULT 0
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair
+            ON delegation_tickets (issuer, assignee)
+            WHERE state NOT IN ('closed','declined','timed_out','cancelled')
+        """)
     conn.commit()
     conn.close()
     migrate_legacy_threads()
@@ -651,7 +709,7 @@ async def launch_agent_endpoint(data: LaunchAgentRequest):
         "--system-prompt", build_launch_agent_prompt(data.expertise)
     ]
     try:
-        if sys.platform == 'win32':
+        if sys.platform == 'win32' and not os.environ.get('AGENT_SHOW_CONSOLE'):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE

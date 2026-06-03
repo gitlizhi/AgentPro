@@ -15,6 +15,9 @@ from agent.delegation import (
     DelegationManager, TaskTicket, TicketState, TicketError,
     DEFAULT_MAX_ROUNDS,
 )
+from agent.orchestration import OrchestrationManager, SubTaskStatus, PlanState
+from agent.prompts import build_task_decomposition_prompt
+from agent.utils import call_big_model_chat
 
 logger = logging.getLogger(__name__)
 
@@ -546,4 +549,201 @@ def create_delegation_tools(brain):
         request_clarification,
         cancel_task,
         report_progress,
+    ]
+
+
+def create_orchestration_tools(brain):
+    """创建编排工具：任务分解、并行派发、进度跟踪、失败重分配。
+
+    在 TDP 之上提供多智能体协同完成复杂任务的能力。
+    """
+    brain_ref = brain
+    om: OrchestrationManager = brain_ref.orchestration_manager
+    dm: DelegationManager = brain_ref.delegation_manager
+    comm = brain_ref.comm
+
+    @tool
+    async def create_task_plan(description: str) -> str:
+        """分析复杂任务并创建结构化执行计划，含子任务、依赖关系和建议智能体角色。
+
+        适用场景：需要多个智能体协作完成的复杂任务。LLM 会自动分解为 2-5 个子任务。
+        生成的计划需要用户审阅确认后，再使用 dispatch_subtasks 派发。
+
+        Args:
+            description: 任务的详细描述
+        """
+        online_agents = list(brain_ref.online_agents) if brain_ref.online_agents else []
+        agents_info = "\n".join(f"- {a}" for a in online_agents) if online_agents else ""
+
+        prompt = build_task_decomposition_prompt(description, agents_info)
+        try:
+            response = await call_big_model_chat(
+                prompt, temperature=0.3, is_json=True,
+            )
+            content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                return "任务分解失败：LLM 返回空响应"
+
+            plan_data = _json.loads(content)
+            subtasks = plan_data.get("subtasks", [])
+            if not subtasks:
+                return "任务分解失败：未生成子任务"
+
+            plan = await om.create_plan(description, brain_ref.agent_id)
+            await om.set_subtasks(plan.plan_id, subtasks)
+
+            result = om.get_progress_summary(plan.plan_id)
+            result += f"\n\n计划 ID: `{plan.plan_id}`"
+            result += f"\n可用智能体: {', '.join(online_agents) if online_agents else '（无在线智能体，启动后再派发）'}"
+            result += "\n请审阅后使用 `dispatch_subtasks` 派发。"
+            return result
+        except _json.JSONDecodeError as e:
+            logger.error(f"Failed to parse task decomposition JSON: {e}")
+            return f"任务分解失败：LLM 返回格式异常。请重试或简化任务描述。"
+        except Exception as e:
+            logger.error(f"Failed to create task plan: {e}", exc_info=True)
+            return f"创建任务计划失败: {e}"
+
+    @tool
+    async def dispatch_subtasks(plan_id: str) -> str:
+        """派发编排计划中所有就绪的子任务给合适的在线智能体。
+
+        子任务的依赖满足后（前序任务已完成）即可派发。
+        每个子任务会创建一个 TDP 工单并通知目标智能体。
+
+        Args:
+            plan_id: create_task_plan 返回的计划 ID
+        """
+        plan = om.get_plan(plan_id)
+        if not plan:
+            return f"未找到计划 {plan_id}。请先使用 create_task_plan 创建计划。"
+
+        ready = plan.get_ready_subtasks()
+        if not ready:
+            # 检查是否有未完成的依赖
+            pending = [s for s in plan.subtasks if s.status == SubTaskStatus.PENDING]
+            if pending:
+                blocked = [f"{s.id} (依赖: {', '.join(s.depends_on)})" for s in pending]
+                return f"没有可派发的子任务。以下子任务被依赖阻塞:\n" + "\n".join(blocked)
+            dispatched = [s for s in plan.subtasks if s.status == SubTaskStatus.DISPATCHED]
+            in_progress = [s for s in plan.subtasks if s.status == SubTaskStatus.IN_PROGRESS]
+            return f"没有待派发的子任务。已派发: {len(dispatched)}, 执行中: {len(in_progress)}"
+
+        online = list(brain_ref.online_agents) if brain_ref.online_agents else []
+        if not online:
+            return "当前没有在线智能体可供派发任务。请等待智能体上线后重试。"
+
+        results = []
+        for st in ready:
+            assigned = None
+            role_hint = (st.suggested_role or "").lower()
+            # 按角色模糊匹配
+            for agent in online:
+                if role_hint and role_hint in agent.lower():
+                    assigned = agent
+                    break
+            if not assigned:
+                # 排除编排者自身，选第一个在线 agent
+                others = [a for a in online if a != brain_ref.agent_id]
+                assigned = others[0] if others else online[0]
+
+            try:
+                ticket = dm.create_ticket(
+                    issuer=brain_ref.agent_id,
+                    assignee=assigned,
+                    description=st.description,
+                    expected_output=f"完成子任务: {st.description}",
+                    max_rounds=12,
+                )
+                await om.dispatch_subtask(plan_id, st.id, assigned, ticket.ticket_id)
+
+                await comm.send_to_agent(assigned, {
+                    "text": (
+                        f"[编排任务] 这是计划 {plan_id} 的子任务 {st.id}。\n"
+                        f"任务: {st.description}\n"
+                        f"完成后请使用 deliver_result 交付结果。"
+                    ),
+                    "_tdp": "delegation",
+                    "_orchestration": plan_id,
+                    "ticket_id": ticket.ticket_id,
+                    "max_rounds": 12,
+                    "expected_output": f"完成子任务: {st.description}",
+                })
+                results.append(f"✅ {st.id} → **{assigned}** (工单 `{ticket.ticket_id}`)")
+            except Exception as e:
+                results.append(f"❌ {st.id} 派发失败: {e}")
+                logger.error(f"Failed to dispatch subtask {st.id}: {e}")
+
+        if plan.state == PlanState.READY:
+            plan.state = PlanState.EXECUTING
+
+        return (
+            f"计划 {plan_id} 已派发 {len(results)} 个子任务:\n"
+            + "\n".join(results)
+            + f"\n\n使用 `check_plan_progress('{plan_id}')` 跟踪进度。"
+        )
+
+    @tool
+    async def check_plan_progress(plan_id: str) -> str:
+        """查看编排计划的整体进度。
+
+        Args:
+            plan_id: 要查询的计划 ID
+        """
+        return om.get_progress_summary(plan_id)
+
+    @tool
+    async def reassign_subtask(plan_id: str, subtask_id: str, new_agent: str) -> str:
+        """将失败的子任务重新分配给另一个智能体。
+
+        Args:
+            plan_id: 计划 ID
+            subtask_id: 要重新分配的子任务 ID（如 st_1）
+            new_agent: 新分配的智能体 ID
+        """
+        plan = om.get_plan(plan_id)
+        if not plan:
+            return f"未找到计划 {plan_id}"
+
+        st = next((s for s in plan.subtasks if s.id == subtask_id), None)
+        if not st:
+            return f"未找到子任务 {subtask_id}（可用: {', '.join(s.id for s in plan.subtasks)}）"
+
+        if st.status not in (SubTaskStatus.FAILED, SubTaskStatus.PENDING):
+            return f"子任务 {subtask_id} 当前状态为 {st.status.value}，只能重新分配失败或待派发的子任务"
+
+        # 重置状态
+        old_ticket = st.ticket_id
+        if old_ticket and old_ticket in om._ticket_index:
+            del om._ticket_index[old_ticket]
+        st.status = SubTaskStatus.PENDING
+        st.assigned_to = None
+        st.ticket_id = None
+        st.result = None
+
+        ticket = dm.create_ticket(
+            issuer=brain_ref.agent_id,
+            assignee=new_agent,
+            description=st.description,
+            expected_output=f"重新分配: {st.description}",
+            max_rounds=12,
+        )
+        await om.dispatch_subtask(plan_id, st.id, new_agent, ticket.ticket_id)
+
+        await comm.send_to_agent(new_agent, {
+            "text": f"[编排任务 重新分配] {st.description}",
+            "_tdp": "delegation",
+            "_orchestration": plan_id,
+            "ticket_id": ticket.ticket_id,
+            "max_rounds": 12,
+            "expected_output": f"完成子任务: {st.description}",
+        })
+
+        return f"已重新派发 {subtask_id} → **{new_agent}** (工单 `{ticket.ticket_id}`)"
+
+    return [
+        create_task_plan,
+        dispatch_subtasks,
+        check_plan_progress,
+        reassign_subtask,
     ]

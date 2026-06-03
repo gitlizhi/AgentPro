@@ -10,6 +10,7 @@ Task Delegation Protocol (TDP) — 任务委托协议核心模块。
 替代了旧有的纯轮次计数 ConversationTracker 作为智能体间通信的主要控制机制。
 """
 
+import asyncio
 import enum
 import time
 import uuid
@@ -160,6 +161,109 @@ class DelegationManager:
     def __init__(self):
         self._by_id: Dict[str, TaskTicket] = {}
         self._by_pair: Dict[str, str] = {}
+        self._pool = None  # 持久化连接池
+
+    def set_pool(self, pool):
+        """注入数据库连接池，启用持久化"""
+        self._pool = pool
+
+    # ── 持久化 helpers ──
+
+    def _save_ticket(self, ticket: TaskTicket):
+        """将工单状态异步持久化到数据库（fire-and-forget）。"""
+        if not self._pool:
+            return
+
+        async def _do():
+            try:
+                async with self._pool.connection() as conn:
+                    await conn.execute("""
+                        INSERT INTO delegation_tickets
+                            (ticket_id, issuer, assignee, description, expected_output,
+                             max_rounds, state, round_count, clarification_count,
+                             result_summary, cancel_reason, cancelled_by, thread_id,
+                             created_at, accepted_at, completed_at, last_activity)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticket_id) DO UPDATE SET
+                            state = EXCLUDED.state,
+                            round_count = EXCLUDED.round_count,
+                            clarification_count = EXCLUDED.clarification_count,
+                            result_summary = EXCLUDED.result_summary,
+                            cancel_reason = EXCLUDED.cancel_reason,
+                            cancelled_by = EXCLUDED.cancelled_by,
+                            accepted_at = EXCLUDED.accepted_at,
+                            completed_at = EXCLUDED.completed_at,
+                            last_activity = EXCLUDED.last_activity
+                    """, (
+                        ticket.ticket_id, ticket.issuer, ticket.assignee,
+                        ticket.description, ticket.expected_output,
+                        ticket.max_rounds, ticket.state.value,
+                        ticket.round_count, ticket.clarification_count,
+                        ticket.result_summary, ticket.cancel_reason,
+                        ticket.cancelled_by, ticket.thread_id,
+                        ticket.created_at, ticket.accepted_at,
+                        ticket.completed_at, ticket.last_activity,
+                    ))
+            except Exception:
+                logger.warning(f"持久化工单 {ticket.ticket_id} 失败", exc_info=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_do())
+        except RuntimeError:
+            pass  # 无运行中的事件循环，跳过持久化
+
+    async def load_active(self):
+        """从数据库恢复所有活跃（非终态）工单，重建内存状态。"""
+        if not self._pool:
+            return
+        try:
+            async with self._pool.connection() as conn:
+                rows = await conn.execute("""
+                    SELECT ticket_id, issuer, assignee, description, expected_output,
+                           max_rounds, state, round_count, clarification_count,
+                           result_summary, cancel_reason, cancelled_by, thread_id,
+                           created_at, accepted_at, completed_at, last_activity
+                    FROM delegation_tickets
+                    WHERE state NOT IN ('closed', 'declined', 'timed_out', 'cancelled')
+                    ORDER BY created_at
+                """)
+                for row in await rows.fetchall():
+                    ticket = TaskTicket(
+                        ticket_id=row[0],
+                        issuer=row[1],
+                        assignee=row[2],
+                        description=row[3],
+                        expected_output=row[4],
+                        max_rounds=row[5],
+                    )
+                    ticket.state = TicketState(row[6])
+                    ticket.round_count = row[7]
+                    ticket.clarification_count = row[8]
+                    ticket.result_summary = row[9]
+                    ticket.cancel_reason = row[10]
+                    ticket.cancelled_by = row[11]
+                    ticket.thread_id = row[12] or ""
+                    ticket.created_at = row[13]
+                    ticket.accepted_at = row[14]
+                    ticket.completed_at = row[15]
+                    ticket.last_activity = row[16]
+
+                    if not ticket.thread_id:
+                        ticket.thread_id = f"ticket_{ticket.ticket_id}_{uuid.uuid4().hex[:8]}"
+
+                    self._by_id[ticket.ticket_id] = ticket
+                    key = self._pair_key(ticket.issuer, ticket.assignee)
+                    # 同一对智能体若已有活跃工单，保留先创建的
+                    if key not in self._by_pair:
+                        self._by_pair[key] = ticket.ticket_id
+
+                    logger.info(
+                        f"恢复工单 {ticket.ticket_id}: {ticket.issuer}→{ticket.assignee} "
+                        f"({ticket.state.value}, {ticket.round_count}/{ticket.max_rounds} 轮)"
+                    )
+        except Exception:
+            logger.error("恢复委托工单失败", exc_info=True)
 
     @staticmethod
     def _pair_key(agent_a: str, agent_b: str) -> str:
@@ -203,6 +307,7 @@ class DelegationManager:
 
         self._by_id[ticket_id] = ticket
         self._by_pair[key] = ticket_id
+        self._save_ticket(ticket)
 
         logger.info(
             f"工单已创建: {ticket_id} ({issuer} -> {assignee}) "
@@ -261,6 +366,7 @@ class DelegationManager:
             if self._by_pair.get(key) == ticket_id:
                 del self._by_pair[key]
 
+        self._save_ticket(ticket)
         logger.info(
             f"工单 {ticket_id}: {old_state.value} → {new_state.value}"
         )
@@ -285,6 +391,7 @@ class DelegationManager:
             self.transition(ticket_id, TicketState.TIMED_OUT)
             return "capped", None
 
+        self._save_ticket(ticket)
         if ticket.round_count >= WARN_THRESHOLD_2:
             return "final_warning", ticket.get_warning_hint(ticket.assignee)
         if ticket.round_count >= WARN_THRESHOLD_1:
@@ -306,6 +413,7 @@ class DelegationManager:
         # 澄清也计入总轮次（占用工作预算）
         ticket.round_count += 1
         ticket.last_activity = time.time()
+        self._save_ticket(ticket)
         return True
 
     # ── 交付与取消 ────────────────────────────────────────────────

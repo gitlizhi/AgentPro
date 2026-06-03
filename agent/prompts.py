@@ -25,6 +25,9 @@ BRAIN_BASE_PROMPT = (
     "浏览器操作前先 `load_skill('browser-automation')`，任务完成后必须截图并调用 `browser(action='close')` 关闭浏览器释放资源。"
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
     "需要了解用户个人信息时，调用 `load_user_profile` 工具获取用户画像。\n"
+    "沙箱环境: /workspace 和用户主目录 (~/) 是持久化的——pip install --user 安装的包、"
+    "下载的文件在多次命令执行之间保留，无需重复安装。但容器本身是临时的（每次命令在新容器中运行），"
+    "系统级目录（/usr、/tmp 等）不持久。\n"
     "推理过程放 <thinking>...</thinking> 内，标签外才会发给其他 Agent。"
     "任务委托协议（TDP）："
     "所有与其它 Agent 的私聊必须在任务委托框架内进行。"
@@ -134,7 +137,7 @@ BRAIN_COMPUTER_INSTRUCTIONS = (
 def build_brain_system_prompt(agent_id: str) -> str:
     """构建主代理完整的系统提示词"""
     base = BRAIN_BASE_PROMPT.format(agent_id=agent_id)
-    return base + BRAIN_REFLECTION_GUIDE + BRAIN_DESKTOP_INSTRUCTIONS #  + BRAIN_COMPUTER_INSTRUCTIONS
+    return base + BRAIN_REFLECTION_GUIDE + BRAIN_DESKTOP_INSTRUCTIONS + BRAIN_ORCHESTRATION_GUIDE  #  + BRAIN_COMPUTER_INSTRUCTIONS
 
 
 # ============================================================
@@ -189,11 +192,16 @@ def build_intent_classification_prompt(user_input: str, intent_options: str, int
 只输出答案，不要任何额外文字。"""
 
 
-# ============================================================
-# 四、主动聊天生成提示词
-# ============================================================
-
-# ============================================================
+BRAIN_ORCHESTRATION_GUIDE = (
+    "## 多智能体任务编排\n"
+    "复杂任务时使用编排流程：\n"
+    "① 调用 `create_task_plan(description)` 将任务分解为子任务（含依赖关系和建议角色）；\n"
+    "② 确认计划合理后调用 `dispatch_subtasks(plan_id)` 并行派发所有就绪子任务；\n"
+    "③ 用 `check_plan_progress(plan_id)` 跟踪整体进度；\n"
+    "④ 子任务全部完成后汇总结果交付给用户；\n"
+    "⑤ 如有子任务失败，用 `reassign_subtask(plan_id, subtask_id, new_agent)` 重新分配。\n"
+    "编排原则：可并行的不串行，有依赖的按序执行，结果汇总后统一交付。"
+)
 # 五、对话终止判断提示词
 # ============================================================
 
@@ -359,7 +367,7 @@ def build_memory_dedup_prompt(facts: list) -> str:
 
 def build_launch_agent_prompt(expertise: str) -> str:
     """构建启动子代理时的系统提示词"""
-    return f"你是一个{expertise}的AI助手。你的专长是{expertise}。请根据用户请求提供帮助。**重要约束**：**绝对禁止使用 `task` 工具**。所有任务都必须自己完成，不得委托给其他子智能体。你可以使用其他可用工具（如搜索、记忆检索等），但必须直接处理用户请求。"
+    return f"你是一个{expertise}的AI助手。你的专长是{expertise}。请根据用户请求提供帮助。你可以使用其他可用工具（如搜索、记忆检索等），但必须直接处理用户请求。"
 
 
 # ============================================================
@@ -367,3 +375,42 @@ def build_launch_agent_prompt(expertise: str) -> str:
 # ============================================================
 
 FALLBACK_SYSTEM_MESSAGE = "你是一个聪明的人工智能助手"
+
+
+# ============================================================
+# 十一、任务编排提示词
+# ============================================================
+
+def build_task_decomposition_prompt(description: str, agents_info: str) -> str:
+    """构建复杂任务分解提示词。"""
+    return f"""你是一个任务分解专家。请将以下复杂任务分解为可并行或顺序执行的子任务。
+
+原始任务:
+{description}
+
+当前在线智能体:
+{agents_info if agents_info else "无在线智能体（子任务将由后续上线的智能体执行）"}
+
+请分析任务，将其分解为 2-5 个子任务。每个子任务应该是独立可完成的单元。
+如果子任务之间有依赖关系，请明确标注。
+
+输出格式（严格 JSON）:
+{{{{
+  "analysis": "简要分析任务的分解思路（1-2句）",
+  "subtasks": [
+    {{{{
+      "description": "子任务描述（明确具体，包含期望产出）",
+      "depends_on": [],
+      "suggested_role": "建议的角色名，如搜索专家、数据分析师、报告撰写者"
+    }}}}
+  ]
+}}}}
+
+规则:
+1. 子任务数量控制在 2-5 个
+2. 可并行的任务不要设置依赖关系
+3. suggested_role 用于匹配合适的在线智能体
+4. 第一个子任务通常没有依赖
+5. 如果在线智能体列表中已有匹配的角色，优先建议已有角色名
+
+只输出 JSON，不要任何额外文字。"""

@@ -766,7 +766,7 @@ async def launch_agent(agent_name: str, expertise: str) -> str:
     ]
     try:
         # 启动新进程（后台运行，不等待）
-        if sys.platform == 'win32':
+        if sys.platform == 'win32' and not os.environ.get('AGENT_SHOW_CONSOLE'):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE

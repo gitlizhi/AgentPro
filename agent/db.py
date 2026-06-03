@@ -138,7 +138,66 @@ async def init_db_pool():
                 )
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages(thread_id)")
-            
+
+            # ── 编排系统表 ──
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS orchestration_plans (
+                    plan_id VARCHAR(64) PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    issuer VARCHAR(255) NOT NULL,
+                    state VARCHAR(32) NOT NULL DEFAULT 'planning',
+                    completed_count INTEGER DEFAULT 0,
+                    failed_count INTEGER DEFAULT 0,
+                    created_at DOUBLE PRECISION,
+                    updated_at DOUBLE PRECISION
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS orchestration_subtasks (
+                    plan_id VARCHAR(64) REFERENCES orchestration_plans(plan_id) ON DELETE CASCADE,
+                    subtask_id VARCHAR(16) NOT NULL,
+                    description TEXT NOT NULL,
+                    assigned_to VARCHAR(255),
+                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    depends_on JSONB DEFAULT '[]',
+                    result TEXT,
+                    ticket_id VARCHAR(32),
+                    suggested_role VARCHAR(128),
+                    PRIMARY KEY (plan_id, subtask_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_orch_subtasks_ticket
+                ON orchestration_subtasks (ticket_id) WHERE ticket_id IS NOT NULL
+            """)
+            # ── 委托系统表 ──
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS delegation_tickets (
+                    ticket_id VARCHAR(32) PRIMARY KEY,
+                    issuer VARCHAR(255) NOT NULL,
+                    assignee VARCHAR(255) NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    expected_output TEXT NOT NULL DEFAULT '',
+                    max_rounds INTEGER DEFAULT 8,
+                    state VARCHAR(32) NOT NULL DEFAULT 'pending',
+                    round_count INTEGER DEFAULT 0,
+                    clarification_count INTEGER DEFAULT 0,
+                    result_summary TEXT,
+                    cancel_reason TEXT,
+                    cancelled_by VARCHAR(255),
+                    thread_id VARCHAR(255),
+                    created_at DOUBLE PRECISION,
+                    accepted_at DOUBLE PRECISION,
+                    completed_at DOUBLE PRECISION,
+                    last_activity DOUBLE PRECISION DEFAULT 0
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair
+                ON delegation_tickets (issuer, assignee)
+                WHERE state NOT IN ('closed','declined','timed_out','cancelled')
+            """)
+
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)
         await checkpointer.setup()

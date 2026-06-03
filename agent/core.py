@@ -94,6 +94,7 @@ class Agent:
                             "text": user_input,
                             "max_rounds": payload.get("max_rounds", 8),
                             "expected_output": payload.get("expected_output", ""),
+                            "_orchestration": payload.get("_orchestration", ""),
                         }
                         logger.debug(f"TDP 协议消息: {is_tdp} ticket={payload.get('ticket_id')}")
 
@@ -267,6 +268,9 @@ class Agent:
     async def run(self):
         self._running = True
         logger.info(f"Agent {self.agent_id} starting...")
+        # 从数据库恢复持久化的工单和编排计划（需在 connect 前完成，
+        # 因为 connect() 进入消息循环后会阻塞）
+        await self.brain.recover_state()
         await self.comm.connect()
 
     async def stop(self):

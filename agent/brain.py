@@ -11,6 +11,7 @@ import asyncio
 
 from agent.conversation_tracker import ConversationTracker
 from agent.delegation import DelegationManager, TaskTicket, TicketState, TicketError
+from agent.orchestration import OrchestrationManager
 from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -27,6 +28,7 @@ from agent.tools_factory import (
     create_room_tools,
     create_log_memory_tool,
     create_delegation_tools,
+    create_orchestration_tools,
 )
 from deepagents import create_deep_agent, SubAgent
 # from deepagents.backends.filesystem import FilesystemBackend
@@ -92,11 +94,17 @@ class Brain:
             from agent.db import get_pool
             db_pool = get_pool()
         self.checkpointer = AsyncPostgresSaver(db_pool)
-        
+        self.db_pool = db_pool  # 供 managers 持久化使用
+
         # 智能体对话追踪器（轮次计数 + 逐级降级 + 硬上限）— 旧兜底机制
         self.conversation_tracker = ConversationTracker()
         # TDP 任务委托管理器（主控制机制）
         self.delegation_manager = DelegationManager()
+        # 多智能体任务编排管理器（TDP 之上）
+        self.orchestration_manager = OrchestrationManager()
+        # 注入 DB 连接池以启用持久化
+        self.delegation_manager.set_pool(db_pool)
+        self.orchestration_manager.set_pool(db_pool)
         self._tdp_notification = None  # 当前待处理的 TDP 通知 payload
         self._timeout_loop_started = False  # 工单超时循环惰性启动
         self._in_flight_tools = []  # 当前正在执行的工具名称列表（用于中断时清理）
@@ -114,6 +122,8 @@ class Brain:
         self._bg_tasks: set[asyncio.Task] = set()
         # 用于去重
         self.sent_msg_ids_by_thread = {}  # thread_id -> set
+        # 跨 stream 去重：已发送过 tool_call_end 的 ToolMessage ID（进程生命周期内）
+        self._sent_tool_msgs: set[str] = set()
 
         self._termination_cache = {}
         # 任务缓冲模块
@@ -155,7 +165,8 @@ class Brain:
             skills_host_path=os.path.join(os.getcwd(), "agent", "skills"),
             env={
                 "API_KEY": config.model.api_key,
-            }
+            },
+            agent_id=self.agent_id,  # 持久化工作区隔离
         )
         
         # ========== 新增：反思子代理定义 ==========
@@ -169,7 +180,8 @@ class Brain:
 
         # 自定义工具
         delegation_tools = create_delegation_tools(self)
-        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools
+        orchestration_tools = create_orchestration_tools(self)
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -220,7 +232,10 @@ class Brain:
         else:
             status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
             parts.append(
-                f"[当前对话] 你正在和智能体 {self.user_id} 对话。对方当前状态：{status}。"
+                f"[重要身份确认] 你是 {self.agent_id}，你正在和智能体 {self.user_id} 对话。"
+                f"你永远只能以 {self.agent_id} 的身份说话和行动，不要替 {self.user_id} 说话，"
+                f"不要扮演 {self.user_id} 的角色，不要替对方做决定。"
+                f"对方当前状态：{status}。"
             )
 
             # ── TDP 工单上下文注入 ──
@@ -287,6 +302,9 @@ class Brain:
     async def _safe_send(self, text: str, **extra) -> bool:
         """安全发送消息给当前用户。WebSocket/网络异常仅记日志，不向上传播。
         自动附加 thread_id，供前端正确路由消息到对应会话。"""
+        # 过滤空消息，避免向 Hub 发送无意义的数据包
+        if not text and not extra:
+            return False
         payload = {"text": text, **extra}
         if self.user_id == 'super_user' and self.thread_id:
             payload['thread_id'] = self.thread_id
@@ -542,6 +560,14 @@ class Brain:
             # group_context 在 _process_agent_message / _handle_with_agent 使用后由下次
             # process() 调用覆盖，或在 _process_agent_message 中主动清除。
 
+    async def recover_state(self):
+        """从数据库恢复活跃的工单和编排计划（进程重启后调用）。"""
+        await self.delegation_manager.load_active()
+        await self.orchestration_manager.load_active()
+        # 如果恢复了活跃工单，启动超时检测循环
+        if self.delegation_manager._by_id:
+            self._ensure_timeout_loop_started()
+
     async def _notify_status(self, status: str):
         """通知前端智能体状态变化（busy / idle）"""
         if self.comm:
@@ -575,6 +601,11 @@ class Brain:
                 timed_out = self.delegation_manager.check_timeouts(DEFAULT_IDLE_TIMEOUT_MINUTES)
                 for ticket in timed_out:
                     logger.info(f"工单 {ticket.ticket_id} 空闲超时，自动终止")
+                    # ── 编排回调：标记子任务失败 ──
+                    await self.orchestration_manager.mark_failed(
+                        ticket.ticket_id,
+                        f"工单超时 ({DEFAULT_IDLE_TIMEOUT_MINUTES}分钟无活动)"
+                    )
                     await self._safe_send(
                         f"⏰ 工单 {ticket.ticket_id}（{ticket.description[:50]}...）空闲超时，已自动终止。"
                     )
@@ -919,6 +950,17 @@ class Brain:
                 tdp_ticket_id = tdp.get("ticket_id", "")
                 dm = self.delegation_manager
 
+                # ── 终态守卫：已终止的工单不接受任何 TDP 操作（幂等丢弃）──
+                if tdp_ticket_id and tdp_type in ("acceptance", "delivery", "decline"):
+                    existing = dm.get_ticket(tdp_ticket_id)
+                    if existing and existing.is_terminal:
+                        logger.info(
+                            f"TDP: 忽略对已终止工单 {tdp_ticket_id} "
+                            f"({existing.state.value}) 的 {tdp_type} 操作"
+                        )
+                        self._tdp_notification = None
+                        # 不 return，让正常的消息处理继续（对方可能还在说别的事）
+
                 if tdp_type == "delegation" and tdp_ticket_id:
                     # 收到委托通知 — 在 assignee 侧创建镜像工单
                     existing = dm.get_ticket(tdp_ticket_id)
@@ -938,6 +980,7 @@ class Brain:
                             )
                             dm._by_id[tdp_ticket_id] = ticket
                             dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
+                            dm._save_ticket(ticket)
                             logger.info(f"TDP 镜像工单已创建: {tdp_ticket_id} (assignee={self.agent_id})")
                         except Exception as e:
                             logger.warning(f"创建 TDP 镜像工单失败: {e}")
@@ -950,6 +993,17 @@ class Brain:
                             ticket.result_summary = user_input[:500]
                         except TicketError:
                             pass
+                    # ── 编排回调：子任务交付 ──
+                    orch_plan_id = tdp.get("_orchestration", "")
+                    if orch_plan_id:
+                        await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
+                        plan = self.orchestration_manager.get_plan(orch_plan_id)
+                        if plan and plan.is_complete():
+                            await self._safe_send(
+                                f"🎯 编排计划 {orch_plan_id} 全部完成！"
+                                f"（{plan.completed_count}/{plan.total_count} 成功"
+                                + (f"，{plan.failed_count} 失败）" if plan.failed_count > 0 else "）")
+                            )
                 elif tdp_type == "acceptance" and tdp_ticket_id:
                     ticket = dm.get_ticket(tdp_ticket_id)
                     if ticket and ticket.state == TicketState.PENDING:
@@ -957,13 +1011,24 @@ class Brain:
                             dm.transition(tdp_ticket_id, TicketState.ACCEPTED)
                         except TicketError:
                             pass
-                elif tdp_type in ("decline", "cancel") and tdp_ticket_id:
+                    # ── 编排回调：子任务被接受 ──
+                    orch_plan_id = tdp.get("_orchestration", "")
+                    if orch_plan_id:
+                        await self.orchestration_manager.mark_accepted(tdp_ticket_id)
                     ticket = dm.get_ticket(tdp_ticket_id)
                     if ticket and ticket.is_active:
                         try:
                             dm.cancel_ticket(tdp_ticket_id, f"TDP {tdp_type} 通知", self.user_id)
                         except TicketError:
                             pass
+                elif tdp_type in ("decline", "cancel", "timed_out") and tdp_ticket_id:
+                    # ── 编排回调：子任务被拒绝/取消/超时 ──
+                    orch_plan_id = tdp.get("_orchestration", "")
+                    if orch_plan_id:
+                        await self.orchestration_manager.mark_failed(
+                            tdp_ticket_id,
+                            f"工单 {tdp_ticket_id} 被{tdp_type}"
+                        )
 
                 self._tdp_notification = None  # 消费后清空
 
@@ -1072,8 +1137,10 @@ class Brain:
                                                     tool_name=tool_name,
                                                     tool_args=tc.get("args", {}),
                                                 )
-                                    elif msg.type == "tool" and self.user_id == 'super_user' and not silent and msg_id not in sent_ids:
+                                    elif msg.type == "tool" and self.user_id == 'super_user' and not silent \
+                                            and msg_id not in sent_ids and msg_id not in self._sent_tool_msgs:
                                         sent_ids.add(msg_id)
+                                        self._sent_tool_msgs.add(msg_id)
                                         tool_name = getattr(msg, 'name', 'unknown_tool')
                                         # 从 in-flight 列表中移除匹配的工具
                                         try:
