@@ -45,11 +45,11 @@ def create_list_online_agents_tool(brain):
     @tool
     def list_online_agents() -> str:
         """
-        查询当前在线的 Agent 列表。
+        查询当前在线的智能体列表（不含用户和系统机器人）。
         用于在和其他 Agent 协作前判断对方是否在线，避免向离线的 Agent 发送消息。
         :return: JSON 格式的在线 Agent 列表
         """
-        agents = brain_ref.online_agents
+        agents = brain_ref.peer_agents
         if agents is None:
             return '{"error": "在线列表未初始化", "agents": []}'
         return _json.dumps({"agents": sorted(list(agents)), "count": len(agents)}, ensure_ascii=False)
@@ -234,15 +234,20 @@ def create_delegation_tools(brain):
         expected_output: str,
         max_rounds: int = DEFAULT_MAX_ROUNDS,
     ) -> str:
-        """向指定 Agent 发起正式的任务委托（创建工单）。
+        """向指定智能体发起正式的任务委托（创建工单）。
         这是推荐的多智能体协作方式，不要使用 send_to_agent 私聊。
+        注意：只能委托给其他智能体，不能委托给 super_user（用户）或 reminder_bot（系统机器人）。
 
-        :param agent: 目标 Agent 的 ID
+        :param agent: 目标智能体的 ID（不能是 super_user）
         :param description: 任务描述，清晰说明需要做什么
         :param expected_output: 期望产出，说明"完成"的标准是什么
         :param max_rounds: 轮次预算（默认8），用于限制本工单的最大通信轮次
         :return: 委托结果
         """
+        # 硬拦截：不能向用户或系统机器人发布工单
+        if agent in ("super_user", "reminder_bot"):
+            return f"❌ 不能向 '{agent}' 发起任务委托。'super_user' 是人类用户，'reminder_bot' 是系统机器人，仅智能体之间可以互相委派任务。请使用 list_online_agents 查看可委派的智能体。"
+
         dm: DelegationManager = brain_ref.delegation_manager
 
         online = brain_ref.online_agents
@@ -572,8 +577,8 @@ def create_orchestration_tools(brain):
         Args:
             description: 任务的详细描述
         """
-        online_agents = list(brain_ref.online_agents) if brain_ref.online_agents else []
-        agents_info = "\n".join(f"- {a}" for a in online_agents) if online_agents else ""
+        peer_agents = brain_ref.peer_agents
+        agents_info = "\n".join(f"- {a}" for a in sorted(peer_agents)) if peer_agents else ""
 
         prompt = build_task_decomposition_prompt(description, agents_info)
         try:
@@ -594,7 +599,7 @@ def create_orchestration_tools(brain):
 
             result = om.get_progress_summary(plan.plan_id)
             result += f"\n\n计划 ID: `{plan.plan_id}`"
-            result += f"\n可用智能体: {', '.join(online_agents) if online_agents else '（无在线智能体，启动后再派发）'}"
+            result += f"\n可用智能体: {', '.join(sorted(peer_agents)) if peer_agents else '（无在线智能体，启动后再派发）'}"
             result += "\n请审阅后使用 `dispatch_subtasks` 派发。"
             return result
         except _json.JSONDecodeError as e:
@@ -629,7 +634,7 @@ def create_orchestration_tools(brain):
             in_progress = [s for s in plan.subtasks if s.status == SubTaskStatus.IN_PROGRESS]
             return f"没有待派发的子任务。已派发: {len(dispatched)}, 执行中: {len(in_progress)}"
 
-        online = list(brain_ref.online_agents) if brain_ref.online_agents else []
+        online = list(brain_ref.peer_agents)
         if not online:
             return "当前没有在线智能体可供派发任务。请等待智能体上线后重试。"
 
