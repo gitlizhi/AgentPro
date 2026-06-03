@@ -9,6 +9,8 @@
 *.json
 *.md
 !ARCHITECTURE.md
+!README_EN.md
+!README.md
 !agent/agent_context/*.md
 agent/agent_temp/
 /agent/data/*
