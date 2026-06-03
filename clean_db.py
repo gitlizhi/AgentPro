@@ -172,21 +172,38 @@ async def show_stats():
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def clean_tickets(active_only: bool = False):
-    """清理委托工单。"""
+    """清理委托工单，并级联清理关联的编排子任务（避免重启时恢复僵尸计划）。"""
     get_pool, init_db_pool, _ = _get_db()
     await init_db_pool()
     pool = get_pool()
     async with pool.connection() as conn:
         if active_only:
+            # 清理引用已删除工单的子任务
+            await conn.execute(
+                "DELETE FROM orchestration_subtasks WHERE ticket_id IN "
+                "(SELECT ticket_id FROM delegation_tickets "
+                "WHERE state NOT IN ('closed','declined','timed_out','cancelled'))"
+            )
             result = await conn.execute(
                 "DELETE FROM delegation_tickets "
                 "WHERE state NOT IN ('closed','declined','timed_out','cancelled')"
             )
         else:
+            await conn.execute("DELETE FROM orchestration_subtasks")
             result = await conn.execute("DELETE FROM delegation_tickets")
-        count = result.rowcount
+        ticket_count = result.rowcount
         tag = "活跃" if active_only else "所有"
-        print(f"✅ 已清理 {tag}工单: {count} 条")
+
+        # 清理没有子任务的空编排计划
+        empty_result = await conn.execute(
+            "DELETE FROM orchestration_plans "
+            "WHERE plan_id NOT IN (SELECT DISTINCT plan_id FROM orchestration_subtasks)"
+        )
+        empty_count = empty_result.rowcount
+
+        print(f"✅ 已清理 {tag}工单: {ticket_count} 条")
+        if empty_count > 0:
+            print(f"   级联清理空编排计划: {empty_count} 个")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -194,12 +211,19 @@ async def clean_tickets(active_only: bool = False):
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def clean_orchestration(active_only: bool = False):
-    """清理编排计划和子任务。"""
+    """清理编排计划和子任务，并级联清理关联的委托工单。"""
     get_pool, init_db_pool, _ = _get_db()
     await init_db_pool()
     pool = get_pool()
     async with pool.connection() as conn:
         if active_only:
+            # 先清理关联工单
+            await conn.execute(
+                "DELETE FROM delegation_tickets WHERE ticket_id IN "
+                "(SELECT ticket_id FROM orchestration_subtasks WHERE plan_id IN "
+                "(SELECT plan_id FROM orchestration_plans "
+                "WHERE state NOT IN ('completed','partially_completed','failed','cancelled')))"
+            )
             await conn.execute(
                 "DELETE FROM orchestration_subtasks WHERE plan_id IN "
                 "(SELECT plan_id FROM orchestration_plans "
@@ -210,11 +234,12 @@ async def clean_orchestration(active_only: bool = False):
                 "WHERE state NOT IN ('completed','partially_completed','failed','cancelled')"
             )
         else:
+            await conn.execute("DELETE FROM delegation_tickets")
             await conn.execute("DELETE FROM orchestration_subtasks")
             result = await conn.execute("DELETE FROM orchestration_plans")
-        count = result.rowcount
+        plan_count = result.rowcount
         tag = "活跃" if active_only else "所有"
-        print(f"✅ 已清理 {tag}编排计划: {count} 个（子任务已级联删除）")
+        print(f"✅ 已清理 {tag}编排计划: {plan_count} 个（子任务和关联工单已级联删除）")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
