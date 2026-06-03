@@ -11,7 +11,7 @@ AgentPro 是一个基于 LangGraph + LangChain 的多智能体协作平台。多
 | Agent 框架 | LangGraph + deepagents |
 | LLM 后端 | DeepSeek V4（兼容 OpenAI API） |
 | 通信 | WebSocket（Hub-Spoke 模型） |
-| 状态持久化 | PostgreSQL（checkpoint、rooms、reminders） |
+| 状态持久化 | PostgreSQL（checkpoint、rooms、reminders、orchestration、delegation） |
 | 向量记忆 | ChromaDB（用户记忆 + 技能索引） |
 | Web 前端 | FastAPI + 原生 HTML/JS（client.py + client.html） |
 | 沙箱执行 | Docker（自定义镜像 my-agent-base） |
@@ -67,6 +67,8 @@ AgentPro 是一个基于 LangGraph + LangChain 的多智能体协作平台。多
 | **Brain 决策层** | `agent/brain.py` | LLM 调用、意图识别、工具注册、对话管理、任务缓冲 |
 | **Context 管理** | `agent/context_manager.py` | Token 预算跟踪、工具输出压缩、上下文中间件 |
 | **Communication** | `agent/communication.py` | WebSocket 客户端，与 Hub 通信 |
+| **Delegation** | `agent/delegation.py` | TDP 任务委托协议核心（TaskTicket + DelegationManager） |
+| **Orchestration** | `agent/orchestration.py` | 多智能体任务编排（OrchestrationPlan + DAG 子任务） |
 | **Prompt 管理** | `agent/prompts.py` | 所有 LLM 提示词集中管理 |
 | **模型配置** | `agent/model_config.py` | 多模型兼容（DeepSeek、OpenAI、Anthropic、Ollama）+视觉模型 |
 | **配置系统** | `config.py` | Pydantic 配置，含 Database、Hub、Model、Agent、Backend 子配置 |
@@ -573,6 +575,109 @@ Brain._handle_with_agent() / _process_agent_message()
 
 ---
 
+### 5.4 多智能体任务编排 (Orchestration)
+
+在 TDP 单任务委托之上，增加了**任务分解、并行派发、进度聚合**的编排层，使主 Agent 能协调多个子 Agent 共同完成复杂任务。
+
+#### 核心概念
+
+`agent/orchestration.py` 定义了编排计划（`OrchestrationPlan`），将一个复杂任务分解为多个有向无环图（DAG）结构的子任务（`SubTask`），自动派发给合适的智能体并行执行。
+
+#### 子任务状态机
+
+```
+PENDING ──dispatch──→ DISPATCHED ──accepted──→ IN_PROGRESS ──deliver──→ COMPLETED
+   │                     │                         │
+   └─────────────────────┴─── (fail/reassign) ────→ FAILED
+```
+
+#### 编排工具集
+
+`agent/tools_factory.py:create_orchestration_tools()` 提供 4 个工具：
+
+| 工具 | 用途 |
+|------|------|
+| `create_task_plan(description)` | LLM 分析复杂任务，生成 2-5 个子任务，含依赖关系和建议角色 |
+| `dispatch_subtasks(plan_id)` | 并行派发所有就绪子任务（依赖已满足），自动匹配在线智能体 |
+| `check_plan_progress(plan_id)` | 查看计划整体进度（Markdown 格式） |
+| `reassign_subtask(plan_id, subtask_id, new_agent)` | 失败子任务重新分配 |
+
+#### 数据流
+
+```
+用户给主 Agent 复杂任务
+  → create_task_plan: LLM 分解 → 生成 OrchestrationPlan (2-5 个 SubTask)
+    → 用户审阅计划
+  → dispatch_subtasks: 并行创建 TDP 工单 → 通知子 Agent
+    → 每个子任务消息携带 _orchestration: plan_id
+  → 子 Agent 接受 → execute → deliver_result
+    → TDP delivery 通知回溯到主 Agent
+      → OrchestrationManager.mark_completed() 更新进度
+        → 全部完成时通知 super_user
+  → check_plan_progress: 用户随时查看进度
+```
+
+#### 智能体匹配策略
+
+`dispatch_subtasks` 根据 `suggested_role` 字段（如"搜索专家"、"数据分析师"）模糊匹配在线智能体名称，按以下优先级：
+1. 子串匹配（`role_hint in agent_id.lower()`）
+2. 无匹配时选第一个非自身的在线智能体
+3. 无在线智能体时返回提示，稍后手动重试
+
+#### 与 TDP 的集成
+
+| 层级 | 职责 |
+|------|------|
+| `OrchestrationManager` | 计划生命周期、子任务状态追踪、ticket→subtask 反查索引 |
+| `DelegationManager` | 单工单生命周期（创建、轮次控制、超时检测） |
+| `_tdp` + `_orchestration` | 复用 TDP 消息通道，增加 `_orchestration` 字段区分编排任务 |
+| `brain.py` TDP 回调 | `delivery` → `om.mark_completed()`，`acceptance` → `om.mark_accepted()` |
+| `core.py` | TDP metadata 额外提取 `_orchestration` 字段传递 |
+
+#### 关键设计决策
+
+| 决策 | 理由 |
+|------|------|
+| DAG 依赖模型 | 支持拓扑排序派发，确保依赖子任务先完成 |
+| 一次 LLM 调用完成分解 | 避免 LLM 多次调用工具的延迟，单次返回完整计划 JSON |
+| 角色模糊匹配而非精确角色系统 | 简单有效，无需预注册角色表；未来可升级为语义匹配 |
+| 12 轮预算（高于普通委托的 8 轮） | 编排子任务可能更复杂，需要更多交互轮次 |
+
+#### 数据库持久化
+
+编排计划和委托工单的状态持久化到 PostgreSQL，进程重启后自动恢复：
+
+**持久化的数据：**
+
+| 表 | 内容 | 恢复条件 |
+|---|------|---------|
+| `orchestration_plans` | 计划元信息（状态、进度计数、时间戳） | `state NOT IN ('completed', 'partially_completed', 'failed', 'cancelled')` |
+| `orchestration_subtasks` | 子任务详情（描述、分配、依赖 JSONB、结果） | 随计划级联恢复 |
+| `delegation_tickets` | 工单完整状态（状态机、轮次计数、时间戳） | `state NOT IN ('closed', 'declined', 'timed_out', 'cancelled')` |
+
+**保存时机：**
+
+- **OrchestrationManager**：`create_plan`、`set_subtasks`、`dispatch_subtask`、`mark_accepted`、`mark_completed`、`mark_failed`、`cancel_plan` — 每次状态变更后 `await _save_plan()`，同步等待持久化完成
+- **DelegationManager**：`create_ticket`、`transition`、`record_round`、`record_clarification` — 每次状态变更后通过 `asyncio.create_task` 异步保存（fire-and-forget），避免阻塞主流程
+
+**恢复流程：**
+
+```
+Agent.run()
+  → brain.recover_state()  (在 connect() 之前)
+    → dm.load_active()     从 delegation_tickets 恢复活跃工单
+    → om.load_active()     从 orchestration_plans/subtasks 恢复活跃计划
+      → 重建 _by_id、_by_pair、_ticket_index 内存索引
+  → 如恢复了活跃工单 → 启动超时检测循环
+```
+
+**关键设计决策：**
+- OrchestrationManager 保存为 `await`（同步等待），DelegationManager 保存为 fire-and-forget — 前者操作频率低（按计划生命周期变化）、数据量少；后者操作频率高（每次轮次计数更新都触发），异步保存避免增加消息处理延迟
+- 子任务使用 `DELETE + INSERT` 而非 `UPDATE` 逐条更新 — 简化逻辑，避免差量检测；编排计划通常只有 2-5 个子任务，性能影响可忽略
+- 不保存终态数据 — 终态计划和工单不参与恢复，避免无用数据堆积；如需审计可后续添加归档策略
+
+---
+
 ## 六、Docker 沙箱
 
 ### 6.1 设计原则
@@ -730,7 +835,9 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | Agent 专属上下文文件（CLAUDE.md 模式） | 每个 Agent 在 `agent/agent_context/{agent_id}.md` 中定义持久化上下文，启动时注入系统提示词。内容需精简（每轮都消耗 token），大量操作指南应使用技能系统按需加载 |
 | agent_status 缓存恢复 | `client.py` 维护 `agent_statuses` 缓存，新前端连接时补发所有 Agent 状态，解决页面刷新后停止按钮消失的问题。Agent 离线时清理缓存避免过期数据 |
 | 前端 thread_id 路由 + 事件过滤 | 消息通过 `thread_id` 全链路（brain→client.py→前端）精确路由到对应会话窗口；`tool_call_start/end` 和 `approval_request` 按 `data.from` 过滤，仅当前活跃 Agent 的事件才更新 UI，彻底解决跨 Agent 消息串扰 |
-| Agent 断连超时自毁 | `communication.py` 累计断连超过 60 秒直接 `os._exit(1)`，防止网络彻底中断时 Agent 进程无限挂起重试成为僵尸进程
+| Agent 断连超时自毁 | `communication.py` 累计断连超过 60 秒直接 `os._exit(1)`，防止网络彻底中断时 Agent 进程无限挂起重试成为僵尸进程 |
+| 多智能体任务编排（DAG 并行派发） | 在 TDP 单工单之上增加编排层。LLM 一次性分解复杂任务为 2-5 个子任务（DAG），按拓扑依赖并行派发给在线智能体，聚合进度统一交付用户 |
+| 编排与委托的数据库持久化 | OrchestrationManager 和 DelegationManager 的状态变更实时写入 PostgreSQL（`orchestration_plans`、`orchestration_subtasks`、`delegation_tickets` 三张表）。Agent 启动时 `recover_state()` 恢复所有活跃工单和计划，重建内存索引。OrchestrationManager 同步等待持久化，DelegationManager 异步 fire-and-forget |
 
 ### 11.3 工具调用进度流
 
@@ -1336,6 +1443,7 @@ args=[
 | `agent/agent_context/*.md` | Agent 专属上下文文件（类似 Claude Code 的 CLAUDE.md） |
 | `agent/conversation_tracker.py` | 智能体对话轮次控制（TDP 兜底） |
 | `agent/delegation.py` | TDP 任务委托协议核心（TaskTicket + DelegationManager） |
+| `agent/orchestration.py` | 多智能体任务编排（OrchestrationPlan + DAG 并行派发） |
 | `agent/task_buffer.py` | 任务步骤缓冲 |
 | `agent/memory.py` | ChromaDB 记忆存储 + 用户画像按需读取 |
 | `agent/conversation_memory_extractor.py` | 对话记忆后台提取 |
@@ -1354,9 +1462,60 @@ args=[
 | `agent/model_config.py` | 多模型配置 |
 | `agent/intent.py` | 意图类型枚举 |
 | `agent/db.py` | PostgreSQL 连接池 |
+| `clean_db.py` | 数据库与临时文件清理脚本 |
 | `hub/server.py` | WebSocket Hub |
 | `client.py` | FastAPI + super_user 客户端 |
 | `client.html` | Web 前端 |
 | `agent/skills/user-profile/SKILL.md` | 用户画像按需加载技能 |
 | `agent/skills/computer-automation/SKILL.md` | 桌面自动化技能文档 |
 | `agent/skills/browser-automation/SKILL.md` | 浏览器自动化技能文档 |
+
+---
+
+## 十六、数据库清理与运维
+
+### 16.1 概述
+
+`clean_db.py` 是数据库与临时文件的全能清理工具，统一替代旧有的 `clean_checkpoints.py`。支持按类别精确删除或一键全清，涵盖工单、编排计划、聊天记录、检查点、提醒、房间、临时文件等所有可清理数据。
+
+### 16.2 支持的数据表
+
+| 表 | 清理选项 | 说明 |
+|---|---------|------|
+| `delegation_tickets` | `--tickets [--active-only]` | 委托工单，支持仅清理活跃（非终态）工单 |
+| `orchestration_plans` / `orchestration_subtasks` | `--orchestration [--active-only]` | 编排计划及子任务（级联删除） |
+| `chat_messages` | `--chat` | 聊天消息内容 |
+| `conversation_threads` | `--conversations` | 会话线程元数据（级联删除聊天消息） |
+| `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` | `--checkpoints [--thread ID]` | LangGraph 短期记忆检查点 |
+| `reminders` | `--reminders` | 定时提醒 |
+| `rooms` / `room_members` | `--rooms [--room ID]` | 群聊房间及成员 |
+
+### 16.3 按智能体清理
+
+`--agent AGENT_ID` 会清理与该智能体关联的**全部数据**：
+
+1. 聊天消息（`chat_messages WHERE thread_id LIKE 'private_{agent_id}_%'`）
+2. 会话线程（`conversation_threads WHERE agent_id = ...`）
+3. 检查点（所有匹配的 thread_id）
+4. 关联工单（issuer 或 assignee 是该智能体）
+5. 关联子任务（`orchestration_subtasks WHERE assigned_to = ...`）
+6. 提醒（`reminders WHERE user_id = ...`）
+7. 空编排计划清理（子任务全部删除后级联清理父计划）
+
+### 16.4 临时文件清理
+
+| 选项 | 目录 | 内容 |
+|------|------|------|
+| `--screenshots` | `screenshots/` | 浏览器/桌面截图 |
+| `--tool-outputs` | `agent/agent_temp/tool_outputs/` | 压缩工具输出侧文件 |
+| `--temp` | 全部以上 + `__pycache__` | 所有临时文件 |
+
+### 16.5 设计决策
+
+| 决策 | 理由 |
+|------|------|
+| 惰性导入数据库模块 | `--help` 不需要安装 psycopg，通过 `_get_db()` 仅在执行实际数据库操作时才导入 |
+| `--active-only` 过滤终态数据 | 终态工单/计划可作为审计留痕，仅清理活跃状态可避免影响正在运行的任务 |
+| 级联删除而非依赖 ON DELETE CASCADE | 子任务/消息显式先删除，避免依赖数据库外键约束的隐性行为 |
+| `--agent` 全链路清理 | 智能体可能在多个表中留下数据（聊天、工单、子任务、提醒），逐表清理容易遗漏 |
+| `--all --force` 双层防护 | `--all` 需确认输入 "yes"，`--force` 跳过确认，防止误操作 |

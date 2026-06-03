@@ -214,6 +214,7 @@ python main.py
 | `BROWSER_CHANNEL` | 浏览器通道：`chrome`（系统 Chrome）或 `chromium`（Playwright 自带） | `chrome` |
 | `BROWSER_CDP_PORT` | CDP 远程调试端口，设置后连接已有 Chrome（如 `9222`），不启动新实例 | 空（不启用） |
 | `CHROME_PATH` | Chrome 可执行文件路径，不设置则自动从注册表查找 | 空（自动查找） |
+| `AGENT_SHOW_CONSOLE` | 设为 `1` 显示子智能体控制台窗口（调试用，默认隐藏） | 空（隐藏） |
 
 ### 模型配置
 
@@ -280,7 +281,7 @@ AgentPro/
 │
 ├── start_project.bat               # 一键启动（Windows）
 ├── stop_project.bat                # 一键停止（Windows）
-├── clean_checkpoints.py            # 短期记忆清理脚本
+├── clean_db.py                     # 数据库与临时文件清理脚本
 ├── pyproject.toml                  # 项目配置与依赖
 ├── ARCHITECTURE.md                 # 详细技术架构文档
 └── README.md
@@ -394,21 +395,46 @@ Tier 3: 视觉网格定位 ─── 20×14 网格 + GLM-4.1V 视觉模型
 
 ## 清理脚本
 
+`clean_db.py` 是数据库与临时文件的统一清理工具，支持按类别精确清理或一键全清。
+
 ```bash
-# 清除指定线程的短期记忆
-python clean_checkpoints.py --thread "agent_17_super_user_xxxx"
+# 查看所有表的统计信息（不删除）
+python clean_db.py --stats
 
-# 清除所有短期记忆
-python clean_checkpoints.py --all
+# 清理工单
+python clean_db.py --tickets              # 所有工单（含终态）
+python clean_db.py --tickets --active-only # 仅活跃工单
 
-# 清除指定群聊房间及成员
-python clean_checkpoints.py --room "room_id"
+# 清理编排计划
+python clean_db.py --orchestration
+python clean_db.py --orchestration --active-only
 
-# 清除所有群聊房间
-python clean_checkpoints.py --clear-rooms
+# 清理聊天与会话
+python clean_db.py --chat                 # 所有聊天消息
+python clean_db.py --conversations        # 所有会话线程（级联删除消息）
 
-# 清除指定智能体的聊天记录
-python clean_checkpoints.py --agent agent_main
+# 清理短期记忆（LangGraph 检查点）
+python clean_db.py --checkpoints
+python clean_db.py --checkpoints --thread "thread_id"  # 指定线程
+
+# 按智能体清理（聊天 + 检查点 + 会话 + 关联工单 + 子任务 + 提醒）
+python clean_db.py --agent agent_main
+
+# 清理提醒
+python clean_db.py --reminders
+
+# 清理群聊房间
+python clean_db.py --rooms               # 所有房间
+python clean_db.py --room room_xxx       # 指定房间
+
+# 清理临时文件
+python clean_db.py --screenshots          # 浏览器截图
+python clean_db.py --tool-outputs         # 工具输出日志
+python clean_db.py --temp                 # 所有临时文件
+
+# 一键全清（危险，需确认）
+python clean_db.py --all
+python clean_db.py --all --force          # 跳过确认
 ```
 
 ---
