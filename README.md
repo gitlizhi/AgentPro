@@ -2,6 +2,8 @@
 
 <div align="center">
 
+[![README in English](https://img.shields.io/badge/README-English-blue.svg)](README_EN.md)
+
 **基于 LangGraph + LangChain 的多智能体协作平台**
 
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
