@@ -173,6 +173,33 @@ class MessageBuffer:
 - 接收循环内的非致命错误（JSON 解析失败、单条消息处理异常）不触发重连，仅记录日志并继续
 - 只有 `ConnectionClosed` 才退出接收循环触发重连
 - `close()` 设置 `_running=False` 后循环自然退出，不会无限重连
+- **断连超时自毁**：累计断连超过 `_RECONNECT_MAX_TOTAL`（60 秒）则 `os._exit(1)` 杀死进程，防止僵尸进程长期占用资源。成功重连后计时器归零，短暂闪断不会累积触发
+
+### 3.7 前端消息路由（thread_id 全链路）
+
+Agent 执行任务时产生的所有消息（工具调用进度、审批请求、流式回复）通过 `thread_id` 精确路由到前端对应的会话窗口，防止 Agent A 的消息出现在 Agent B 的对话中。
+
+```
+brain.py: _safe_send(text, type, ...)
+  → 自动附加 self.thread_id 到 payload
+    → comm.send_to_agent(super_user, payload)
+      → Hub → client.py (super_user 桥接器)
+        → 提取 payload.thread_id，注入所有转发到前端的消息
+          → 前端 WS: data.thread_id 路由到正确会话
+```
+
+**三层防护机制：**
+
+| 层级 | 文件 | 机制 |
+|------|------|------|
+| 后端发送 | `brain.py:_safe_send` | 发送给 super_user 时自动附加 `self.thread_id` |
+| Hub 桥接 | `client.py:connect_to_hub` | 从 hub payload 提取 `thread_id`，注入所有转发消息（message、tool_call_start/end、approval_request） |
+| 前端过滤 | `client.html` | 消息按 `data.thread_id` 路由到对应会话缓存；`tool_call_start/end` 和 `approval_request` 仅当 `data.from === activeAgent` 时处理；`selectAgent()` 立即置空 `activeThreadId` 防止竞态 |
+
+**前端路由优先级**：
+1. 显式 `thread_id`（来自后端，权威路由）
+2. 当前活跃会话的 `activeThreadId`（用户正在查看）
+3. 该 Agent 的首个会话（fallback，兼容旧消息）
 
 ### 3.6 上下文管理（Context Management）
 
@@ -453,9 +480,67 @@ Brain._handle_with_agent() / _process_agent_message()
 - 无意义的客套话和重复确认消耗 token
 - 任务协调被 LLM 误判为"死循环"而静默终止
 
-### 5.2 解决方案：ConversationTracker
+### 5.2 主方案：Task Delegation Protocol (TDP)
 
-`agent/conversation_tracker.py` 为每一对智能体维护独立的对话状态，包括轮次计数、警告阈值和硬上限。
+`agent/delegation.py` 引入了**任务委托协议**，将智能体私聊从"自由文本聊天"升级为"结构化工单管理"。
+
+#### 核心概念
+
+每段智能体私聊必须绑定一个 `TaskTicket`（任务工单），工单有明确的生命周期、交付标准和多重自动终止条件。
+
+#### 工单状态机
+
+```
+┌─────────┐  accept   ┌──────────┐   工作    ┌─────────────┐  deliver  ┌────────┐
+│ PENDING  │─────────→│ ACCEPTED │────────→│ IN_PROGRESS  │─────────→│ CLOSED │
+└─────────┘           └──────────┘          └─────────────┘           └────────┘
+     │                     │                      │                      ▲
+     └→ DECLINED           └→ NEGOTIATING         └→ TIMED_OUT ─────────┘
+                            (最多2轮澄清)            (超时自动关闭)
+```
+
+#### 委托工具集
+
+`agent/tools_factory.py:create_delegation_tools()` 提供7个结构化工具：
+
+| 工具 | 用途 | 计入轮次 |
+|------|------|---------|
+| `delegate_task(agent, description, expected_output, max_rounds)` | 创建工单并发送委托 | - |
+| `accept_task(ticket_id)` / `decline_task(ticket_id, reason)` | 响应委托（握手） | 否 |
+| `deliver_result(ticket_id, summary)` | 交付最终结果 → CLOSED | - |
+| `request_clarification(ticket_id, question)` | 澄清需求（最多2轮） | 是 |
+| `cancel_task(ticket_id, reason)` | 任一方取消 | 否 |
+| `report_progress(ticket_id, status)` | 可选进度汇报 | 否 |
+
+#### 多重自动终止条件
+
+| 条件 | 机制 |
+|------|------|
+| 显式交付 | `deliver_result` 调用 → CLOSED |
+| 轮次耗尽 | `record_round()` 达 max_rounds → TIMED_OUT |
+| 空闲超时 | `_ticket_timeout_loop` 检测 10 分钟无活动 → TIMED_OUT |
+| 语义停滞 | `_should_terminate_conversation` 检测重复循环 → CANCELLED |
+| 用户介入 | super_user 可随时取消任意工单 |
+
+#### 路由层门控
+
+`core.py:_handle_message` 增加三层门控：
+1. TDP 协议消息（`_tdp` 字段）直接放行
+2. 有活跃工单 → 允许（受工单轮次预算约束）
+3. 无活跃工单 → 走旧 `ConversationTracker` 兜底
+
+#### 关键文件
+
+| 文件 | 职责 |
+|------|------|
+| `agent/delegation.py` | TaskTicket、TicketState、DelegationManager 核心逻辑 |
+| `agent/tools_factory.py` | `create_delegation_tools` + 改造后的 `send_to_agent` |
+| `agent/brain.py` | 集成 DelegationManager，工单上下文注入，超时循环 |
+| `agent/core.py` | 消息路由层 TDP 门控 |
+
+### 5.3 兜底方案：ConversationTracker
+
+`agent/conversation_tracker.py` 保留作为兜底机制，在无活跃 TDP 工单时提供基础的轮次计数和硬截断保护。
 
 #### 生命周期
 
@@ -465,9 +550,9 @@ Brain._handle_with_agent() / _process_agent_message()
   → 使用同一个 thread_id 直到会话结束（保证上下文连续）
 
 轮次 1-3: 正常通信，无干预
-轮次 4-5: 💡 系统提示注入 "请在 X 轮内完成交流"
-轮次 6-7: ⚠️ 最后通牒 "还剩 2 轮 / 最后 1 轮"
-轮次 8:   🔒 硬截断 + 30 分钟冷却 + 通知 super_user
+轮次 4-5: 系统提示注入 "请在 X 轮内完成交流"
+轮次 6-7: 最后通牒 "还剩 2 轮 / 最后 1 轮"
+轮次 8:   硬截断 + 30 分钟冷却 + 通知 super_user
 
 会话重置触发条件：
   - 用户发送消息给任一参与方（自动解除所有限制）
@@ -475,18 +560,16 @@ Brain._handle_with_agent() / _process_agent_message()
   - 30 分钟冷却到期
 ```
 
-#### Thread ID 隔离
+#### TDP vs ConversationTracker 对比
 
-每次新会话生成独立的 `thread_id`，不同会话的 LangGraph checkpoint 互不干扰。这解决了旧设计中"同一对智能体的所有历史对话混在一个 checkpoint 里"的问题。
-
-#### 门控位置
-
-| 层级 | 位置 | 行为 |
-|------|------|------|
-| 入口 | `core.py:_handle_message` | 已截断对话直接丢弃 |
-| 缓冲 | `brain.py:_handle_with_agent` | 已截断对话不进入延迟处理 |
-| 处理 | `brain.py:_process_agent_message` | 硬截断检查 + 轮次警告注入 |
-| 发送 | `brain.py:_create_send_to_agent_tool` | 发送前检查 can_send，发送后 record_send |
+| 维度 | TDP | ConversationTracker |
+|------|-----|---------------------|
+| 控制模型 | 工单生命周期 + 状态机 | 纯轮次计数 |
+| 任务结构 | 结构化委托（desc/expected/max_rounds） | 自由文本聊天 |
+| 完成信号 | 显式 `deliver_result` | LLM 自觉发 `[停止交流]` |
+| 无工单私聊 | 允许（兼容旧行为） | 允许（仅轮次限制） |
+| 用户可见性 | 所有工单状态通知 super_user | 仅截断时通知 |
+| 超时检测 | 10 分钟空闲自动超时 | 无 |
 
 ---
 
@@ -645,6 +728,9 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | Token 预算主动跟踪 | 使用字符计数启发式估计 token 用量（保守比率 2.8 字符/token），在 80% 时主动通知用户，85% 时触发 SummarizationMiddleware 提前压缩。相比纯被动等待中间件触发（20K token），主动预算让用户有心理预期 |
 | 工具输出自动压缩 | 单条工具输出超 2000 字符时自动压缩为头+尾+省略标记+文件引用的格式。防止单次大结果（如网页抓取 50KB HTML）撑爆上下文窗口。完整输出保存到临时文件供后续查阅 |
 | Agent 专属上下文文件（CLAUDE.md 模式） | 每个 Agent 在 `agent/agent_context/{agent_id}.md` 中定义持久化上下文，启动时注入系统提示词。内容需精简（每轮都消耗 token），大量操作指南应使用技能系统按需加载 |
+| agent_status 缓存恢复 | `client.py` 维护 `agent_statuses` 缓存，新前端连接时补发所有 Agent 状态，解决页面刷新后停止按钮消失的问题。Agent 离线时清理缓存避免过期数据 |
+| 前端 thread_id 路由 + 事件过滤 | 消息通过 `thread_id` 全链路（brain→client.py→前端）精确路由到对应会话窗口；`tool_call_start/end` 和 `approval_request` 按 `data.from` 过滤，仅当前活跃 Agent 的事件才更新 UI，彻底解决跨 Agent 消息串扰 |
+| Agent 断连超时自毁 | `communication.py` 累计断连超过 60 秒直接 `os._exit(1)`，防止网络彻底中断时 Agent 进程无限挂起重试成为僵尸进程
 
 ### 11.3 工具调用进度流
 
@@ -718,6 +804,8 @@ Agent 通过 `agent_status` 消息实时通知前端自身状态，前端据此�
 | 消息路由 | `agent/core.py` | 接收 `stop_task` 消息，调用 `brain.stop_current_task()` |
 | Hub 转发 | `hub/server.py` | 路由 `stop_task` 和 `agent_status` 消息 |
 | 前端按钮 | `client.html` | `#stopBtn` 根据 `agentBusyStates[activeAgent]` 控制显隐 |
+
+**agent_status 缓存（刷新恢复）**：`client.py` 中维护 `agent_statuses: dict[str, str]` 缓存每个 Agent 最后上报的状态。当前端新连接建立时，在发送在线 Agent 列表后补发所有已缓存的 status，使页面刷新后停止按钮立即恢复正确状态。Agent 离线时清理对应缓存。
 
 **设计考量：**
 
@@ -1246,7 +1334,8 @@ args=[
 | `agent/communication.py` | WebSocket 客户端 |
 | `agent/prompts.py` | 所有 LLM 提示词 |
 | `agent/agent_context/*.md` | Agent 专属上下文文件（类似 Claude Code 的 CLAUDE.md） |
-| `agent/conversation_tracker.py` | 智能体对话轮次控制 |
+| `agent/conversation_tracker.py` | 智能体对话轮次控制（TDP 兜底） |
+| `agent/delegation.py` | TDP 任务委托协议核心（TaskTicket + DelegationManager） |
 | `agent/task_buffer.py` | 任务步骤缓冲 |
 | `agent/memory.py` | ChromaDB 记忆存储 + 用户画像按需读取 |
 | `agent/conversation_memory_extractor.py` | 对话记忆后台提取 |
