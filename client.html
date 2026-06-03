@@ -1494,6 +1494,13 @@ let agentBusyStates = {};  // { agentId: "busy" | "idle" }
 let toolCallActive = 0;
 let toolCallDoneTimer = null;
 
+function resetToolStatus() {
+    toolCallActive = 0;
+    if (toolCallDoneTimer) { clearTimeout(toolCallDoneTimer); toolCallDoneTimer = null; }
+    const ts = document.getElementById('toolStatus');
+    if (ts) { ts.style.display = 'none'; }
+}
+
 // conversations: { agentId: [{ thread_id, title, created_at, updated_at, is_archived }] }
 let conversations = {};
 // messageCache: { threadId: [{ role, content, created_at }] }
@@ -1824,6 +1831,7 @@ function renderConvList() {
 }
 
 async function switchConversation(agentId, threadId) {
+    resetToolStatus();
     activeAgent = agentId;
     activeThreadId = threadId;
     activeRoom = null;
@@ -1884,6 +1892,7 @@ async function archiveConversation(threadId) {
     delete messageCache[threadId];
 
     if (activeThreadId === threadId) {
+        resetToolStatus();
         activeThreadId = null;
         messagesDiv.innerHTML = '<div class="empty-chat">开始新会话</div>';
         currentChatNameSpan.innerText = activeAgent || 'AgentPro';
@@ -2021,7 +2030,9 @@ function renderAgentList() {
 }
 
 async function selectAgent(agentId) {
+    resetToolStatus();
     activeAgent = agentId;
+    activeThreadId = null;  // Immediately detach from old thread to prevent message routing race
     activeRoom = null;
     // Clear unread indicator for this agent
     unreadAgents.delete(agentId);
@@ -2066,6 +2077,9 @@ async function uploadImage(base64data) {
 async function sendMessage() {
     let text = messageInput.value.trim();
     if (!text && !currentImageBase64) return;
+
+    // Clear stale tool status from any previously interrupted task
+    resetToolStatus();
 
     // Upload image first (convert base64 → file path on server)
     let imageUrl = null;
@@ -2158,6 +2172,7 @@ function renderRooms() {
 }
 
 function selectRoom(roomId) {
+    resetToolStatus();
     if (activeAgent) { activeAgent = null; activeThreadId = null; renderAgentList(); renderConvList(); }
     activeRoom = roomId;
     currentChatNameSpan.innerText = roomId;
@@ -2344,6 +2359,7 @@ function connect() {
                 if (activeRoom && rooms[activeRoom]) updateMembersPanel(rooms[activeRoom].members);
                 // 如果当前正在查看该智能体的会话，恢复到无会话状态
                 if (activeAgent === aid) {
+                    resetToolStatus();
                     activeAgent = null;
                     activeThreadId = null;
                     messagesDiv.innerHTML = '<div class="empty-chat">选择一个智能体开始对话</div>';
@@ -2357,15 +2373,28 @@ function connect() {
             }
         } else if (data.type === 'message') {
             const from = data.from, text = data.text, image = data.image || null;
+            const msgThreadId = data.thread_id || null;
             const time = new Date().toLocaleTimeString('zh-CN', { timeZone: 'Asia/Shanghai' });
-            // Determine which thread to save to
-            let targetThreadId = activeThreadId;
-            if (activeAgent !== from) {
-                // Message from an agent not currently active — find or create a thread
+            // Route by explicit thread_id when available, otherwise guess
+            let targetThreadId;
+            if (msgThreadId) {
+                targetThreadId = msgThreadId;
+                // Ensure conversation record exists
+                if (!conversations[from]) conversations[from] = [];
+                if (!conversations[from].find(c => c.thread_id === msgThreadId)) {
+                    conversations[from].unshift({
+                        thread_id: msgThreadId, agent_id: from, title: '新会话',
+                        created_at: new Date().toISOString(), updated_at: new Date().toISOString(), is_archived: false
+                    });
+                    messageCache[msgThreadId] = [];
+                }
+            } else if (activeAgent === from && activeThreadId) {
+                targetThreadId = activeThreadId;
+            } else {
+                // Fallback: find first conversation for this agent
                 const convs = conversations[from] || [];
                 targetThreadId = convs.length > 0 ? convs[0].thread_id : null;
                 if (!targetThreadId) {
-                    // Auto-create a conversation for messages from previously unknown agents
                     targetThreadId = generateThreadId(from);
                     await api('POST', '/chat/conversations', { agent_id: from, thread_id: targetThreadId });
                     if (!conversations[from]) conversations[from] = [];
@@ -2375,7 +2404,9 @@ function connect() {
                     });
                     messageCache[targetThreadId] = [];
                 }
-                // Mark agent as having unread messages
+            }
+            // Mark agent as having unread messages if not currently viewing
+            if (activeAgent !== from || activeThreadId !== targetThreadId) {
                 unreadAgents.add(from);
                 renderAgentList();
             }
@@ -2384,8 +2415,8 @@ function connect() {
                 if (!messageCache[targetThreadId]) messageCache[targetThreadId] = [];
                 messageCache[targetThreadId].push({ role: 'assistant', content: text, created_at: new Date().toISOString(), image: image });
             }
-            // Display if this agent is active
-            if (activeAgent === from && activeThreadId && (shouldShowToolMsg(text) || !isToolMessage(text))) {
+            // Display only if this agent AND this thread are active
+            if (activeAgent === from && activeThreadId === targetThreadId && (shouldShowToolMsg(text) || !isToolMessage(text))) {
                 displayMessage(from, text, time, image);
             }
         } else if (data.type === 'group_message') {
@@ -2415,6 +2446,7 @@ function connect() {
             renderRooms();
             if (activeRoom === data.room_id) ws.send(JSON.stringify({ type: 'get_room_members', room_id: data.room_id }));
         } else if (data.type === 'approval_request') {
+            if (data.from !== activeAgent) return;
             pendingApproval = { tool: data.tool, args: data.args, allowed: data.allowed, fromAgent: data.from, tool_call_id: data.tool_call_id };
             approvalContentDiv.innerHTML = `<strong>工具调用审批</strong><br>工具: ${escapeHtml(data.tool)}<br>参数: <pre style="margin-top:6px;">${JSON.stringify(data.args, null, 2)}</pre><br>允许: ${data.allowed.join(', ')}`;
             modalOverlay.classList.add('active');
@@ -2424,6 +2456,7 @@ function connect() {
             agentBusyStates[aid] = status;
             updateStopButton();
         } else if (data.type === 'tool_call_start') {
+            if (data.from !== activeAgent) return;
             toolCallActive++;
             if (toolCallDoneTimer) { clearTimeout(toolCallDoneTimer); toolCallDoneTimer = null; }
             const ts = document.getElementById('toolStatus');
@@ -2435,6 +2468,7 @@ function connect() {
                 : `正在执行: ${data.tool_name}...`;
             ts.style.display = 'flex';
         } else if (data.type === 'tool_call_end') {
+            if (data.from !== activeAgent) return;
             toolCallActive = Math.max(0, toolCallActive - 1);
             const ts = document.getElementById('toolStatus');
             const dot = document.getElementById('toolStatusDot');
@@ -2504,6 +2538,7 @@ stopBtn.onclick = () => {
     if (activeAgent && agentBusyStates[activeAgent] === 'busy') {
         ws.send(JSON.stringify({ type: 'stop_task', agent_id: activeAgent }));
         stopBtn.classList.remove('visible');
+        resetToolStatus();
     }
 };
 

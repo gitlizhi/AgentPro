@@ -141,6 +141,7 @@ online_agents = set()
 frontend_connections = set()
 my_agent_id = 'super_user'
 _launched_agents: dict[str, subprocess.Popen] = {}  # agent_id -> Popen
+agent_statuses: dict[str, str] = {}  # agent_id -> "busy" | "idle"
 
 
 def clean_agent_response(text: str) -> str:
@@ -181,6 +182,10 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # 发送初始在线 Agent 列表
         await websocket.send_json({"type": "agents", "agents": list(online_agents)})
+        # 补发已缓存的 agent 状态（解决刷新后丢失 busy/idle 的问题）
+        for aid, status in agent_statuses.items():
+            if aid in online_agents:
+                await websocket.send_json({"type": "agent_status", "agent_id": aid, "status": status})
         # 可以请求用户所在的房间列表（Hub 应支持 get_my_rooms）
         if hub_ws:
             await hub_ws.send(json.dumps({"type": "get_my_rooms", "agent_id": my_agent_id}))
@@ -336,6 +341,7 @@ async def connect_to_hub():
                     elif msg_type == "agent_offline":
                         agent = data.get("agent_id")
                         if agent:
+                            agent_statuses.pop(agent, None)  # 清理缓存
                             for conn in frontend_connections:
                                 await conn.send_json({"type": "agent_offline", "agent_id": agent})
 
@@ -344,6 +350,7 @@ async def connect_to_hub():
                         payload = data.get("payload", {})
                         text = payload.get("text", "")
                         inner_type = payload.get("type", "")
+                        thread_id = payload.get("thread_id", "")
                         if inner_type == 'approval_request':
                             for conn in frontend_connections:
                                 await conn.send_json({
@@ -353,6 +360,7 @@ async def connect_to_hub():
                                     "args": payload.get("args"),
                                     "allowed": payload.get("allowed"),
                                     "tool_call_id": payload.get("tool_call_id"),
+                                    "thread_id": thread_id,
                                 })
                         elif inner_type in ('tool_call_start', 'tool_call_end'):
                             for conn in frontend_connections:
@@ -361,11 +369,12 @@ async def connect_to_hub():
                                     "from": sender,
                                     "tool_name": payload.get("tool_name", ""),
                                     "text": payload.get("text", ""),
+                                    "thread_id": thread_id,
                                 })
                             # 同时作为聊天消息展示（保留历史记录）
                             cleaned = clean_agent_response(text)
                             if cleaned:
-                                msg = {"type": "message", "from": sender, "text": cleaned}
+                                msg = {"type": "message", "from": sender, "text": cleaned, "thread_id": thread_id}
                                 for conn in frontend_connections:
                                     await conn.send_json(msg)
                         else:
@@ -375,7 +384,8 @@ async def connect_to_hub():
                             msg = {
                                 "type": "message",
                                 "from": sender,
-                                "text": cleaned
+                                "text": cleaned,
+                                "thread_id": thread_id,
                             }
                             if payload.get("image"):
                                 msg["image"] = payload["image"]
@@ -446,6 +456,7 @@ async def connect_to_hub():
                                 await conn.send_json(msg)
         
                     elif msg_type == "agent_status":
+                        agent_statuses[data.get("agent_id")] = data.get("status")
                         for conn in frontend_connections:
                             await conn.send_json({
                                 "type": "agent_status",
