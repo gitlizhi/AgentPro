@@ -80,14 +80,6 @@ class Brain:
         self.user_id = None
         # 不应出现在可委派列表中的非智能体 ID
         self._NON_PEER_IDS = {"super_user", "reminder_bot"}
-
-    @property
-    def peer_agents(self) -> set:
-        """返回可委派/协作的在线智能体（排除用户、提醒机器人等非智能体角色和自身）。"""
-        if not self.online_agents:
-            return set()
-        return {a for a in self.online_agents
-                if a not in self._NON_PEER_IDS and a != self.agent_id}
         # 获取模型
         self.model = model_config.get_model(config.model.default_provider)  # model_config 仍需按需
         self.thread_id = None
@@ -215,7 +207,15 @@ class Brain:
                     ToolOutputCompactionMiddleware(self.context_manager),
             ]
         )
-    
+
+    @property
+    def peer_agents(self) -> set:
+        """返回可委派/协作的在线智能体（排除用户、提醒机器人等非智能体角色和自身）。"""
+        if not self.online_agents:
+            return set()
+        return {a for a in self.online_agents
+                if a not in self._NON_PEER_IDS and a != self.agent_id}
+
     def get_platform(self):
         if os.name == 'nt':
             return "Windows"
