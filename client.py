@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 import psycopg
 from config import config  # 导入你的配置
 from agent.prompts import build_launch_agent_prompt
+from dotenv import load_dotenv
+load_dotenv()
 
 # 获取数据库连接字符串（同步方式）
 DB_URI = config.db.postgres_uri
@@ -714,6 +716,8 @@ async def launch_agent_endpoint(data: LaunchAgentRequest):
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(cmd, startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+        elif sys.platform == 'win32':
+            process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             process = subprocess.Popen(cmd)
         _launched_agents[data.agent_id] = process

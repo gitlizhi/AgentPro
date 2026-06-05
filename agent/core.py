@@ -60,6 +60,7 @@ class Agent:
                 if user_input and sender not in [self.agent_id, 'super_user']:
                     dm = self.brain.delegation_manager
                     is_tdp = payload.get("_tdp", "")
+                    tdp_notification = None  # 将作为参数传入 process()，消除竞态
 
                     # ── TDP Gate 1: 协议消息（delegation/acceptance/decline 等）直接放行 ──
                     if not is_tdp:
@@ -80,15 +81,23 @@ class Agent:
                                 pass
                             return
                         if not ticket:
-                            # ── TDP Gate 3: 无活跃工单，检查旧 tracker 限制 ──
+                            # ── TDP Gate 3: 无活跃工单 ──
+                            # 若当前 agent 正在编排任务，拒绝所有无工单消息（防止 worker 闲聊）
+                            if self.brain._is_orchestrating:
+                                logger.info(
+                                    f"编排模式: 拒绝 {sender} 的无工单消息 "
+                                    f"(agent={self.agent_id} 正在编排中)"
+                                )
+                                return
+                            # 检查旧 tracker 限制
                             if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
                                 logger.info(f"TDP: {self.agent_id}<->{sender} 无工单且被旧 tracker 截断，丢弃")
                                 return
-                            # 允许通过（兼容旧 send_to_agent 无工单行为），但记录警告
+                            # 允许通过（兼容旧 send_to_agent 无工单行为）
                             logger.info(f"TDP: {self.agent_id} 收到 {sender} 的无工单消息，允许通过（兼容模式）")
                     else:
-                        # ── TDP 协议消息：存储 metadata 供 brain 处理 ──
-                        self.brain._tdp_notification = {
+                        # ── TDP 协议消息：构建通知（不再设置共享可变字段）──
+                        tdp_notification = {
                             "_tdp": is_tdp,
                             "ticket_id": payload.get("ticket_id", ""),
                             "text": user_input,
@@ -102,7 +111,9 @@ class Agent:
                     if self.brain.conversation_tracker.is_capped(self.agent_id, sender):
                         logger.info(f"对话 {self.agent_id}<->{sender} 已截断，丢弃消息于入口处")
                         return
-                    self._schedule_task(self._process_message(sender, user_input, image_data, new_thread, thread_id))
+                    self._schedule_task(self._process_message(
+                        sender, user_input, image_data, new_thread, thread_id, tdp_notification
+                    ))
                     return
                 if user_input.startswith("/approve"):
                     tool_call_id = user_input.split()[1] if len(user_input.split()) > 1 else None
@@ -212,7 +223,8 @@ class Agent:
         except Exception as e:
             logger.error(f"Unhandled exception in _handle_message: {e}", exc_info=True)
 
-    async def _process_message(self, sender, user_input, image_data, new_thread, thread_id=None):
+    async def _process_message(self, sender, user_input, image_data, new_thread, thread_id=None,
+                               tdp_notification=None):
         """后台处理普通消息（包括可能触发 HITL 的任务）"""
         # 前端显式传了 thread_id 则使用；new_thread 时不制造兜底值，交给 brain 生成
         if new_thread:
@@ -226,13 +238,14 @@ class Agent:
                 image_data=image_data,
                 new_thread=new_thread,
                 thread_id_override=effective_thread_id,
-                silent=False
+                silent=False,
+                tdp_notification=tdp_notification,
             )
             if response:
                 response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
-            if not response and sender != 'super_user':
+            if not response:
                 return
-            reply_payload = {"text": response if response else ''}
+            reply_payload = {"text": response}
             await self.comm.send_to_agent(sender, reply_payload)
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)

@@ -90,6 +90,9 @@ class OrchestrationManager:
         # ticket_id → (plan_id, subtask_id) 反查索引
         self._ticket_index: dict[str, tuple[str, str]] = {}
         self._pool = None  # 可选: 持久化连接池
+        # plan_id → (timestamp, progress_snapshot) 用于防抖检测
+        self._last_check: dict[str, tuple[float, str]] = {}
+        self._DEBOUNCE_SECONDS = 20  # 同一 plan 最小查询间隔
 
     def set_pool(self, pool):
         """注入数据库连接池，启用持久化"""
@@ -176,6 +179,8 @@ class OrchestrationManager:
                     """, (plan.plan_id,))
                     for st_row in await st_rows.fetchall():
                         depends = json.loads(st_row[4]) if isinstance(st_row[4], str) else (st_row[4] or [])
+                        # 规范化：DB 中可能存有整数，统一转字符串
+                        depends = [f"st_{d}" if isinstance(d, int) else str(d) for d in (depends or [])]
                         st = SubTask(
                             id=st_row[0],
                             description=st_row[1],
@@ -220,15 +225,35 @@ class OrchestrationManager:
         plan = self._plans.get(plan_id)
         if not plan:
             raise ValueError(f"Plan {plan_id} not found")
-        plan.subtasks = [
-            SubTask(
+        plan.subtasks = []
+        for i, spec in enumerate(subtask_specs):
+            # 规范化 depends_on：LLM 可能返回整数 [1, 2] 或字符串 ["1", "st_1"]
+            raw_deps = spec.get("depends_on", [])
+            normalized_deps = []
+            for d in (raw_deps or []):
+                if isinstance(d, int):
+                    normalized_deps.append(f"st_{d}")
+                else:
+                    s = str(d)
+                    normalized_deps.append(f"st_{s}" if s.isdigit() else s)
+            plan.subtasks.append(SubTask(
                 id=f"st_{i + 1}",
                 description=spec["description"],
-                depends_on=spec.get("depends_on", []),
+                depends_on=normalized_deps,
                 suggested_role=spec.get("suggested_role", ""),
-            )
-            for i, spec in enumerate(subtask_specs)
-        ]
+            ))
+
+        # ── 验证依赖：移除对不存在子任务的引用（防止 LLM 幻觉如 st_0）──
+        valid_ids = {st.id for st in plan.subtasks}
+        for st in plan.subtasks:
+            invalid = [d for d in st.depends_on if d not in valid_ids]
+            if invalid:
+                logger.warning(
+                    f"子任务 {st.id} 引用了不存在的依赖 {invalid}，已自动移除。"
+                    f"有效 ID: {sorted(valid_ids)}"
+                )
+                st.depends_on = [d for d in st.depends_on if d in valid_ids]
+
         plan.state = PlanState.READY
         await self._save_plan(plan)
         return plan
@@ -323,6 +348,24 @@ class OrchestrationManager:
         if not plan:
             return f"未找到计划 {plan_id}"
 
+        # ── 防抖：同一 plan 在 DEBOUNCE_SECONDS 内重复查询且进度无变化时拒绝 ──
+        now = time.time()
+        snapshot = f"{plan.completed_count}/{plan.total_count}/{plan.failed_count}/{plan.state.value}"
+        if plan_id in self._last_check:
+            last_ts, last_snapshot = self._last_check[plan_id]
+            elapsed = now - last_ts
+            if elapsed < self._DEBOUNCE_SECONDS and snapshot == last_snapshot:
+                logger.info(
+                    f"check_plan_progress 防抖拦截至 {plan_id}: "
+                    f"距上次查询仅 {elapsed:.1f}s，进度无变化"
+                )
+                return (
+                    f"⚠️ 距上次查询仅 {elapsed:.0f} 秒，计划进度与上次相同（{plan.completed_count}/{plan.total_count} 完成），"
+                    f"无新变化。子任务完成后系统会自动通知你，**请勿频繁轮询**。"
+                    f"只有收到通知或用户主动询问时才需要再次查询。"
+                )
+        self._last_check[plan_id] = (now, snapshot)
+
         icon_map = {
             "pending": "⏳", "dispatched": "📤", "in_progress": "🔄",
             "completed": "✅", "failed": "❌",
@@ -334,7 +377,7 @@ class OrchestrationManager:
         ]
         for st in plan.subtasks:
             icon = icon_map.get(st.status.value, "❓")
-            dep_str = f" (依赖: {', '.join(st.depends_on)})" if st.depends_on else ""
+            dep_str = f" (依赖: {', '.join(str(d) for d in st.depends_on)})" if st.depends_on else ""
             agent_str = f" → {st.assigned_to}" if st.assigned_to else ""
             result_str = f" — {st.result[:80]}" if st.result else ""
             lines.append(f"{icon} **{st.id}**: {st.description}{dep_str}{agent_str}{result_str}")

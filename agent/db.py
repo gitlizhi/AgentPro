@@ -189,8 +189,17 @@ async def init_db_pool():
                     created_at DOUBLE PRECISION,
                     accepted_at DOUBLE PRECISION,
                     completed_at DOUBLE PRECISION,
-                    last_activity DOUBLE PRECISION DEFAULT 0
+                    last_activity DOUBLE PRECISION DEFAULT 0,
+                    orchestration_plan_id VARCHAR(64)
                 )
+            """)
+            # 为已有数据库添加列（如果不存在）
+            await conn.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE delegation_tickets ADD COLUMN orchestration_plan_id VARCHAR(64);
+                EXCEPTION WHEN duplicate_column THEN
+                    NULL;
+                END $$;
             """)
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair

@@ -22,6 +22,27 @@ from agent.utils import call_big_model_chat
 logger = logging.getLogger(__name__)
 
 
+def create_get_current_time_tool(brain):
+    """获取当前时间的工具（无状态，不需要 brain 引用）"""
+
+    @tool
+    async def get_current_time() -> str:
+        """获取当前的日期和时间。
+        当需要知道现在是什么时间、日期、星期几，或涉及时间计算、时效性判断时调用此工具。
+        返回当前时间的完整信息，包括日期、时间、星期和时区。"""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now()
+        return (
+            f"当前时间：\n"
+            f"日期：{now.strftime('%Y年%m月%d日')}\n"
+            f"时间：{now.strftime('%H:%M:%S')}\n"
+            f"星期：{['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'][now.weekday()]}\n"
+            f"ISO 格式：{now.isoformat()}"
+        )
+
+    return get_current_time
+
+
 def create_load_user_profile_tool(brain):
     """按需加载用户画像工具"""
     brain_ref = brain
@@ -75,6 +96,10 @@ def create_send_to_agent_tool(brain):
 
     @tool(description=_send_desc)
     async def send_to_agent(target_agent_id: str, message: str) -> str:
+        # ── 禁止向自己发消息 ──
+        if target_agent_id == brain_ref.agent_id:
+            return f"❌ 不能向自己发送消息。如果你想记录信息，请使用 update_memory 工具。"
+
         dm: DelegationManager = brain_ref.delegation_manager
 
         # ---- [停止交流] 映射到 cancel_ticket ----
@@ -319,12 +344,15 @@ def create_delegation_tools(brain):
         except TicketError as e:
             return f"❌ 无法接受工单：{e}"
 
-        # 通知 issuer
-        await brain_ref.comm.send_to_agent(ticket.issuer, {
+        # 通知 issuer（携带 _orchestration 以便编排回调处理）
+        acceptance_payload = {
             "text": f"[TDP] {brain_ref.agent_id} 已接受工单 {ticket_id}: {ticket.description[:80]}",
             "_tdp": "acceptance",
             "ticket_id": ticket_id,
-        })
+        }
+        if getattr(ticket, 'orchestration_plan_id', None):
+            acceptance_payload["_orchestration"] = ticket.orchestration_plan_id
+        await brain_ref.comm.send_to_agent(ticket.issuer, acceptance_payload)
 
         try:
             await brain_ref.comm.send_to_agent("super_user", {
@@ -364,11 +392,14 @@ def create_delegation_tools(brain):
         except TicketError as e:
             return f"❌ 无法拒绝工单：{e}"
 
-        await brain_ref.comm.send_to_agent(ticket.issuer, {
+        decline_payload = {
             "text": f"[TDP] {brain_ref.agent_id} 拒绝了工单 {ticket_id}。原因: {reason}",
             "_tdp": "decline",
             "ticket_id": ticket_id,
-        })
+        }
+        if getattr(ticket, 'orchestration_plan_id', None):
+            decline_payload["_orchestration"] = ticket.orchestration_plan_id
+        await brain_ref.comm.send_to_agent(ticket.issuer, decline_payload)
 
         try:
             await brain_ref.comm.send_to_agent("super_user", {
@@ -404,15 +435,18 @@ def create_delegation_tools(brain):
         except TicketError as e:
             return f"❌ 交付失败：{e}"
 
-        # 通知 issuer
-        await brain_ref.comm.send_to_agent(ticket.issuer, {
+        # 通知 issuer（携带 _orchestration 以便编排回调处理）
+        delivery_payload = {
             "text": (
                 f"[TDP 交付] {brain_ref.agent_id} 已完成工单 {ticket_id}。\n"
                 f"结果: {summary}"
             ),
             "_tdp": "delivery",
             "ticket_id": ticket_id,
-        })
+        }
+        if getattr(ticket, 'orchestration_plan_id', None):
+            delivery_payload["_orchestration"] = ticket.orchestration_plan_id
+        await brain_ref.comm.send_to_agent(ticket.issuer, delivery_payload)
 
         try:
             await brain_ref.comm.send_to_agent("super_user", {
@@ -427,7 +461,9 @@ def create_delegation_tools(brain):
         return (
             f"✅ 工单 {ticket_id} 已交付并关闭。\n"
             f"耗时轮次: {ticket.round_count}/{ticket.max_rounds}\n"
-            f"交付总结: {summary}"
+            f"交付总结: {summary}\n\n"
+            f"⚠️ **工单已关闭，不要发送任何后续消息。你的任务已完全结束。** "
+            f"不要向委托方发总结或补充说明，系统会自动通知对方。"
         )
 
     @tool
@@ -659,7 +695,10 @@ def create_orchestration_tools(brain):
                     description=st.description,
                     expected_output=f"完成子任务: {st.description}",
                     max_rounds=12,
+                    allow_parallel=True,
                 )
+                ticket.orchestration_plan_id = plan_id
+                dm._save_ticket(ticket)
                 await om.dispatch_subtask(plan_id, st.id, assigned, ticket.ticket_id)
 
                 await comm.send_to_agent(assigned, {
@@ -685,12 +724,19 @@ def create_orchestration_tools(brain):
         return (
             f"计划 {plan_id} 已派发 {len(results)} 个子任务:\n"
             + "\n".join(results)
-            + f"\n\n使用 `check_plan_progress('{plan_id}')` 跟踪进度。"
+            + f"\n\n**重要：你无需轮询进度。** 每个子任务完成后系统会自动通知你，"
+            f"届时如果你需要回复用户，直接汇总结果即可。"
+            f"仅当用户主动询问进度时才调用 `check_plan_progress('{plan_id}')`。"
         )
 
     @tool
     async def check_plan_progress(plan_id: str) -> str:
         """查看编排计划的整体进度。
+
+        此工具仅应在以下情况使用：
+        1. 用户明确询问任务进度
+        2. 你收到了子任务完成的通知，需要确认最终状态
+        **严禁反复轮询！** 子任务完成后系统会自动通知你，无需主动查询。
 
         Args:
             plan_id: 要查询的计划 ID
@@ -733,6 +779,8 @@ def create_orchestration_tools(brain):
             expected_output=f"重新分配: {st.description}",
             max_rounds=12,
         )
+        ticket.orchestration_plan_id = plan_id
+        dm._save_ticket(ticket)
         await om.dispatch_subtask(plan_id, st.id, new_agent, ticket.ticket_id)
 
         await comm.send_to_agent(new_agent, {

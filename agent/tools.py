@@ -771,6 +771,8 @@ async def launch_agent(agent_name: str, expertise: str) -> str:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
             process = subprocess.Popen(cmd, startupinfo=startupinfo, creationflags=subprocess.CREATE_NO_WINDOW)
+        elif sys.platform == 'win32':
+            process = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             process = subprocess.Popen(cmd)
         _spawned_agents[agent_name] = {"pid": process.pid, "process": process}

@@ -107,6 +107,9 @@ class TaskTicket:
     # 进度报告历史
     progress_updates: list = field(default_factory=list)
 
+    # 编排关联：若此工单属于某个编排计划，存储 plan_id
+    orchestration_plan_id: Optional[str] = None
+
     def __post_init__(self):
         if not self.thread_id:
             self.thread_id = f"ticket_{self.ticket_id}_{uuid.uuid4().hex[:8]}"
@@ -182,8 +185,9 @@ class DelegationManager:
                             (ticket_id, issuer, assignee, description, expected_output,
                              max_rounds, state, round_count, clarification_count,
                              result_summary, cancel_reason, cancelled_by, thread_id,
-                             created_at, accepted_at, completed_at, last_activity)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             created_at, accepted_at, completed_at, last_activity,
+                             orchestration_plan_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (ticket_id) DO UPDATE SET
                             state = EXCLUDED.state,
                             round_count = EXCLUDED.round_count,
@@ -193,7 +197,8 @@ class DelegationManager:
                             cancelled_by = EXCLUDED.cancelled_by,
                             accepted_at = EXCLUDED.accepted_at,
                             completed_at = EXCLUDED.completed_at,
-                            last_activity = EXCLUDED.last_activity
+                            last_activity = EXCLUDED.last_activity,
+                            orchestration_plan_id = EXCLUDED.orchestration_plan_id
                     """, (
                         ticket.ticket_id, ticket.issuer, ticket.assignee,
                         ticket.description, ticket.expected_output,
@@ -203,6 +208,7 @@ class DelegationManager:
                         ticket.cancelled_by, ticket.thread_id,
                         ticket.created_at, ticket.accepted_at,
                         ticket.completed_at, ticket.last_activity,
+                        ticket.orchestration_plan_id,
                     ))
             except Exception:
                 logger.warning(f"持久化工单 {ticket.ticket_id} 失败", exc_info=True)
@@ -223,7 +229,8 @@ class DelegationManager:
                     SELECT ticket_id, issuer, assignee, description, expected_output,
                            max_rounds, state, round_count, clarification_count,
                            result_summary, cancel_reason, cancelled_by, thread_id,
-                           created_at, accepted_at, completed_at, last_activity
+                           created_at, accepted_at, completed_at, last_activity,
+                           orchestration_plan_id
                     FROM delegation_tickets
                     WHERE state NOT IN ('closed', 'declined', 'timed_out', 'cancelled')
                     ORDER BY created_at
@@ -248,6 +255,7 @@ class DelegationManager:
                     ticket.accepted_at = row[14]
                     ticket.completed_at = row[15]
                     ticket.last_activity = row[16]
+                    ticket.orchestration_plan_id = row[17] or None
 
                     if not ticket.thread_id:
                         ticket.thread_id = f"ticket_{ticket.ticket_id}_{uuid.uuid4().hex[:8]}"
@@ -279,21 +287,26 @@ class DelegationManager:
         description: str,
         expected_output: str,
         max_rounds: int = DEFAULT_MAX_ROUNDS,
+        allow_parallel: bool = False,
     ) -> TaskTicket:
-        """创建新的委托工单。同一对智能体已有活跃工单时拒绝。"""
+        """创建新的委托工单。同一对智能体已有活跃工单时拒绝（除非 allow_parallel=True）。
+
+        allow_parallel: 编排场景下允许多个子任务并行派发给同一智能体。
+        """
         key = self._pair_key(issuer, assignee)
 
         # 检查是否已有活跃工单
-        existing_id = self._by_pair.get(key)
-        if existing_id:
-            existing = self._by_id.get(existing_id)
-            if existing and existing.is_active:
-                raise TicketError(
-                    f"已存在活跃工单 {existing_id}（{existing.description[:50]}...），"
-                    f"请先完成或取消该工单后再创建新的。"
-                )
-            # 旧工单已终止，清理映射
-            del self._by_pair[key]
+        if not allow_parallel:
+            existing_id = self._by_pair.get(key)
+            if existing_id:
+                existing = self._by_id.get(existing_id)
+                if existing and existing.is_active:
+                    raise TicketError(
+                        f"已存在活跃工单 {existing_id}（{existing.description[:50]}...），"
+                        f"请先完成或取消该工单后再创建新的。"
+                    )
+                # 旧工单已终止，清理映射
+                del self._by_pair[key]
 
         ticket_id = str(uuid.uuid4())[:8]
         ticket = TaskTicket(
@@ -419,12 +432,21 @@ class DelegationManager:
     # ── 交付与取消 ────────────────────────────────────────────────
 
     def deliver_result(self, ticket_id: str, summary: str) -> TaskTicket:
-        """交付任务结果，工单正常关闭。"""
+        """交付任务结果，工单正常关闭。
+
+        自动处理 ACCEPTED 状态的工单：先推进到 IN_PROGRESS 再关闭，
+        避免 ACCEPTED→CLOSED 的死锁问题（assignee 接受后无工具能推进到 IN_PROGRESS）。
+        """
         ticket = self._by_id.get(ticket_id)
         if not ticket:
             raise TicketError(f"工单 {ticket_id} 不存在")
         if ticket.is_terminal:
             raise TicketError(f"工单 {ticket_id} 已终止")
+
+        # 自动桥接 ACCEPTED → IN_PROGRESS（消除状态死锁）
+        if ticket.state == TicketState.ACCEPTED:
+            self.transition(ticket_id, TicketState.IN_PROGRESS)
+            logger.info(f"工单 {ticket_id}: 自动从 accepted 推进到 in_progress")
 
         ticket.result_summary = summary
         self.transition(ticket_id, TicketState.CLOSED)

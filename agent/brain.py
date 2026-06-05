@@ -11,7 +11,7 @@ import asyncio
 
 from agent.conversation_tracker import ConversationTracker
 from agent.delegation import DelegationManager, TaskTicket, TicketState, TicketError
-from agent.orchestration import OrchestrationManager
+from agent.orchestration import OrchestrationManager, PlanState, SubTaskStatus
 from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -22,6 +22,7 @@ from agent.model_config import model_config  # 导入配置
 from agent.memory import get_memory
 from agent.message_buffer import MessageBuffer
 from agent.tools_factory import (
+    create_get_current_time_tool,
     create_load_user_profile_tool,
     create_list_online_agents_tool,
     create_send_to_agent_tool,
@@ -110,6 +111,7 @@ class Brain:
         self._tdp_notification = None  # 当前待处理的 TDP 通知 payload
         self._timeout_loop_started = False  # 工单超时循环惰性启动
         self._in_flight_tools = []  # 当前正在执行的工具名称列表（用于中断时清理）
+        self._orchestration_dispatch_hint: str = ""  # 编排子任务完成后，提示派发下一批
         self.group_context = None  # 当前消息的群聊上下文
         # 和其他Agent交互工具
         self.send_to_agent_tool = create_send_to_agent_tool(self)
@@ -183,7 +185,7 @@ class Brain:
         # 自定义工具
         delegation_tools = create_delegation_tools(self)
         orchestration_tools = create_orchestration_tools(self)
-        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), create_get_current_time_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -216,13 +218,167 @@ class Brain:
         return {a for a in self.online_agents
                 if a not in self._NON_PEER_IDS and a != self.agent_id}
 
-    def get_platform(self):
-        if os.name == 'nt':
-            return "Windows"
-        elif os.name == 'posix':
-            return "Linux"
-        else:
-            return "Unknown OS"
+    @property
+    def _is_orchestrating(self) -> bool:
+        """当存在由本 agent 发起且未完成的编排计划时返回 True。
+        此时 agent-to-agent 消息应纯程序化处理，LLM 不参与。"""
+        return any(
+            p.state in (PlanState.READY, PlanState.EXECUTING)
+            and p.issuer == self.agent_id
+            for p in self.orchestration_manager._plans.values()
+        )
+
+    async def _dispatch_ready_subtasks(self, plan, ready_subtasks) -> str:
+        """程序化派发就绪子任务（无需 LLM 参与）。
+        由 delivery 回调调用，自动推进编排计划。
+        返回派发结果描述字符串。
+        """
+        dm = self.delegation_manager
+        om = self.orchestration_manager
+        online = list(self.peer_agents)
+        if not online:
+            return "（无在线智能体可供派发）"
+
+        results = []
+        for st in ready_subtasks:
+            assigned = None
+            role_hint = (st.suggested_role or "").lower()
+            for agent in online:
+                if role_hint and role_hint in agent.lower():
+                    assigned = agent
+                    break
+            if not assigned:
+                others = [a for a in online if a != self.agent_id]
+                assigned = others[0] if others else online[0]
+
+            try:
+                ticket = dm.create_ticket(
+                    issuer=self.agent_id,
+                    assignee=assigned,
+                    description=st.description,
+                    expected_output=f"完成子任务: {st.description}",
+                    max_rounds=12,
+                    allow_parallel=True,
+                )
+                ticket.orchestration_plan_id = plan.plan_id
+                dm._save_ticket(ticket)
+                await om.dispatch_subtask(plan.plan_id, st.id, assigned, ticket.ticket_id)
+                await self.comm.send_to_agent(assigned, {
+                    "text": (
+                        f"[编排任务] 这是计划 {plan.plan_id} 的子任务 {st.id}。\n"
+                        f"任务: {st.description}\n"
+                        f"完成后请使用 deliver_result 交付结果。"
+                    ),
+                    "_tdp": "delegation",
+                    "_orchestration": plan.plan_id,
+                    "ticket_id": ticket.ticket_id,
+                    "max_rounds": 12,
+                    "expected_output": f"完成子任务: {st.description}",
+                })
+                results.append(f"✅ {st.id} → {assigned} (工单 `{ticket.ticket_id}`)")
+                logger.info(
+                    f"编排自动派发: {st.id} → {assigned} "
+                    f"(plan={plan.plan_id}, ticket={ticket.ticket_id})"
+                )
+            except Exception as e:
+                results.append(f"❌ {st.id} 派发失败: {e}")
+                logger.error(f"编排自动派发失败 {st.id}: {e}")
+
+        if plan.state == PlanState.READY:
+            plan.state = PlanState.EXECUTING
+        return "; ".join(results) if results else "无子任务被派发"
+
+    async def _synthesize_plan_results(self, plan_id: str):
+        """计划全部完成后，后台触发 LLM 汇总所有子任务结果并呈现最终报告给用户。
+
+        作为后台任务运行：等待当前 process() 释放锁后，以各子任务交付结果
+        作为输入，让 LLM 整合成一份完整的最终报告发送给 super_user。
+        """
+        await asyncio.sleep(1.5)  # 等待当前 delivery processing 完成并释放 _process_lock
+
+        plan = self.orchestration_manager.get_plan(plan_id)
+        if not plan or not plan.is_complete():
+            return
+
+        # 收集所有子任务结果
+        results_parts = []
+        for st in plan.subtasks:
+            agent_info = f" (执行者: {st.assigned_to})" if st.assigned_to else ""
+            result_text = st.result or "(未返回结果)"
+            results_parts.append(
+                f"### {st.id}: {st.description}{agent_info}\n"
+                f"**交付摘要**: {result_text[:600]}"
+            )
+        results_block = "\n\n".join(results_parts)
+
+        synthesis_prompt = (
+            f"🎯 你之前发起的编排任务「{plan.description}」已全部完成！\n\n"
+            f"以下是各子任务的交付结果：\n\n"
+            f"{results_block}\n\n"
+            f"---\n"
+            f"请整合以上所有子任务的结果，向用户呈现一份完整、清晰的**最终汇总报告**。"
+            f"要求：\n"
+            f"1. 直接呈现报告内容，不要说'我来汇总'、'好的让我整合'之类的开场白\n"
+            f"2. 报告应逻辑连贯，覆盖各子任务的核心发现\n"
+            f"3. 保持专业但易读的风格，适当使用表格和分节\n"
+            f"4. 最后可以询问用户是否需要深入了解某个具体方面"
+        )
+
+        logger.info(f"触发编排结果自动汇总: plan={plan_id}")
+        await self.process(
+            user_id="super_user",
+            user_input=synthesis_prompt,
+            new_thread=False,
+            thread_id_override=f"private_{self.agent_id}_super_user",
+            silent=False,
+        )
+
+    def _agent_message_needs_response(self, text: str) -> bool:
+        """判断来自其他 Agent 的消息是否需要 LLM 回复。
+
+        纯状态更新（"我在搜索"、"数据已找到"等）不需要 LLM 处理，
+        只需记录到 task_buffer。只有明确的求助、提问、指令才需要触发 LLM。
+        这避免了 LLM 读取共享 checkpoint 时因角色混淆而扮演错误身份。
+
+        核心原则：
+        - TDP 交付 → 委托方需要 LLM 审查结果、派发下一批子任务
+        - TDP 接受/拒绝 → 已程序化处理，委托方不需要 LLM
+        - 委托方不与被委托方闲聊 — 只响应明确的提问或求助
+        """
+        if not text:
+            return False
+
+        # ── 检查当前对话中的角色关系 ──
+        ticket = self.delegation_manager.get_active_ticket(self.agent_id, self.user_id)
+        is_issuer = ticket and ticket.issuer == self.agent_id
+
+        # TDP 交付 — 委托方始终需要 LLM 审查结果、推进编排
+        if re.search(r'\[TDP\s*交付\]', text):
+            return True
+
+        # 委托方：TDP 接受/拒绝通知已程序化处理，不需要 LLM
+        if is_issuer and re.search(r'\[TDP\]', text):
+            return False
+
+        # TDP 委托/编排任务 — 被委托方需要 LLM 来接受/处理
+        if re.search(r'\[任务委托\]|\[TDP|\[编排任务\]', text):
+            return True
+
+        # 委托方：拒绝所有来自被委托方的非提问/非求助消息
+        if is_issuer:
+            if re.search(r'[?？]|能否|可以吗|你能|可否|怎么|如何|帮我|帮我看|需要你', text):
+                return True
+            if re.search(r'请\s*(调用|执行|使用|尝试|确认|验证|检查|处理|操作|交付|取消|查看|帮|协助|回复)', text):
+                return True
+            # 纯状态更新/闲聊 — 委托方无需回复
+            return False
+
+        # 被委托方或无工单：保持原有逻辑
+        if re.search(r'请\s*(调用|执行|使用|尝试|确认|验证|检查|处理|操作|交付|取消|查看|帮|协助|回复)', text):
+            return True
+        if re.search(r'[?？]|吗[？?]?[\s]*$|能否|可以吗|你能|可否|怎么|如何|帮我|帮我看|需要你', text):
+            return True
+        return False
 
     async def _build_system_contexts(self, image_data: str = None) -> list:
         """Build system-level context as a list of strings for SystemMessage injection.
@@ -239,6 +395,19 @@ class Brain:
         # -- conversation partner info -----------------------------------
         if self.user_id == 'super_user':
             parts.append("[当前对话] 你正在和人类用户 (id是super_user) 对话。")
+            # ── 编排上下文：提醒 orchestrator 汇报进展 ──
+            active_plans = [
+                p for p in self.orchestration_manager._plans.values()
+                if p.state in (PlanState.READY, PlanState.EXECUTING)
+                and p.issuer == self.agent_id
+            ]
+            if active_plans:
+                for p in active_plans[:2]:  # 最多展示 2 个
+                    parts.append(
+                        f"[编排提醒] 你有一个活跃的编排计划「{p.description[:60]}」"
+                        f"（{p.completed_count}/{p.total_count} 完成）。"
+                        f"收到子任务交付后请推进计划，进展及时向用户汇报。"
+                    )
         else:
             status = "在线" if (self.online_agents and self.user_id in self.online_agents) else "未知"
             parts.append(
@@ -252,10 +421,38 @@ class Brain:
             ticket = self.delegation_manager.get_active_ticket(self.agent_id, self.user_id)
             if ticket:
                 role = "委托方" if ticket.issuer == self.agent_id else "被委托方"
+                if ticket.issuer == self.agent_id:
+                    role_instruction = (
+                        f"## 身份边界警告\n"
+                        f"你是**委托方（orchestrator）**，{self.user_id} 是**被委托方（worker）**。\n\n"
+                        f"**你的核心职责：**\n"
+                        f"1. 等待 {self.user_id} 完成工作并交付结果\n"
+                        f"2. 接收交付结果后，立即推进编排计划（派发下一批子任务）\n"
+                        f"3. 重要进展必须向用户 (super_user) 汇报，而不是和 worker 聊天\n\n"
+                        f"**绝对禁止的行为：**\n"
+                        f"- 禁止代替 {self.user_id} 执行具体任务（如搜索、写文件、分析数据）\n"
+                        f"- 禁止以 {self.user_id} 的身份说话或行动\n"
+                        f"- 禁止'接手'对方正在进行的工作\n"
+                        f"- **禁止回复 {self.user_id} 的进度消息**（如'我在搜索'、'数据已整理'）\n"
+                        f"- **禁止在收到交付后与 worker 进行任何对话**\n"
+                        f"  → 收到交付后唯一正确的行动：派发下一批子任务，或向用户汇报完成\n"
+                        f"- {self.user_id} 发来的消息中，TDP 接受通知已自动处理，你无需回复\n"
+                    )
+                else:
+                    role_instruction = (
+                        f"## 身份边界警告\n"
+                        f"你是**被委托方**，{self.user_id} 是**委托方**。你的职责是：\n"
+                        f"1. 按照工单描述执行具体任务\n"
+                        f"2. 完成后使用 deliver_result 交付结果\n"
+                        f"3. 遇到疑问时使用 request_clarification 澄清\n\n"
+                        f"**绝对禁止的行为：**\n"
+                        f"- 禁止让 {self.user_id} 替你做本该你完成的工作\n"
+                        f"- 禁止以 {self.user_id} 的身份说话或行动"
+                    )
                 parts.append(
-                    f"\n[任务委托上下文]"
+                    f"\n{role_instruction}"
+                    f"\n[任务委托信息]"
                     f"\n工单ID: {ticket.ticket_id}"
-                    f"\n你的角色: {role}"
                     f"\n任务描述: {ticket.description}"
                     f"\n期望产出: {ticket.expected_output}"
                     f"\n轮次进度: {ticket.round_count}/{ticket.max_rounds}"
@@ -269,11 +466,17 @@ class Brain:
                 tdp_warning = ticket.get_warning_hint(self.user_id)
                 if tdp_warning:
                     parts.append(tdp_warning)
+
             else:
                 # 无活跃工单时使用旧 ConversationTracker 警告
                 warning = self.conversation_tracker.get_warning(self.agent_id, self.user_id)
                 if warning:
                     parts.append(warning)
+
+            # ── 编排派发提示：子任务完成后，提示推进计划 ──
+            if self._orchestration_dispatch_hint:
+                parts.append(f"\n⚠️ [编排推进] {self._orchestration_dispatch_hint}")
+                self._orchestration_dispatch_hint = ""  # 消费后清空
 
         # -- group chat context -------------------------------------------
         gc = self._build_group_context_prompt()
@@ -540,8 +743,11 @@ class Brain:
         
     async def process(self, user_id: str, user_input: str, image_data: str = None, new_thread: bool = False,
                       thread_id_override: str = None, silent: bool = False,
-                      group_context: dict = None) -> str:
+                      group_context: dict = None, tdp_notification: dict = None) -> str:
         async with self._process_lock:
+            # ── 在锁内原子设置 TDP 通知，消除竞态条件 ──
+            if tdp_notification is not None:
+                self._tdp_notification = tdp_notification
             self.is_busy = True
             self._current_task = asyncio.current_task()
             await self._notify_status("busy")
@@ -955,6 +1161,7 @@ class Brain:
 
             # ── TDP 通知处理：检测委托/接受/拒绝/交付/取消/澄清/进度通知 ──
             tdp = self._tdp_notification
+            _skip_llm_for_issuer = False  # 委托方收到纯通知时无需唤醒 LLM
             if tdp:
                 tdp_type = tdp.get("_tdp", "")
                 tdp_ticket_id = tdp.get("ticket_id", "")
@@ -988,6 +1195,10 @@ class Brain:
                                 expected_output=tdp.get("expected_output", "未指定"),
                                 max_rounds=tdp.get("max_rounds", 8),
                             )
+                            # 从委托消息中提取编排上下文
+                            orch_plan = tdp.get("_orchestration", "")
+                            if orch_plan:
+                                ticket.orchestration_plan_id = orch_plan
                             dm._by_id[tdp_ticket_id] = ticket
                             dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
                             dm._save_ticket(ticket)
@@ -1004,15 +1215,74 @@ class Brain:
                         except TicketError:
                             pass
                     # ── 编排回调：子任务交付 ──
+                    # 多级 fallback 获取 plan_id：
+                    #   1. 消息中的 _orchestration 字段
+                    #   2. ticket 上的 orchestration_plan_id
+                    #   3. _ticket_index 反查
                     orch_plan_id = tdp.get("_orchestration", "")
+                    if not orch_plan_id and ticket:
+                        orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
+                    if not orch_plan_id:
+                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
+                        if entry:
+                            orch_plan_id = entry[0]
                     if orch_plan_id:
                         await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
                         plan = self.orchestration_manager.get_plan(orch_plan_id)
                         if plan and plan.is_complete():
-                            await self._safe_send(
-                                f"🎯 编排计划 {orch_plan_id} 全部完成！"
-                                f"（{plan.completed_count}/{plan.total_count} 成功"
-                                + (f"，{plan.failed_count} 失败）" if plan.failed_count > 0 else "）")
+                            summary = self.orchestration_manager.get_progress_summary(orch_plan_id)
+                            await self.comm.send_to_agent("super_user", {
+                                "text": f"🎯 编排计划全部完成！\n\n{summary}"
+                            })
+                            # ── 触发 LLM 自动汇总子任务结果并呈现最终报告 ──
+                            self.schedule_background_task(
+                                self._synthesize_plan_results(orch_plan_id)
+                            )
+                        elif plan:
+                            # 计划未完成，程序化派发下一批就绪子任务
+                            ready = plan.get_ready_subtasks()
+                            if ready:
+                                dispatched = await self._dispatch_ready_subtasks(plan, ready)
+                                await self.comm.send_to_agent("super_user", {
+                                    "text": (
+                                        f"📤 子任务 {tdp_ticket_id} 已交付。"
+                                        f"自动派发下一批: {dispatched}"
+                                    )
+                                })
+                            else:
+                                # 依赖未满足的子任务需等待
+                                pending = [s for s in plan.subtasks if s.status == SubTaskStatus.PENDING]
+                                if pending:
+                                    blocked = [f"{s.id} (依赖: {', '.join(s.depends_on)})" for s in pending]
+                                    logger.info(
+                                        f"编排计划 {orch_plan_id}: 子任务 {tdp_ticket_id} 完成，"
+                                        f"但以下子任务仍被阻塞: {blocked}"
+                                    )
+                    # ── 委托方：区分编排与非编排交付 ──
+                    if ticket and ticket.issuer == self.agent_id:
+                        if orch_plan_id:
+                            # 编排交付：已程序化推进（mark_completed + 自动派发），无需 LLM
+                            _skip_llm_for_issuer = True
+                            logger.info(
+                                f"TDP 编排交付已程序化处理，跳过 LLM "
+                                f"(issuer={self.agent_id}, ticket={tdp_ticket_id})"
+                            )
+                            if self.thread_id:
+                                self.task_buffer.add_step(
+                                    self.thread_id,
+                                    f"来自 {self.user_id} 的编排交付（已自动处理）",
+                                    user_input[:300],
+                                )
+                        else:
+                            # 非编排交付：截断内容，LLM 可审查但禁止与 worker 对话
+                            result_preview = user_input[:300]
+                            if len(user_input) > 300:
+                                result_preview += f"...（完整结果已保存，共 {len(user_input)} 字符）"
+                            user_input = (
+                                f"[子任务交付] 工单 {tdp_ticket_id} 已完成。"
+                                f"\n交付摘要: {result_preview}"
+                                f"\n\n⚠️ 工单已关闭，禁止回复 {self.user_id}。"
+                                f"如需汇报，向 super_user 汇报结果。"
                             )
                 elif tdp_type == "acceptance" and tdp_ticket_id:
                     ticket = dm.get_ticket(tdp_ticket_id)
@@ -1023,17 +1293,39 @@ class Brain:
                             pass
                     # ── 编排回调：子任务被接受 ──
                     orch_plan_id = tdp.get("_orchestration", "")
+                    if not orch_plan_id:
+                        # Fallback: look up from ticket
+                        if ticket:
+                            orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
+                    if not orch_plan_id:
+                        # Fallback: look up from ticket index
+                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
+                        if entry:
+                            orch_plan_id = entry[0]
                     if orch_plan_id:
                         await self.orchestration_manager.mark_accepted(tdp_ticket_id)
-                    ticket = dm.get_ticket(tdp_ticket_id)
-                    if ticket and ticket.is_active:
+                    # ── 编排工单不在此处取消，保留到交付完成 ──
+                    is_orch_ticket = bool(orch_plan_id or getattr(ticket, 'orchestration_plan_id', None) if ticket else False)
+                    if ticket and ticket.is_active and not is_orch_ticket:
                         try:
                             dm.cancel_ticket(tdp_ticket_id, f"TDP {tdp_type} 通知", self.user_id)
                         except TicketError:
                             pass
+                    # 委托方：接受通知已程序化处理完毕，无需唤醒 LLM
+                    if ticket and ticket.issuer == self.agent_id:
+                        _skip_llm_for_issuer = True
+                        logger.info(f"TDP 接受通知已程序化处理，跳过 LLM (issuer={self.agent_id})")
                 elif tdp_type in ("decline", "cancel", "timed_out") and tdp_ticket_id:
                     # ── 编排回调：子任务被拒绝/取消/超时 ──
                     orch_plan_id = tdp.get("_orchestration", "")
+                    if not orch_plan_id:
+                        ticket = dm.get_ticket(tdp_ticket_id)
+                        if ticket:
+                            orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
+                    if not orch_plan_id:
+                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
+                        if entry:
+                            orch_plan_id = entry[0]
                     if orch_plan_id:
                         await self.orchestration_manager.mark_failed(
                             tdp_ticket_id,
@@ -1042,9 +1334,53 @@ class Brain:
 
                 self._tdp_notification = None  # 消费后清空
 
+            # ── 委托方：TDP 接受/拒绝等通知已程序化处理，无需 LLM 介入 ──
+            if _skip_llm_for_issuer:
+                # 记录到 task_buffer 以便前端显示
+                if self.thread_id:
+                    self.task_buffer.add_step(
+                        self.thread_id,
+                        f"来自 {self.user_id} 的 TDP 通知（已自动处理）",
+                        user_input[:300],
+                    )
+                return
+
+            # ── 编排模式守卫：正在编排时，非 TDP 消息也禁止唤醒 LLM ──
+            # 例外：如果 self 是消息发送方的被委托方（assignee），需要 LLM 来决定接受/拒绝
+            if self._is_orchestrating:
+                ticket = self.delegation_manager.get_active_ticket(self.agent_id, self.user_id)
+                is_assignee = ticket and ticket.assignee == self.agent_id
+                if not is_assignee:
+                    logger.info(
+                        f"编排模式: 跳过 agent-to-agent 消息的 LLM 处理 "
+                        f"(from={self.user_id}, agent={self.agent_id})"
+                    )
+                    if self.thread_id:
+                        self.task_buffer.add_step(
+                            self.thread_id,
+                            f"编排模式 — 来自 {self.user_id} 的消息（已静默）",
+                            user_input[:300],
+                        )
+                    return
+
             async def on_process(full_text: str, saved_ctx: dict):
                 if saved_ctx:
                     self.group_context = saved_ctx
+
+                # ── 过滤纯状态更新：不需要 LLM 处理的消息仅记录，不触发推理 ──
+                if not self._agent_message_needs_response(full_text):
+                    logger.debug(
+                        f"跳过 agent-to-agent 状态消息 (from={self.user_id}): "
+                        f"{full_text[:100]}"
+                    )
+                    if self.thread_id:
+                        self.task_buffer.add_step(
+                            self.thread_id,
+                            f"来自 {self.user_id} 的状态更新",
+                            full_text[:300],
+                        )
+                    return
+
                 await self._process_agent_message(full_text, image_data, new_thread)
 
             self.msg_buffer.enqueue(self.user_id, user_input, self.group_context, on_process)

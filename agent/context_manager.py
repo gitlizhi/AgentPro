@@ -44,7 +44,7 @@ CHARS_PER_TOKEN = 2.8
 # Default token budget (total for the entire message history).
 # DeepSeek V4 context window is 128K, but we budget conservatively to
 # leave room for the model response and the system prompt.
-DEFAULT_TOKEN_BUDGET = 80_000
+DEFAULT_TOKEN_BUDGET = 625000
 
 # SummarizationMiddleware is configured to trigger at 20K tokens.
 # We add a proactive warn/compact threshold as percentages of budget.
