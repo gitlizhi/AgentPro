@@ -274,12 +274,12 @@ Brain._handle_with_agent() / _process_agent_message()
 
 `agent/context_manager.py` 中的 `TokenBudget` 类使用字符计数启发式估算 token 用量：
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `DEFAULT_TOKEN_BUDGET` | 80,000 | 总预算（DeepSeek V4 上下文窗口 128K，保守预算） |
-| `CHARS_PER_TOKEN` | 2.8 | 字符/token 比率（中英文混合的保守估计） |
-| `WARN_THRESHOLD` | 80% | 超过此比例通过 `_safe_send` 提醒用户 |
-| `COMPACT_THRESHOLD` | 85% | 超过此比例触发 SummarizationMiddleware 提前压缩 |
+| 参数 | 默认值     | 说明                                   |
+|------|---------|--------------------------------------|
+| `DEFAULT_TOKEN_BUDGET` | 625,000 | 总预算（DeepSeek V4 上下文窗口 1M，保守预算）       |
+| `CHARS_PER_TOKEN` | 2.8     | 字符/token 比率（中英文混合的保守估计）              |
+| `WARN_THRESHOLD` | 80%     | 超过此比例通过 `_safe_send` 提醒用户            |
+| `COMPACT_THRESHOLD` | 85%     | 超过此比例触发 SummarizationMiddleware 提前压缩 |
 
 预算检查在每次 `_handle_with_agent` 调用时执行（仅在 super_user 路径），一次性提醒，不在每次流事件中重复。
 
@@ -577,13 +577,29 @@ Brain._handle_with_agent() / _process_agent_message()
 
 ### 5.4 多智能体任务编排 (Orchestration)
 
-在 TDP 单任务委托之上，增加了**任务分解、并行派发、进度聚合**的编排层，使主 Agent 能协调多个子 Agent 共同完成复杂任务。
+在 TDP 单任务委托之上，增加了**任务分解、并行派发、进度聚合、自动汇总**的编排层，使主 Agent 能协调多个子 Agent 共同完成复杂任务，并在全部完成后主动向用户呈现最终报告。
 
-#### 核心概念
+#### 5.4.1 核心概念
 
-`agent/orchestration.py` 定义了编排计划（`OrchestrationPlan`），将一个复杂任务分解为多个有向无环图（DAG）结构的子任务（`SubTask`），自动派发给合适的智能体并行执行。
+`agent/orchestration.py` 定义了编排计划（`OrchestrationPlan`），将一个复杂任务分解为多个有向无环图（DAG）结构的子任务（`SubTask`），自动派发给合适的智能体并行执行，所有子任务完成后由 orchestrator 自动汇总并向用户呈现最终结果。
 
-#### 子任务状态机
+**角色分工：**
+
+```
+Orchestrator (agent_main)          Workers (搜索智能体 / 分析智能体)
+┌─────────────────────┐           ┌──────────────────────┐
+│ 创建编排计划         │           │ 接受子任务            │
+│ 分解为 DAG 子任务    │           │ 执行具体工作           │
+│ 并行派发子任务       │──TDP工单──→│ 交付分析结果           │
+│ 监控进度（被动）     │←──交付────│                      │
+│ 派发下一批子任务     │           └──────────────────────┘
+│ ★自动汇总最终报告    │
+└─────────────────────┘
+```
+
+**关键原则**：Orchestrator 只委派数据收集、分析等具体工作。最终汇总并向用户呈现报告是 orchestrator 自己的职责，不委派给 worker。
+
+#### 5.4.2 子任务状态机
 
 ```
 PENDING ──dispatch──→ DISPATCHED ──accepted──→ IN_PROGRESS ──deliver──→ COMPLETED
@@ -591,90 +607,323 @@ PENDING ──dispatch──→ DISPATCHED ──accepted──→ IN_PROGRESS �
    └─────────────────────┴─── (fail/reassign) ────→ FAILED
 ```
 
-#### 编排工具集
+每个 `SubTask` 包含字段：`id`（如 `st_1`）、`description`、`assigned_to`、`status`、`depends_on`（DAG 依赖列表）、`result`（交付摘要）、`ticket_id`（TDP 工单引用）、`suggested_role`（角色提示）。
+
+#### 5.4.3 计划状态机
+
+```
+PLANNING → READY → EXECUTING → COMPLETED / PARTIALLY_COMPLETED / FAILED
+                                  ↓
+                              CANCELLED（用户取消）
+```
+
+- `PLANNING`：空计划，子任务未填充
+- `READY`：子任务已填充，等待派发
+- `EXECUTING`：至少一个子任务已派发
+- `COMPLETED`：全部子任务成功
+- `PARTIALLY_COMPLETED`：部分成功、部分失败
+- `FAILED`：全部失败
+
+#### 5.4.4 编排工具集
 
 `agent/tools_factory.py:create_orchestration_tools()` 提供 4 个工具：
 
-| 工具 | 用途 |
-|------|------|
-| `create_task_plan(description)` | LLM 分析复杂任务，生成 2-5 个子任务，含依赖关系和建议角色 |
-| `dispatch_subtasks(plan_id)` | 并行派发所有就绪子任务（依赖已满足），自动匹配在线智能体 |
-| `check_plan_progress(plan_id)` | 查看计划整体进度（Markdown 格式） |
-| `reassign_subtask(plan_id, subtask_id, new_agent)` | 失败子任务重新分配 |
+| 工具 | 用途 | 关键行为 |
+|------|------|---------|
+| `create_task_plan(description)` | LLM 分析复杂任务，生成 2-5 个子任务，含 DAG 依赖和建议角色 | 一次性 JSON 返回完整计划，避免多轮交互 |
+| `dispatch_subtasks(plan_id)` | 并行派发所有就绪子任务，自动匹配在线智能体 | 每个子任务创建 TDP 工单，携带 `_orchestration` 和 `orchestration_plan_id` |
+| `check_plan_progress(plan_id)` | 查看计划整体进度 | **仅限用户主动询问时使用**，含 20 秒防抖 |
+| `reassign_subtask(plan_id, subtask_id, new_agent)` | 失败子任务重新分配 | 重置子任务状态，创建新工单 |
 
-#### 数据流
+#### 5.4.5 编排完整生命周期
+
+这是编排系统最重要的设计——一个复杂任务从用户输入到最终报告的完整数据流：
 
 ```
-用户给主 Agent 复杂任务
-  → create_task_plan: LLM 分解 → 生成 OrchestrationPlan (2-5 个 SubTask)
-    → 用户审阅计划
-  → dispatch_subtasks: 并行创建 TDP 工单 → 通知子 Agent
-    → 每个子任务消息携带 _orchestration: plan_id
-  → 子 Agent 接受 → execute → deliver_result
-    → TDP delivery 通知回溯到主 Agent
-      → OrchestrationManager.mark_completed() 更新进度
-        → 全部完成时通知 super_user
-  → check_plan_progress: 用户随时查看进度
+阶段 1: 任务分解
+─────────────────
+用户: "深度分析2020-2025年美国经济"
+  → agent_main 调用 create_task_plan()
+    → LLM 分解为 3 个子任务（prompts.py:build_task_decomposition_prompt）:
+        st_1: 收集经济数据       (无依赖)
+        st_2: 事件与政策分析      (无依赖，可与 st_1 并行)
+        st_3: 深度综合分析        (依赖 st_1, st_2)
+    → OrchestrationManager.create_plan() → 状态=READY
+    → 依赖验证: 移除 LLM 幻觉的不存在引用（如 st_0）
+    → 展示计划给用户审阅
+
+阶段 2: 并行派发
+─────────────────
+agent_main 调用 dispatch_subtasks(plan_id)
+  → plan.get_ready_subtasks() 返回 st_1, st_2（无未满足依赖）
+  → 按 suggested_role 模糊匹配在线智能体:
+      st_1 → 搜索智能体 (suggested_role: "搜索专家")
+      st_2 → 分析智能体 (suggested_role: "数据分析师")
+  → 每个子任务:
+      ├── DelegationManager.create_ticket(allow_parallel=True)
+      │     └── 跳过 pair-key 冲突检查，允许多个子任务派发给同一智能体
+      ├── ticket.orchestration_plan_id = plan_id  ★ 关键：ticket 记住自己的 plan
+      ├── dm._save_ticket(ticket)  → PostgreSQL 持久化
+      ├── om.dispatch_subtask()  → _ticket_index[ticket_id] = (plan_id, subtask_id)
+      └── comm.send_to_agent(worker, {
+            "_tdp": "delegation",
+            "_orchestration": plan_id,          ← 消息级传递（第一层）
+            "ticket_id": ticket.ticket_id,
+            "max_rounds": 12,
+            "expected_output": "..."
+          })
+  → plan.state = EXECUTING
+  → 返回: "你无需轮询进度，子任务完成后系统自动通知"
+
+阶段 3: Worker 侧
+─────────────────
+Worker 收到委托消息:
+  → core.py Gate 1: TDP 协议消息（_tdp="delegation"）→ 放行
+  → brain.py delegation handler:
+      ├── 创建镜像工单（assignee 侧视角）
+      ├── ticket.orchestration_plan_id = tdp.get("_orchestration")  ★ 从消息提取
+      └── dm._save_ticket(ticket)
+  → LLM 决策: 调用 accept_task(ticket_id)
+      ├── 状态转换: PENDING → ACCEPTED
+      └── 自动携带 _orchestration（从 ticket.orchestration_plan_id 读取）
+
+Worker 执行任务:
+  → 搜索/分析/写文件
+  → 进度消息（"正在搜索..."）→ 被 orchestrator Gate 3 静默拦截
+
+Worker 调用 deliver_result(ticket_id, summary):
+  → delegation.py: deliver_result():
+      ├── ACCEPTED → IN_PROGRESS（自动桥接）
+      ├── IN_PROGRESS → CLOSED
+      └── 记录 result_summary
+  → tools_factory.py: 发送交付消息:
+      {
+        "_tdp": "delivery",
+        "ticket_id": ticket_id,
+        "_orchestration": ticket.orchestration_plan_id,  ★ 从 ticket 读取
+        "text": "[TDP 交付] ..."
+      }
+
+阶段 4: Orchestrator 侧 — 程序化交付处理
+─────────────────────────────────────────
+Orchestrator 收到交付消息:
+  → core.py Gate 1: TDP 协议消息 → 放行
+  → brain.py delivery handler（_handle_with_agent）:
+
+      1. 关闭工单:
+         ticket.state = CLOSED, ticket.result_summary = summary
+
+      2. ★ 三级回退获取 plan_id:
+         ① tdp.get("_orchestration", "")           ← 消息字段（worker 传播）
+         ② getattr(ticket, 'orchestration_plan_id') ← ticket 字段（直接存储）
+         ③ _ticket_index.get(ticket_id)             ← 反查索引（最后防线）
+
+      3. om.mark_completed(ticket_id, summary)
+         → SubTask.status = COMPLETED, plan.completed_count++
+
+      4. 判断计划状态:
+         ├── plan.is_complete() = True:
+         │     ├── 发送 "🎯 编排计划全部完成！" 通知 super_user
+         │     └── ★ schedule_background_task(_synthesize_plan_results)
+         │           → 等 1.5s（释放 process_lock）
+         │           → 收集所有 subtask.result
+         │           → 构建汇总 prompt → self.process() → LLM 自动汇总
+         │           → 最终报告呈现给用户
+         │
+         └── plan.is_complete() = False:
+               ├── plan.get_ready_subtasks() 获取依赖已满足的下一批
+               ├── _dispatch_ready_subtasks(plan, ready) → 自动派发
+               ├── 通知 super_user: "子任务 X 已交付，自动派发下一批: st_3 → 分析智能体"
+               └── 无需 LLM 参与，纯程序化推进
+
+      5. 设置 _skip_llm_for_issuer = True
+         → 编排 TDP 消息不唤醒 LLM，避免身份混淆
+
+阶段 5: 自动汇总（最终呈现）
+─────────────────────────────
+_synthesize_plan_results(plan_id) 后台任务:
+  → 等待当前 process() 释放 _process_lock
+  → 收集所有子任务结果:
+      "### st_1: 数据收集 (执行者: 搜索智能体)\n**交付摘要**: ..."
+      "### st_2: 事件分析 (执行者: 分析智能体)\n**交付摘要**: ..."
+      "### st_3: 深度分析 (执行者: 分析智能体)\n**交付摘要**: ..."
+  → 构建汇总 prompt:
+      "你发起的编排任务已全部完成。以下是各子任务交付结果。请整合并向用户呈现最终报告。"
+  → self.process(user_id="super_user", ...)
+  → LLM 生成完整报告 → 流式发送给用户
 ```
 
-#### 智能体匹配策略
+#### 5.4.6 设计原则：Orchestrator ↔ Worker 是 API 调用，不是聊天
 
-`dispatch_subtasks` 根据 `suggested_role` 字段（如"搜索专家"、"数据分析师"）模糊匹配在线智能体名称，按以下优先级：
-1. 子串匹配（`role_hint in agent_id.lower()`）
+编排通信的核心设计哲学：**orchestrator 和 worker 之间的 TDP 消息是程序化信号，不是 LLM 对话**。
+
+**问题**：早期设计中，orchestrator 的 LLM 会"看到"worker 的 TDP 消息，导致：
+- 角色混淆（orchestrator 误以为自己是 worker）
+- 身份混乱（"我是搜索智能体"）
+- 无意义回复（"好的，我来处理"）
+- 关键交付被埋没在 LLM 的聊天历史中
+
+**解决方案——多层过滤体系**：
+
+```
+Orchestrator (agent_main) 的消息处理路径:
+
+收到消息
+  │
+  ├── core.py Gate 1: _tdp 字段存在？
+  │     ├── 是 → 构建 tdp_notification，跳过 Gate 2/3
+  │     └── 否 → Gate 2/3 检查
+  │
+  ├── brain.py _handle_with_agent:
+  │     │
+  │     ├── TDP 协议消息处理（程序化，不涉及 LLM）:
+  │     │   ├── "delegation" → 创建镜像工单
+  │     │   ├── "delivery"   → 关闭工单 + 编排回调（mark_completed + 派发/汇总）
+  │     │   ├── "acceptance" → 状态转换 + 编排回调（mark_accepted）
+  │     │   ├── "decline"    → 编排回调（mark_failed）
+  │     │   └── "progress"   → 静默丢弃（orchestrator 不需要看进度）
+  │     │
+  │     ├── _skip_llm_for_issuer 检查:
+  │     │   └── True → return（不调用 LLM）
+  │     │
+  │     └── _is_orchestrating 检查:
+  │         └── True 且非被委托方 → return（编排模式下禁止 LLM 处理 agent-to-agent 消息）
+  │
+  └── 只有非编排的普通消息才进入 LLM
+```
+
+**`_orchestration` 字段的多层保障**：
+
+编排信息（plan_id）通过三层机制传递，确保 worker 的交付消息一定能被 orchestrator 关联到正确的计划：
+
+| 层级 | 机制 | 存储位置 | 作用 |
+|------|------|---------|------|
+| 1 | 消息 payload 的 `_orchestration` 字段 | WebSocket 消息 | worker 的 `deliver_result` 从 `ticket.orchestration_plan_id` 读取并传播 |
+| 2 | `TaskTicket.orchestration_plan_id` | 数据库 + 内存 | ticket 创建时写入，进程重启后可恢复 |
+| 3 | `OrchestrationManager._ticket_index` | 内存（重启后从 DB 重建） | `ticket_id → (plan_id, subtask_id)` 反查，不依赖任何消息字段 |
+
+> **设计动机**：早期版本仅依赖消息 payload 的 `_orchestration` 字段（层级 1），但 worker 的 `deliver_result` 工具没有传播该字段，导致 orchestrator 收到交付后无法关联计划——整个编排回调被跳过。现改为三层保障，ticket 本身存储 `orchestration_plan_id`（层级 2），`_ticket_index` 作为最后防线（层级 3），即使前两层都丢失也能正确路由。
+
+#### 5.4.7 关键设计决策详解
+
+**DAG 依赖模型**：
+- 子任务通过 `depends_on` 字段声明依赖关系（如 `st_3` 依赖 `st_1` 和 `st_2`）
+- `get_ready_subtasks()` 返回所有依赖已满足（前序任务状态为 COMPLETED）的 PENDING 子任务
+- LLM 返回的依赖序号自动规范化为 `"st_N"` 格式（防御整数/字符串差异）
+- **依赖验证**：`set_subtasks()` 自动移除对不存在子任务的引用（防御 LLM 幻觉如 `st_0`）
+
+**`allow_parallel` — 并行派发到同一智能体**：
+- 普通 TDP 委托中，同一对智能体之间只能有一个活跃工单（pair-key 机制）
+- 编排场景下，多个子任务可能需要派发给同一个 worker
+- `create_ticket(allow_parallel=True)` 跳过 pair-key 冲突检查
+- 编排子任务使用 12 轮预算（高于普通委托的 8 轮），因为编排任务可能更复杂
+
+**防轮询设计**：
+- `dispatch_subtasks` 返回值明确告知 "你无需轮询进度，子任务完成后系统自动通知"
+- `check_plan_progress` 工具描述开头注明 "仅应在用户明确询问时使用"
+- `get_progress_summary()` 内置 20 秒防抖：同一 plan 在 20 秒内重复查询且进度无变化时，返回警告而非正常结果
+
+**`_is_orchestrating` 守卫**：
+- 检查当前 agent 是否还有活跃的编排计划（state 为 READY 或 EXECUTING）
+- 编排模式下，非 TDP 且非工单的消息直接丢弃，不唤醒 LLM
+- 这防止了 worker 的进度消息、闲聊等触发 orchestrator 的不必要 LLM 调用
+
+**`_synthesize_plan_results` — 自动汇总**：
+- 计划全部完成后，通过后台任务触发 LLM 汇总
+- 等待 1.5 秒确保当前 `process()` 释放 `_process_lock`
+- 将所有子任务的 `result` 字段注入 LLM 上下文
+- LLM 自然生成最终报告并呈现给用户
+- 若用户在此过程中发送新消息，旧任务被取消，新消息优先
+
+**任务分解原则（prompt 层）**：
+- `build_task_decomposition_prompt` 明确告知 LLM：
+  - "你是 orchestrator，只委派数据收集、分析等具体执行工作"
+  - "不要创建'撰写最终报告'或'向用户汇报'类子任务"
+  - "worker 交付分析结果后，系统会自动通知你整合并向用户呈现"
+- 这是第一道防线：从源头避免 orchestrator 将"最终呈现"委派出去
+
+#### 5.4.8 智能体匹配策略
+
+`dispatch_subtasks` 和 `_dispatch_ready_subtasks` 根据 `suggested_role` 字段模糊匹配在线智能体：
+
+1. 子串匹配：`role_hint in agent_id.lower()`（如 "搜索" 匹配 "搜索智能体"）
 2. 无匹配时选第一个非自身的在线智能体
 3. 无在线智能体时返回提示，稍后手动重试
 
-#### 与 TDP 的集成
+**排除规则**：
+- `super_user`（人类用户）不可作为委派目标
+- `reminder_bot`（系统机器人）不可作为委派目标
+- orchestrator 自身不可作为委派目标（`send_to_agent` 工具阻止自发送）
 
-| 层级 | 职责 |
-|------|------|
-| `OrchestrationManager` | 计划生命周期、子任务状态追踪、ticket→subtask 反查索引 |
-| `DelegationManager` | 单工单生命周期（创建、轮次控制、超时检测） |
-| `_tdp` + `_orchestration` | 复用 TDP 消息通道，增加 `_orchestration` 字段区分编排任务 |
-| `brain.py` TDP 回调 | `delivery` → `om.mark_completed()`，`acceptance` → `om.mark_accepted()` |
-| `core.py` | TDP metadata 额外提取 `_orchestration` 字段传递 |
+#### 5.4.9 与 TDP 的集成
 
-#### 关键设计决策
+| 层级 | 组件 | 职责 |
+|------|------|------|
+| `OrchestrationPlan` / `SubTask` | `orchestration.py` | 计划生命周期、子任务 DAG、状态追踪 |
+| `OrchestrationManager` | `orchestration.py` | 计划 CRUD、ticket↔subtask 反查索引、进度格式化、防抖 |
+| `TaskTicket` | `delegation.py` | 单工单生命周期、状态机、轮次控制、超时检测 |
+| `DelegationManager` | `delegation.py` | 工单 CRUD、pair-key 管理、`allow_parallel` 支持 |
+| `_ticket_index` | `orchestration.py` | `ticket_id → (plan_id, subtask_id)` 反查，编排回调的基石 |
+| `orchestration_plan_id` | `delegation.py` | ticket 上的一等字段，连接工单和编排计划 |
+| TDP 工具 | `tools_factory.py` | `deliver_result`/`accept_task`/`decline_task` 自动传播 `_orchestration` |
+| 编排工具 | `tools_factory.py` | `create_task_plan`/`dispatch_subtasks`/`check_plan_progress`/`reassign_subtask` |
+| 交付处理程序 | `brain.py` | 三级回退获取 plan_id → mark_completed → 派发/汇总 |
+| 接受处理程序 | `brain.py` | 编排工单不提前取消（保留到交付完成） |
+| Gate 系统 | `core.py` | 三层门控：TDP 协议→活跃工单→编排守卫 |
+| `_synthesize_plan_results` | `brain.py` | 计划完成后触发 LLM 自动汇总 |
+| `_dispatch_ready_subtasks` | `brain.py` | 子任务交付后自动派发下一批（程序化，无 LLM） |
 
-| 决策 | 理由 |
-|------|------|
-| DAG 依赖模型 | 支持拓扑排序派发，确保依赖子任务先完成 |
-| 一次 LLM 调用完成分解 | 避免 LLM 多次调用工具的延迟，单次返回完整计划 JSON |
-| 角色模糊匹配而非精确角色系统 | 简单有效，无需预注册角色表；未来可升级为语义匹配 |
-| 12 轮预算（高于普通委托的 8 轮） | 编排子任务可能更复杂，需要更多交互轮次 |
+#### 5.4.10 数据库持久化
 
-#### 数据库持久化
+编排计划和委托工单的状态持久化到 PostgreSQL，进程重启后自动恢复。
 
-编排计划和委托工单的状态持久化到 PostgreSQL，进程重启后自动恢复：
+**表结构：**
 
-**持久化的数据：**
-
-| 表 | 内容 | 恢复条件 |
-|---|------|---------|
-| `orchestration_plans` | 计划元信息（状态、进度计数、时间戳） | `state NOT IN ('completed', 'partially_completed', 'failed', 'cancelled')` |
-| `orchestration_subtasks` | 子任务详情（描述、分配、依赖 JSONB、结果） | 随计划级联恢复 |
-| `delegation_tickets` | 工单完整状态（状态机、轮次计数、时间戳） | `state NOT IN ('closed', 'declined', 'timed_out', 'cancelled')` |
+| 表 | 核心字段 | 恢复条件 |
+|---|---------|---------|
+| `orchestration_plans` | `plan_id`, `description`, `issuer`, `state`, `completed_count`, `failed_count`, `created_at`, `updated_at` | `state NOT IN ('completed', 'partially_completed', 'failed', 'cancelled')` |
+| `orchestration_subtasks` | `plan_id`, `subtask_id`, `description`, `assigned_to`, `status`, `depends_on`(JSONB), `result`, `ticket_id`, `suggested_role` | 随计划级联恢复 |
+| `delegation_tickets` | `ticket_id`, `issuer`, `assignee`, `state`, `round_count`, …, `orchestration_plan_id` | `state NOT IN ('closed', 'declined', 'timed_out', 'cancelled')` |
 
 **保存时机：**
 
-- **OrchestrationManager**：`create_plan`、`set_subtasks`、`dispatch_subtask`、`mark_accepted`、`mark_completed`、`mark_failed`、`cancel_plan` — 每次状态变更后 `await _save_plan()`，同步等待持久化完成
-- **DelegationManager**：`create_ticket`、`transition`、`record_round`、`record_clarification` — 每次状态变更后通过 `asyncio.create_task` 异步保存（fire-and-forget），避免阻塞主流程
+| 管理器 | 触发操作 | 保存方式 |
+|--------|---------|---------|
+| `OrchestrationManager` | `create_plan`, `set_subtasks`, `dispatch_subtask`, `mark_accepted`, `mark_completed`, `mark_failed`, `cancel_plan` | `await _save_plan()` — 同步等待，操作频率低 |
+| `DelegationManager` | `create_ticket`, `transition`, `record_round`, `record_clarification` | `asyncio.create_task(_do())` — fire-and-forget，操作频率高，异步避免阻塞 |
 
 **恢复流程：**
 
 ```
 Agent.run()
-  → brain.recover_state()  (在 connect() 之前)
-    → dm.load_active()     从 delegation_tickets 恢复活跃工单
-    → om.load_active()     从 orchestration_plans/subtasks 恢复活跃计划
-      → 重建 _by_id、_by_pair、_ticket_index 内存索引
-  → 如恢复了活跃工单 → 启动超时检测循环
+  → brain.recover_state()  ← 在 connect() 之前执行
+    → dm.load_active()     ← 从 delegation_tickets 恢复非终态工单
+      → 重建 _by_id、_by_pair 内存索引
+      → 恢复 orchestration_plan_id（连接 ticket 到 plan）
+    → om.load_active()     ← 从 orchestration_plans/subtasks 恢复非终态计划
+      → 重建 _ticket_index（从 persisted ticket_id 字段）
+      → 规范化 depends_on（防御历史数据中的整数格式）
+  → 如有活跃工单 → 启动超时检测循环
 ```
 
-**关键设计决策：**
-- OrchestrationManager 保存为 `await`（同步等待），DelegationManager 保存为 fire-and-forget — 前者操作频率低（按计划生命周期变化）、数据量少；后者操作频率高（每次轮次计数更新都触发），异步保存避免增加消息处理延迟
-- 子任务使用 `DELETE + INSERT` 而非 `UPDATE` 逐条更新 — 简化逻辑，避免差量检测；编排计划通常只有 2-5 个子任务，性能影响可忽略
-- 不保存终态数据 — 终态计划和工单不参与恢复，避免无用数据堆积；如需审计可后续添加归档策略
+**设计决策：**
+- 子任务使用 `DELETE + INSERT` 而非逐条 `UPDATE`——编排计划通常只有 2-5 个子任务，性能影响可忽略，逻辑更简单
+- 不保存/不恢复终态数据——终态计划和工单不参与恢复，避免无用数据堆积
+- `orchestration_plan_id` 在 ticket 上持久化——进程重启后 ticket 仍能找到所属 plan
+
+#### 5.4.11 Orchestration vs 普通 TDP 委托
+
+| 维度 | 普通 TDP 委托 | 编排 |
+|------|-------------|------|
+| 任务数量 | 1 对 1 | 1 对 N（DAG 并行） |
+| 分解方式 | 用户手动指定 | LLM 自动分解 |
+| 依赖管理 | 无 | DAG 拓扑排序 |
+| 进度聚合 | 无 | 自动追踪 + 防抖查询 |
+| 结果汇总 | 委托方 LLM 审查 | 自动汇总 + LLM 呈现 |
+| 通信模式 | LLM 对话 | 程序化信号（不经过 LLM） |
+| 工单轮次 | 8 轮 | 12 轮（更复杂） |
+| pair-key | 一对一互斥 | `allow_parallel` 允许多工单 |
+| orchestrator LLM | 参与审查 | **不参与**（程序化推进，最终汇总除外） |
 
 ---
 
@@ -836,8 +1085,13 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | agent_status 缓存恢复 | `client.py` 维护 `agent_statuses` 缓存，新前端连接时补发所有 Agent 状态，解决页面刷新后停止按钮消失的问题。Agent 离线时清理缓存避免过期数据 |
 | 前端 thread_id 路由 + 事件过滤 | 消息通过 `thread_id` 全链路（brain→client.py→前端）精确路由到对应会话窗口；`tool_call_start/end` 和 `approval_request` 按 `data.from` 过滤，仅当前活跃 Agent 的事件才更新 UI，彻底解决跨 Agent 消息串扰 |
 | Agent 断连超时自毁 | `communication.py` 累计断连超过 60 秒直接 `os._exit(1)`，防止网络彻底中断时 Agent 进程无限挂起重试成为僵尸进程 |
-| 多智能体任务编排（DAG 并行派发） | 在 TDP 单工单之上增加编排层。LLM 一次性分解复杂任务为 2-5 个子任务（DAG），按拓扑依赖并行派发给在线智能体，聚合进度统一交付用户 |
+| 多智能体任务编排（DAG 并行派发） | 在 TDP 单工单之上增加编排层。LLM 一次性分解复杂任务为 2-5 个子任务（DAG），按拓扑依赖并行派发给在线智能体，子任务交付后自动派发下一批，全部完成后自动汇总向用户呈现最终报告 |
+| 编排通信：程序化信号而非 LLM 对话 | Orchestrator↔Worker 的 TDP 消息（delegation/delivery/acceptance）在 brain.py 中程序化处理，不唤醒 LLM。通过 `_skip_llm_for_issuer` + `_is_orchestrating` 守卫防止 LLM 参与编排流程，彻底消除角色混淆和身份混乱 |
+| `_orchestration` 三层保障 | 编排信息（plan_id）通过三层机制传递：① 消息 payload 字段 ② `TaskTicket.orchestration_plan_id` 持久化字段 ③ `_ticket_index` 内存反查索引。即使前两层丢失也能正确路由交付到对应 plan |
+| 编排结果的自动汇总 | 计划全部完成后，`_synthesize_plan_results` 后台任务收集所有子任务结果，触发 orchestrator LLM 自动汇总并向用户呈现最终报告。Orchestrator 只委派数据收集分析，最终呈现保留给自己 |
 | 编排与委托的数据库持久化 | OrchestrationManager 和 DelegationManager 的状态变更实时写入 PostgreSQL（`orchestration_plans`、`orchestration_subtasks`、`delegation_tickets` 三张表）。Agent 启动时 `recover_state()` 恢复所有活跃工单和计划，重建内存索引。OrchestrationManager 同步等待持久化，DelegationManager 异步 fire-and-forget |
+| 防轮询与防抖 | `dispatch_subtasks` 返回值明确告知 "无需轮询"，`check_plan_progress` 内置 20 秒防抖——进度无变化时返回警告而非正常结果，防止 LLM 形成轮询正反馈 |
+| 依赖验证与 LLM 幻觉防御 | `set_subtasks()` 自动移除对不存在子任务的引用（如 `st_0`），`depends_on` 自动规范化为 `"st_N"` 格式。prompt 层禁止使用序号 0 |
 
 ### 11.3 工具调用进度流
 
