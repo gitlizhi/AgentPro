@@ -39,6 +39,7 @@ class HubConfig(BaseSettings):
     """Hub通信配置"""
     hub_host: str = Field("localhost", alias="HUB_HOST")
     hub_port: int = Field(8765, alias="HUB_PORT")
+    ws_max_size: int = Field(20 * 1024 * 1024, alias="WS_MAX_SIZE")
 
     @property
     def hub_url(self) -> str:
@@ -60,6 +61,18 @@ class AgentConfig(BaseSettings):
     agent_id_prefix: str = Field("agent", alias="AGENT_ID_PREFIX")
     num_agents: int = Field(1, alias="NUM_AGENTS", description="启动的Agent数量")
     use_long_term_memory: bool = Field(True, alias="USE_LONG_TERM_MEMORY")
+
+    # 流式响应超时（秒）
+    stream_per_event_timeout: float = Field(180, alias="STREAM_PER_EVENT_TIMEOUT")
+    stream_idle_timeout: float = Field(300, alias="STREAM_IDLE_TIMEOUT")
+    stream_max_timeout: float = Field(1800, alias="STREAM_MAX_TIMEOUT")
+
+    # 审批/超时相关
+    approval_timeout: int = Field(60, alias="APPROVAL_TIMEOUT")
+    ticket_timeout_interval: int = Field(60, alias="TICKET_TIMEOUT_INTERVAL")
+
+    # 编排
+    orchestration_max_rounds: int = Field(12, alias="ORCHESTRATION_MAX_ROUNDS")
 
 class BackendConfig(BaseSettings):
     """deepagents后端配置"""
