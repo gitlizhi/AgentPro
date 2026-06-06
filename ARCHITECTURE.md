@@ -377,12 +377,15 @@ Brain._handle_with_agent() / _process_agent_message()
     └───────────────────┘
 
     ┌─────────────────────────────────────────────────────┐
-    │ 后台提取（每 5 分钟）                                  │
-    │ conversation_memory_worker()                         │
-    │  → 扫描 PostgreSQL checkpoint 增量                   │
-    │  → LLM 提取 facts（用户画像）+ events（事件记录）      │
-    │  → facts → ChromaDB + MD / events → 仅 ChromaDB      │
-    └──────────────┬──────────────────────────────────────┘
+    │ 事件驱动提取（不再轮询）                               │
+    │ trigger_memory_extraction(thread_id, user_id,        │
+    │                        agent_id)                     │
+    │  触发 1: log_memory(task_complete=True) 反思后       │
+    │  触发 2: Brain.close() 会话空闲超时关闭时             │
+    │  → 扫描 PostgreSQL checkpoint 增量（≥20 条新消息）    │
+    │  → 小模型提取 facts + events（含 agent_id 隔离）     │
+    │  → facts → ChromaDB + MD / events → 仅 ChromaDB     │
+    └───────────────────────────────┬──────────────────────┘
                    │
     ┌──────────────▼──────────────────────────────────────┐
     │ 每日整合（凌晨 3:00）                                  │
@@ -415,9 +418,13 @@ Brain._handle_with_agent() / _process_agent_message()
 
 ### 4.3 对话提取（conversation_memory_extractor）
 
-- **触发**：后台 asyncio 任务，每 5 分钟扫描一次
+- **触发**：事件驱动（不再轮询），两种触发时机：
+  1. 任务完成并反思后（`log_memory(task_complete=True)` 触发）
+  2. 会话空闲超时关闭时（`Brain.close()` 内，闲置 > 1 小时）
 - **增量**：跟踪每个 thread 的已处理消息数（存 ChromaDB metadata），只处理新增
-- **提取**：将最近 30 条消息发给 LLM，提取两类信息：
+- **模型**：使用较小模型（`config.model.memory_extraction_model`），不消耗主力模型 token
+- **隔离**：每个 Agent 独立提取，通过 `agent_id` 元数据标记 facts 和 events 的归属
+- **提取**：将最近 30 条消息发给小模型，提取两类信息：
 
 | 类型 | 说明 | 存储位置 |
 |------|------|---------|
@@ -466,7 +473,7 @@ Brain._handle_with_agent() / _process_agent_message()
 
 | 后端 | 路径 | 内容 |
 |------|------|------|
-| ChromaDB | `./chroma_db/` | 向量化的 facts + events + skills |
+| ChromaDB | `./chroma_db/` | 向量化的 facts + events + skills（含 `agent_id` 元数据隔离） |
 | Markdown | `./agent_memory/{user_id}.md` | 仅 type="fact" 的用户画像（纯净格式） |
 | PostgreSQL | `checkpoints` 表 | LangGraph 对话状态 |
 | JSON | `agent/data/pending_tasks/` | 待反思的任务数据（临时） |
@@ -1093,6 +1100,8 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | 防轮询与防抖 | `dispatch_subtasks` 返回值明确告知 "无需轮询"，`check_plan_progress` 内置 20 秒防抖——进度无变化时返回警告而非正常结果，防止 LLM 形成轮询正反馈 |
 | 依赖验证与 LLM 幻觉防御 | `set_subtasks()` 自动移除对不存在子任务的引用（如 `st_0`），`depends_on` 自动规范化为 `"st_N"` 格式。prompt 层禁止使用序号 0 |
 
+| 记忆提取改为事件驱动 | 原每 5 分钟轮询方案每天浪费 864+ 次 LLM 调用，绝大多数为空轮询。改为任务完成反思后 + 会话空闲关闭时触发，降至 10-30 次/天。同时使用较小模型（`memory_extraction_model`）进一步降低成本，通过 `agent_id` 元数据实现不同 Agent 记忆隔离 |
+
 ### 11.3 工具调用进度流
 
 ```
@@ -1687,7 +1696,7 @@ args=[
 
 | 文件 | 职责 |
 |------|------|
-| `main.py` | 入口，初始化数据库/调度器/智能体/后台 worker |
+| `main.py` | 入口，初始化数据库/调度器/智能体/反思 worker/技能整合 |
 | `config.py` | 全局配置 |
 | `agent/core.py` | Agent 主控，消息路由 |
 | `agent/brain.py` | LLM 决策，工具注册，对话管理，上下文编排 |
@@ -1700,7 +1709,7 @@ args=[
 | `agent/orchestration.py` | 多智能体任务编排（OrchestrationPlan + DAG 并行派发） |
 | `agent/task_buffer.py` | 任务步骤缓冲 |
 | `agent/memory.py` | ChromaDB 记忆存储 + 用户画像按需读取 |
-| `agent/conversation_memory_extractor.py` | 对话记忆后台提取 |
+| `agent/conversation_memory_extractor.py` | 事件驱动对话记忆提取（含 Agent 隔离 + 小模型） |
 | `agent/memory_consolidation.py` | 每日记忆去重整合 |
 | `agent/reflection.py` | 任务反思 + 技能生成 |
 | `agent/skill_tools.py` | 技能管理工具 |
