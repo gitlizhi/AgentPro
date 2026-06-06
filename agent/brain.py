@@ -59,6 +59,7 @@ from agent.task_buffer import TaskBuffer
 from agent.context_manager import ContextManager, ToolOutputCompactionMiddleware
 from agent.skill_version_manager import get_skill_latest_version, get_skill_file_path
 from agent.skill_tools import list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result
+from agent.conversation_memory_extractor import trigger_memory_extraction
 from langchain_core.runnables import RunnableConfig
 import chromadb
 
@@ -1740,21 +1741,31 @@ class Brain:
         self.msg_buffer.cancel_all()
         # 取消所有活跃工单
         self.delegation_manager.cancel_all_for_agent(self.agent_id, "Agent shutting down")
-        # 取消并等待 Brain 自身的后台任务
-        for task in list(self._bg_tasks):
-            task.cancel()
-        if self._bg_tasks:
-            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        # 触发闲置对话的记忆提取（在取消后台任务之前）
         for thread_id, task in list(self.task_buffer.buffers.items()):
             if task.get("status") == "in_progress":
                 idle = time.time() - task.get("last_active_time", 0)
                 if idle > 3600:  # 1小时无活动
+                    self.schedule_background_task(
+                        trigger_memory_extraction(thread_id, self.user_id, self.agent_id)
+                    )
                     self.task_buffer.finish_task(thread_id, "timeout", user_feedback="任务因长时间无活动而终止")
+        # 等待记忆提取完成
+        if self._bg_tasks:
+            await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        # 取消可能残留的后台任务
+        for task in list(self._bg_tasks):
+            task.cancel()
         await close_browser_session()
             
     async def _process_reflection(self, task_data):
-        """异步处理反思（避免在工具内部阻塞）"""
+        """异步处理反思 + 触发对话记忆提取（在任务完成时）。"""
         await asyncio.to_thread(submit_task_for_reflection, task_data)
+        # 任务完成后，从对话中提取长期记忆（facts + events）
+        if self.thread_id:
+            self.schedule_background_task(
+                trigger_memory_extraction(self.thread_id, self.user_id, self.agent_id)
+            )
         
     async def _load_sent_ids_from_checkpoint(self, config):
         """从 checkpoint 加载已发送的消息 ID 集合（含 tool_call ID）。"""

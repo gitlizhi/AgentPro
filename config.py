@@ -54,6 +54,7 @@ class ModelConfig(BaseSettings):
     vision_model: str = Field("GLM-4.1V-Thinking-Flash", alias="VISION_MODEL")
     computer_vision_model: str = Field("GLM-4.1V-Thinking-Flash", alias="COMPUTER_VISION_MODEL")
     intent_model: str = Field("GLM-4.5-Air", alias="INTENT_MODEL")
+    memory_extraction_model: str = Field("GLM-4.5-Air", alias="MEMORY_EXTRACTION_MODEL")
     model_temperature: float = Field(0.0, alias="MODEL_TEMPERATURE")
 
 class AgentConfig(BaseSettings):

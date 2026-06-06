@@ -12,7 +12,6 @@ from agent.db import init_db_pool, close_db_pool
 from agent.scheduler import init_scheduler
 from agent.tasks import set_reminder_comm, consolidate_all_users
 from agent.skill_version_manager import consolidate_skills_job
-from agent.conversation_memory_extractor import conversation_memory_worker
 from config import config
 from dotenv import load_dotenv
 load_dotenv()
@@ -67,8 +66,6 @@ async def main():
         agents.append(agent)
     # 提醒消息通过主 Agent 的通信通道主动发给用户
     set_reminder_comm(agents[0].comm)
-    # 启动对话记忆提取器（后台任务）
-    memory_extractor_task = asyncio.create_task(conversation_memory_worker())
     # 启动后台反思 Worker
     reflection_task = asyncio.create_task(reflection_worker())
     # 启动遗忘巩固后台任务
@@ -76,20 +73,15 @@ async def main():
         while True:
             await consolidate_skills_job()
     consolidation_task = asyncio.create_task(skill_consolidation_loop())
-    # 并发运行所有任务
-    tasks = [agent.run() for agent in agents] + [reflection_task, consolidation_task, memory_extractor_task]
+    # 并发运行所有任务（记忆提取改为事件驱动，不再轮询）
+    tasks = [agent.run() for agent in agents] + [reflection_task, consolidation_task]
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         # 取消后台任务
         reflection_task.cancel()
-        memory_extractor_task.cancel()
         try:
             await reflection_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await memory_extractor_task
         except asyncio.CancelledError:
             pass
         for agent in agents:
