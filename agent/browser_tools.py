@@ -465,7 +465,7 @@ class BrowserSession:
             if self._playwright:
                 self._playwright.stop()
         except Exception:
-            pass
+            logger.debug("关闭浏览器会话失败", exc_info=True)
         finally:
             self._initialized = False
             logger.info("浏览器会话已关闭")

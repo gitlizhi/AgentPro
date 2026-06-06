@@ -255,7 +255,8 @@ class Hub:
         for ws in list(self.observers):
             try:
                 await ws.send(message)
-            except:
+            except Exception:
+                logger.debug("Failed to send to observer, removing from set", exc_info=True)
                 self.observers.discard(ws)
     
     async def init_db(self):
@@ -343,7 +344,7 @@ class Hub:
 async def main():
     hub = Hub()
     await hub.init_db()  # 创建连接池并加载现有群组到内存
-    async with websockets.serve(hub.handler, config.hub.hub_host, config.hub.hub_port, max_size=20 * 1024 * 1024):
+    async with websockets.serve(hub.handler, config.hub.hub_host, config.hub.hub_port, max_size=config.hub.ws_max_size):
         logger.info(f"Hub started on ws://{config.hub.hub_host}:{config.hub.hub_port}")
         await asyncio.Future()  # 运行 forever
 

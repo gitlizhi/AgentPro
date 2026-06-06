@@ -9,6 +9,7 @@ import time
 import subprocess
 import winreg
 import sys
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Literal, Tuple, Any, List
@@ -16,6 +17,8 @@ from langchain.tools import tool
 from agent.prompts import build_launch_agent_prompt
 from pywinauto import Application, Desktop
 from pywinauto.findwindows import ElementNotFoundError
+
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.absolute()   # memory_processor.py 所在的目录（agent目录）
 PENDING_DIR = BASE_DIR / "data" / "pending"
@@ -96,7 +99,7 @@ def retrieve_memory(query: str, max_summaries: int = 10) -> str:
                 if key == "confidence":
                     try:
                         result["confidence"] = float(val)
-                    except:
+                    except ValueError:
                         pass
                 elif key == "last_used":
                     result["last_used"] = val
@@ -117,7 +120,7 @@ def retrieve_memory(query: str, max_summaries: int = 10) -> str:
             days_diff = (now - last_used).days
             decay = 0.95 ** days_diff  # 每天衰减5%
             return confidence * decay
-        except:
+        except ValueError:
             return confidence
     
     # 第二级：按标签搜索摘要文件，收集候选记忆
@@ -222,8 +225,8 @@ def _find_app_path(app_name: str) -> Optional[str]:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip().split('\n')[0]
-    except:
-        pass
+    except Exception:
+        logger.debug(f"where 命令查找 {app_name} 失败", exc_info=True)
     
     # 2. 搜索常见安装目录（限制深度 3，只找 .exe）
     search_dirs = [
@@ -276,9 +279,9 @@ def _find_app_path(app_name: str) -> Optional[str]:
                                 # 检查目标文件名是否包含应用名
                                 if any(variant.lower() in target.lower() for variant in name_variants):
                                     return target
-                    except:
-                        pass
-    
+                    except Exception:
+                        logger.debug(f"powershell 快捷方式解析失败: {shortcut_path}", exc_info=True)
+
     # 4. 查询注册表 App Paths
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths")
@@ -295,9 +298,9 @@ def _find_app_path(app_name: str) -> Optional[str]:
                 i += 1
             except OSError:
                 break
-    except:
-        pass
-    
+    except Exception:
+        logger.debug(f"注册表 App Paths 搜索 {app_name} 失败", exc_info=True)
+
     return None
 
 def _find_matching_windows(title: Optional[str] = None, class_name: Optional[str] = None) -> List:
@@ -670,7 +673,8 @@ async def windows_automation(
             try:
                 control.wait('exists', timeout=timeout)
                 return f"控件在 {timeout} 秒内已出现"
-            except:
+            except Exception:
+                logger.debug(f"控件等待超时 (timeout={timeout})", exc_info=True)
                 return f"等待超时: 控件未在 {timeout} 秒内出现"
 
         elif action == "maximize":
@@ -705,7 +709,8 @@ async def windows_automation(
                 try:
                     props = control.get_properties()
                     val = props.get(property_name)
-                except:
+                except Exception:
+                    logger.debug(f"获取控件属性 {property_name} 失败", exc_info=True)
                     return f"无法获取属性 {property_name}"
             return f"属性 {property_name}: {val}"
 

@@ -35,7 +35,7 @@ def _cleanup_orphan_containers(docker_client, image: str):
                 c.remove()
                 logger.info(f"已清理退出容器: {c.short_id}")
             except Exception:
-                pass
+                logger.debug(f"清理退出容器失败: {c.short_id}", exc_info=True)
 
         # 2. 对于运行中的容器，仅清理超长时间运行的（>30 分钟），
         #    避免误删其他智能体正在使用的容器。
@@ -62,7 +62,7 @@ def _cleanup_orphan_containers(docker_client, image: str):
                             f"容器 {c.short_id} 运行中（{age:.0f}s），可能是其他智能体在使用，跳过"
                         )
             except Exception:
-                pass
+                logger.debug(f"检查运行中容器 {c.short_id} 失败", exc_info=True)
     except Exception as e:
         logger.warning(f"孤儿容器清理失败: {e}")
 
@@ -220,7 +220,7 @@ class DockerSandboxBackend(BaseSandbox):
                 try:
                     container.kill()
                 except Exception:
-                    pass
+                    logger.debug(f"强制终止容器失败: {container.short_id}", exc_info=True)
                 return ExecuteResponse(
                     output=f"Command {'timed out' if is_timeout else 'failed'}: {exc}",
                     exit_code=-1,
@@ -244,7 +244,7 @@ class DockerSandboxBackend(BaseSandbox):
                 try:
                     container.remove(force=True)
                 except Exception:
-                    pass
+                    logger.debug(f"清理容器失败: {container.short_id}", exc_info=True)
 
     def upload_files(self, files: List[Tuple[str, bytes]]):
         """将文件直接写入持久化工作区（绕过容器，在宿主机上完成）。"""
@@ -326,7 +326,7 @@ class DockerSandboxBackend(BaseSandbox):
                 try:
                     container.remove(force=True)
                 except Exception:
-                    pass
+                    logger.debug(f"清理容器失败: {container.short_id}", exc_info=True)
 
     def clean_workspace(self):
         """清空持久化工作区（保留目录结构，删除所有内容）。"""

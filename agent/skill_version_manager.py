@@ -217,8 +217,8 @@ async def consolidate_skills_job():
                 doc_id = f"skill_{skill_name}"
                 try:
                     collection.delete([doc_id])
-                except:
-                    pass
+                except Exception:
+                    logger.debug(f"删除 skill {skill_name} 向量文档失败", exc_info=True)
             logger.info(f"Archived low-value skill: {skill_name} (value={value})")
         else:
             # 高价值技能可增加检索权重（通过更新 metadata 中的 boost）

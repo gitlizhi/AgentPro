@@ -107,6 +107,7 @@ def _add_grid_to_image(img: Image.Image) -> tuple:
     try:
         font = ImageFont.truetype("arial.ttf", 18)
     except Exception:
+        logger.debug("加载 arial.ttf 字体失败，使用默认字体")
         font = ImageFont.load_default()
 
     # ---- 网格线 ----
@@ -160,7 +161,7 @@ def _take_screenshot_raw() -> Image.Image:
                 img_data = base64.b64decode(screenshot_b64)
                 return Image.open(io.BytesIO(img_data))
         except Exception:
-            pass
+            logger.debug("Open Interpreter 截图失败，回退到 PIL ImageGrab", exc_info=True)
     # 后备：PIL ImageGrab
     return ImageGrab.grab()
 
@@ -591,7 +592,8 @@ def computer_paste(text: str) -> str:
         try:
             _pyautogui.typewrite(text, interval=0.03)
             return f"已输入文本（降级模式）: {text[:80]}{'...' if len(text) > 80 else ''}"
-        except:
+        except Exception:
+            logger.debug("pyautogui 降级输入也失败", exc_info=True)
             return f"粘贴失败: {e}"
 
 
@@ -657,8 +659,8 @@ def computer_find_window(window_title: str, activate: bool = True) -> str:
                     _pyautogui.press("tab")
                     _pyautogui.keyUp("alt")
                     time.sleep(0.5)
-                except:
-                    pass
+                except Exception:
+                    logger.debug(f"Alt+Tab 切换窗口失败", exc_info=True)
                 return (f"窗口「{win.title}」处于最小化或系统托盘状态，无法还原。\n"
                         f"建议：1. 点击任务栏图标手动恢复窗口后重试\n"
                         f"      2. 或用 computer_find_app 重新搜索并启动程序。")
@@ -675,7 +677,8 @@ def computer_find_window(window_title: str, activate: bool = True) -> str:
                     info += f"\n  状态: 已还原并激活"
                 else:
                     info += f"\n  状态: 已激活（切换到前台）"
-            except:
+            except Exception:
+                logger.debug(f"窗口激活失败: {win.title}", exc_info=True)
                 info += f"\n  状态: 激活失败，可用 computer_click 点击窗口标题栏"
 
         # 给出常用点击位置的建议（窗口最小化时不提供坐标，因为坐标无效）
@@ -858,7 +861,8 @@ def computer_find_app(app_name: str) -> str:
                             target = result.stdout.strip()
                             if target and os.path.exists(target):
                                 results.append(target)
-                    except:
+                    except Exception:
+                        logger.debug(f"powershell 快捷方式解析失败: {shortcut_path}", exc_info=True)
                         results.append(shortcut_path)  # 降级：直接返回快捷方式路径
 
     # 2. 搜索常见安装目录
@@ -883,8 +887,8 @@ def computer_find_app(app_name: str) -> str:
                         for f in os.listdir(app_dir):
                             if f.lower().endswith(".exe") and name_lower in f.lower():
                                 results.append(os.path.join(app_dir, f))
-                    except:
-                        pass
+                    except OSError:
+                        logger.debug(f"遍历应用目录失败: {app_dir}", exc_info=True)
 
     # 3. 使用 where 命令搜索 PATH
     try:
@@ -897,8 +901,8 @@ def computer_find_app(app_name: str) -> str:
                 line = line.strip()
                 if line and os.path.exists(line):
                     results.append(line)
-    except:
-        pass
+    except Exception:
+        logger.debug(f"where 命令搜索 {app_name} 失败", exc_info=True)
 
     # 4. 搜索注册表 App Paths
     try:
@@ -918,8 +922,8 @@ def computer_find_app(app_name: str) -> str:
                 i += 1
             except OSError:
                 break
-    except:
-        pass
+    except Exception:
+        logger.debug(f"注册表 App Paths 搜索 {app_name} 失败", exc_info=True)
 
     # 去重并返回
     seen = set()

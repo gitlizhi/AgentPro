@@ -102,7 +102,7 @@ class LongTermMemory:
         try:
             dt = datetime.fromisoformat(timestamp)
             time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
+        except ValueError:
             time_str = timestamp
 
         entry = f"\n## {time_str}\n- 事实：{fact}\n"
@@ -131,7 +131,7 @@ class LongTermMemory:
             if user_id in self.collections:
                 del self.collections[user_id]
         except Exception:
-            pass  # 集合不存在时忽略
+            logger.debug(f"删除 collection user_memories_{user_id} 失败（可能不存在）", exc_info=True)
     
     def add_facts_batch(self, facts: List[str], user_id: str, metadata: dict = None):
         """批量添加事实，提高效率"""
@@ -161,7 +161,7 @@ class LongTermMemory:
                 try:
                     dt = datetime.fromisoformat(timestamp)
                     time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                except:
+                except ValueError:
                     time_str = timestamp
                 f.write(f"\n## {time_str}\n- 事实：{fact}\n")
     

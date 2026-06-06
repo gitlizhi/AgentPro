@@ -8,6 +8,7 @@ import random
 import time
 import os
 import asyncio
+import hashlib
 
 from agent.conversation_tracker import ConversationTracker
 from agent.delegation import DelegationManager, TaskTicket, TicketState, TicketError
@@ -64,6 +65,10 @@ import chromadb
 import logging
 logging.getLogger('langgraph').setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+def _stable_hash(s: str) -> str:
+    """返回跨进程稳定的内容哈希，用于去重 ID。"""
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 class Brain:
     
@@ -228,57 +233,258 @@ class Brain:
             for p in self.orchestration_manager._plans.values()
         )
 
+    def _resolve_plan_id(self, tdp: dict, ticket, ticket_id: str) -> str:
+        """三级回退解析编排计划 ID：
+        1. 消息 payload 的 _orchestration 字段
+        2. ticket 的 orchestration_plan_id
+        3. _ticket_index 反查
+        """
+        plan_id = tdp.get("_orchestration", "") if tdp else ""
+        if not plan_id and ticket:
+            plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
+        if not plan_id:
+            entry = self.orchestration_manager._ticket_index.get(ticket_id)
+            if entry:
+                plan_id = entry[0]
+        return plan_id
+
+    async def _handle_tdp_notification(self, user_input: str):
+        """处理 TDP 协议通知（委托/交付/接受/拒绝/取消/超时）。
+        返回 (should_skip: bool, user_input: str)——should_skip 为 True 表示调用方应跳过 LLM 直接返回，
+        user_input 可能被修改（非编排交付时重写为格式化摘要）。
+        """
+        tdp = self._tdp_notification
+        if not tdp:
+            return False, user_input
+
+        tdp_type = tdp.get("_tdp", "")
+        tdp_ticket_id = tdp.get("ticket_id", "")
+        dm = self.delegation_manager
+        _skip_llm_for_issuer = False
+
+        # ── 终态守卫：已终止的工单不接受任何 TDP 操作（幂等丢弃）──
+        if tdp_ticket_id and tdp_type in ("acceptance", "delivery", "decline"):
+            existing = dm.get_ticket(tdp_ticket_id)
+            if existing and existing.is_terminal:
+                logger.info(
+                    f"TDP: 忽略对已终止工单 {tdp_ticket_id} "
+                    f"({existing.state.value}) 的 {tdp_type} 操作"
+                )
+                self._tdp_notification = None
+
+        if tdp_type == "delegation" and tdp_ticket_id:
+            # 收到委托通知 — 在 assignee 侧创建镜像工单
+            existing = dm.get_ticket(tdp_ticket_id)
+            if not existing:
+                desc = tdp.get("text", user_input)[:500]
+                try:
+                    import uuid as _uuid
+                    ticket = TaskTicket(
+                        ticket_id=tdp_ticket_id,
+                        issuer=self.user_id,
+                        assignee=self.agent_id,
+                        description=desc,
+                        expected_output=tdp.get("expected_output", "未指定"),
+                        max_rounds=tdp.get("max_rounds", 8),
+                    )
+                    orch_plan = tdp.get("_orchestration", "")
+                    if orch_plan:
+                        ticket.orchestration_plan_id = orch_plan
+                    dm._by_id[tdp_ticket_id] = ticket
+                    dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
+                    dm._save_ticket(ticket)
+                    logger.info(f"TDP 镜像工单已创建: {tdp_ticket_id} (assignee={self.agent_id})")
+                except Exception as e:
+                    logger.warning(f"创建 TDP 镜像工单失败: {e}")
+
+        elif tdp_type == "delivery" and tdp_ticket_id:
+            ticket = dm.get_ticket(tdp_ticket_id)
+            if ticket and ticket.is_active:
+                try:
+                    dm.transition(tdp_ticket_id, TicketState.CLOSED)
+                    ticket.result_summary = user_input[:500]
+                except TicketError:
+                    pass
+            # ── 编排回调：子任务交付 ──
+            orch_plan_id = self._resolve_plan_id(tdp, ticket, tdp_ticket_id)
+            if orch_plan_id:
+                await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
+                plan = self.orchestration_manager.get_plan(orch_plan_id)
+                if plan and plan.is_complete():
+                    summary = self.orchestration_manager.get_progress_summary(orch_plan_id)
+                    await self.comm.send_to_agent("super_user", {
+                        "text": f"🎯 编排计划全部完成！\n\n{summary}"
+                    })
+                    self.schedule_background_task(
+                        self._synthesize_plan_results(orch_plan_id)
+                    )
+                elif plan:
+                    ready = plan.get_ready_subtasks()
+                    if ready:
+                        dispatched = await self._dispatch_ready_subtasks(plan, ready)
+                        await self.comm.send_to_agent("super_user", {
+                            "text": (
+                                f"📤 子任务 {tdp_ticket_id} 已交付。"
+                                f"自动派发下一批: {dispatched}"
+                            )
+                        })
+                    else:
+                        pending = [s for s in plan.subtasks if s.status == SubTaskStatus.PENDING]
+                        if pending:
+                            blocked = [f"{s.id} (依赖: {', '.join(s.depends_on)})" for s in pending]
+                            logger.info(
+                                f"编排计划 {orch_plan_id}: 子任务 {tdp_ticket_id} 完成，"
+                                f"但以下子任务仍被阻塞: {blocked}"
+                            )
+            # ── 委托方：区分编排与非编排交付 ──
+            if ticket and ticket.issuer == self.agent_id:
+                if orch_plan_id:
+                    _skip_llm_for_issuer = True
+                    logger.info(
+                        f"TDP 编排交付已程序化处理，跳过 LLM "
+                        f"(issuer={self.agent_id}, ticket={tdp_ticket_id})"
+                    )
+                    if self.thread_id:
+                        self.task_buffer.add_step(
+                            self.thread_id,
+                            f"来自 {self.user_id} 的编排交付（已自动处理）",
+                            user_input[:300],
+                        )
+                else:
+                    # 非编排交付：截断内容，LLM 可审查但禁止与 worker 对话
+                    result_preview = user_input[:300]
+                    if len(user_input) > 300:
+                        result_preview += f"...（完整结果已保存，共 {len(user_input)} 字符）"
+                    user_input = (
+                        f"[子任务交付] 工单 {tdp_ticket_id} 已完成。"
+                        f"\n交付摘要: {result_preview}"
+                        f"\n\n⚠️ 工单已关闭，禁止回复 {self.user_id}。"
+                        f"如需汇报，向 super_user 汇报结果。"
+                    )
+
+        elif tdp_type == "acceptance" and tdp_ticket_id:
+            ticket = dm.get_ticket(tdp_ticket_id)
+            if ticket and ticket.state == TicketState.PENDING:
+                try:
+                    dm.transition(tdp_ticket_id, TicketState.ACCEPTED)
+                except TicketError:
+                    pass
+            orch_plan_id = self._resolve_plan_id(tdp, ticket, tdp_ticket_id)
+            if orch_plan_id:
+                await self.orchestration_manager.mark_accepted(tdp_ticket_id)
+            is_orch_ticket = bool(orch_plan_id or getattr(ticket, 'orchestration_plan_id', None) if ticket else False)
+            if ticket and ticket.is_active and not is_orch_ticket:
+                try:
+                    dm.cancel_ticket(tdp_ticket_id, f"TDP {tdp_type} 通知", self.user_id)
+                except TicketError:
+                    pass
+            if ticket and ticket.issuer == self.agent_id:
+                _skip_llm_for_issuer = True
+                logger.info(f"TDP 接受通知已程序化处理，跳过 LLM (issuer={self.agent_id})")
+
+        elif tdp_type in ("decline", "cancel", "timed_out") and tdp_ticket_id:
+            decline_ticket = dm.get_ticket(tdp_ticket_id)
+            orch_plan_id = self._resolve_plan_id(tdp, decline_ticket, tdp_ticket_id)
+            if orch_plan_id:
+                await self.orchestration_manager.mark_failed(
+                    tdp_ticket_id,
+                    f"工单 {tdp_ticket_id} 被{tdp_type}"
+                )
+
+        self._tdp_notification = None  # 消费后清空
+
+        # ── 委托方：TDP 通知已程序化处理，无需 LLM 介入 ──
+        if _skip_llm_for_issuer:
+            if self.thread_id:
+                self.task_buffer.add_step(
+                    self.thread_id,
+                    f"来自 {self.user_id} 的 TDP 通知（已自动处理）",
+                    user_input[:300],
+                )
+            return True, user_input
+
+        return False, user_input
+
+    async def _dispatch_single_subtask(self, plan_id, subtask, online_agents,
+                                       allow_parallel=True, reassign=False,
+                                       assigned_to=None) -> str:
+        """派发单个子任务：分配智能体、创建工单、通知目标。
+
+        由 _dispatch_ready_subtasks 和编排工具共用，消除重复逻辑。
+        调用者负责异常处理。
+
+        Args:
+            plan_id: 编排计划 ID
+            subtask: SubTask 对象（含 id, description, suggested_role）
+            online_agents: 在线智能体列表
+            allow_parallel: 是否允许同对智能体并行工单（编排场景为 True）
+            reassign: 是否为重新分配（影响通知文本）
+            assigned_to: 若指定则跳过角色匹配直接分配
+
+        Returns:
+            结果描述字符串，如 "✅ st_1 → agent_x (工单 `abc`)"
+        """
+        dm = self.delegation_manager
+        om = self.orchestration_manager
+
+        if assigned_to:
+            assigned = assigned_to
+        else:
+            assigned = None
+            role_hint = (subtask.suggested_role or "").lower()
+            for agent in online_agents:
+                if role_hint and role_hint in agent.lower():
+                    assigned = agent
+                    break
+            if not assigned:
+                others = [a for a in online_agents if a != self.agent_id]
+                assigned = others[0] if others else online_agents[0]
+
+        prefix = "[编排任务 重新分配]" if reassign else "[编排任务]"
+        expected_output = f"{'重新分配' if reassign else '完成子任务'}: {subtask.description}"
+
+        ticket = dm.create_ticket(
+            issuer=self.agent_id,
+            assignee=assigned,
+            description=subtask.description,
+            expected_output=expected_output,
+            max_rounds=config.agent.orchestration_max_rounds,
+            allow_parallel=allow_parallel,
+        )
+        ticket.orchestration_plan_id = plan_id
+        dm._save_ticket(ticket)
+        await om.dispatch_subtask(plan_id, subtask.id, assigned, ticket.ticket_id)
+        await self.comm.send_to_agent(assigned, {
+            "text": (
+                f"{prefix} 这是计划 {plan_id} 的子任务 {subtask.id}。\n"
+                f"任务: {subtask.description}\n"
+                f"完成后请使用 deliver_result 交付结果。"
+            ),
+            "_tdp": "delegation",
+            "_orchestration": plan_id,
+            "ticket_id": ticket.ticket_id,
+            "max_rounds": config.agent.orchestration_max_rounds,
+            "expected_output": expected_output,
+        })
+        return f"✅ {subtask.id} → {assigned} (工单 `{ticket.ticket_id}`)", ticket.ticket_id
+
     async def _dispatch_ready_subtasks(self, plan, ready_subtasks) -> str:
         """程序化派发就绪子任务（无需 LLM 参与）。
         由 delivery 回调调用，自动推进编排计划。
         返回派发结果描述字符串。
         """
-        dm = self.delegation_manager
-        om = self.orchestration_manager
         online = list(self.peer_agents)
         if not online:
             return "（无在线智能体可供派发）"
 
         results = []
         for st in ready_subtasks:
-            assigned = None
-            role_hint = (st.suggested_role or "").lower()
-            for agent in online:
-                if role_hint and role_hint in agent.lower():
-                    assigned = agent
-                    break
-            if not assigned:
-                others = [a for a in online if a != self.agent_id]
-                assigned = others[0] if others else online[0]
-
             try:
-                ticket = dm.create_ticket(
-                    issuer=self.agent_id,
-                    assignee=assigned,
-                    description=st.description,
-                    expected_output=f"完成子任务: {st.description}",
-                    max_rounds=12,
-                    allow_parallel=True,
-                )
-                ticket.orchestration_plan_id = plan.plan_id
-                dm._save_ticket(ticket)
-                await om.dispatch_subtask(plan.plan_id, st.id, assigned, ticket.ticket_id)
-                await self.comm.send_to_agent(assigned, {
-                    "text": (
-                        f"[编排任务] 这是计划 {plan.plan_id} 的子任务 {st.id}。\n"
-                        f"任务: {st.description}\n"
-                        f"完成后请使用 deliver_result 交付结果。"
-                    ),
-                    "_tdp": "delegation",
-                    "_orchestration": plan.plan_id,
-                    "ticket_id": ticket.ticket_id,
-                    "max_rounds": 12,
-                    "expected_output": f"完成子任务: {st.description}",
-                })
-                results.append(f"✅ {st.id} → {assigned} (工单 `{ticket.ticket_id}`)")
+                msg, ticket_id = await self._dispatch_single_subtask(
+                    plan.plan_id, st, online, allow_parallel=True)
+                results.append(msg)
                 logger.info(
-                    f"编排自动派发: {st.id} → {assigned} "
-                    f"(plan={plan.plan_id}, ticket={ticket.ticket_id})"
+                    f"编排自动派发: {st.id} → (plan={plan.plan_id}, ticket={ticket_id})"
                 )
             except Exception as e:
                 results.append(f"❌ {st.id} 派发失败: {e}")
@@ -491,6 +697,20 @@ class Brain:
 
         return parts
 
+    async def _build_messages_for_stream(self, user_input: str, image_data: str, original_user_input: str) -> list:
+        """组装用于 stream 的消息列表：系统上下文 + 技能经验 + 用户输入。"""
+        system_contexts = await self._build_system_contexts(image_data)
+        if self.user_id == 'super_user':
+            skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
+            if skill_lessons:
+                system_contexts.append(skill_lessons)
+        messages = []
+        for ctx in system_contexts:
+            if ctx:
+                messages.append({"role": "system", "content": ctx})
+        messages.append({"role": "user", "content": user_input})
+        return messages
+
     async def _prepare_agent_config(self) -> tuple:
         """创建 config、修复 checkpoint、加载 sent_ids。返回 (config, sent_ids)。"""
         config = {"configurable": {"thread_id": self.thread_id}}
@@ -530,7 +750,7 @@ class Brain:
 
     async def _send_ai_message(self, msg, sent_ids: set) -> bool:
         """去重并发送 AI 消息到当前用户。返回 True 表示实际发送了。"""
-        msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+        msg_id = getattr(msg, 'id', None) or f"hash_{_stable_hash(msg.content)}"
         if msg.type == "ai" and msg.content and msg_id not in sent_ids:
             sent_ids.add(msg_id)
             await self._safe_send(msg.content)
@@ -808,7 +1028,9 @@ class Brain:
             self._timeout_loop_started = True
             self.schedule_background_task(self._ticket_timeout_loop())
 
-    async def _ticket_timeout_loop(self, interval_seconds: int = 60):
+    async def _ticket_timeout_loop(self, interval_seconds: int = None):
+        if interval_seconds is None:
+            interval_seconds = config.agent.ticket_timeout_interval
         """后台循环：定期检查工单是否空闲超时并自动终止。"""
         from agent.delegation import DEFAULT_IDLE_TIMEOUT_MINUTES
         while True:
@@ -1081,9 +1303,15 @@ class Brain:
         return result
      
     async def _astream_with_timeout(self, input_state, config, stream_mode="updates",
-                                     per_event_timeout: float = 180,
-                                     idle_timeout: float = 300,
-                                     max_total_timeout: float = 1800):
+                                     per_event_timeout: float = None,
+                                     idle_timeout: float = None,
+                                     max_total_timeout: float = None):
+        if per_event_timeout is None:
+            per_event_timeout = config.agent.stream_per_event_timeout
+        if idle_timeout is None:
+            idle_timeout = config.agent.stream_idle_timeout
+        if max_total_timeout is None:
+            max_total_timeout = config.agent.stream_max_timeout
         """对 agent.astream 的每次 __anext__ 调用增加超时保护，避免流永久挂起。
 
         三层超时设计（按优先级）：
@@ -1143,15 +1371,37 @@ class Brain:
             last_event_time = asyncio.get_event_loop().time()
             yield next_task.result()
 
-    async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
-                                    silent: bool = False):
-        # ---- P0: 用户消息自动解除该智能体的所有对话限制 ----
+    def _enqueue_agent_message(self, user_input: str, image_data: str = None, new_thread: bool = False):
+        """将 agent-to-agent 消息加入延迟合并缓冲区。"""
+
+        async def on_process(full_text: str, saved_ctx: dict):
+            if saved_ctx:
+                self.group_context = saved_ctx
+            if not self._agent_message_needs_response(full_text):
+                logger.debug(f"跳过 agent-to-agent 状态消息 (from={self.user_id}): {full_text[:100]}")
+                if self.thread_id:
+                    self.task_buffer.add_step(self.thread_id, f"来自 {self.user_id} 的状态更新", full_text[:300])
+                return
+            await self._process_agent_message(full_text, image_data, new_thread)
+
+        self.msg_buffer.enqueue(self.user_id, user_input, self.group_context, on_process)
+
+    def _check_conversation_limits(self) -> bool:
+        """检查对话限制：super_user 重置所有限制，硬截断检查。
+        返回 True 表示应中止当前消息处理。
+        """
         if self.user_id == 'super_user':
             self.conversation_tracker.reset_all_for(self.agent_id)
-
-        # ---- P0: 检查该对话对是否已被硬截断 ----
-        if self.user_id != 'super_user' and self.conversation_tracker.is_capped(self.agent_id, self.user_id):
+            return False
+        if self.conversation_tracker.is_capped(self.agent_id, self.user_id):
             logger.info(f"对话 {self.agent_id}<->{self.user_id} 已截断，丢弃收到的消息")
+            return True
+        return False
+
+    async def _handle_with_agent(self, user_input: str, image_data: str = None, new_thread: bool = False,
+                                    silent: bool = False):
+        # ---- P0: 对话限制检查 ----
+        if self._check_conversation_limits():
             return
 
         # 如果是 Agent 之间的对话，委托给 MessageBuffer 延迟合并
@@ -1159,190 +1409,9 @@ class Brain:
             # 惰性启动工单超时循环
             self._ensure_timeout_loop_started()
 
-            # ── TDP 通知处理：检测委托/接受/拒绝/交付/取消/澄清/进度通知 ──
-            tdp = self._tdp_notification
-            _skip_llm_for_issuer = False  # 委托方收到纯通知时无需唤醒 LLM
-            if tdp:
-                tdp_type = tdp.get("_tdp", "")
-                tdp_ticket_id = tdp.get("ticket_id", "")
-                dm = self.delegation_manager
-
-                # ── 终态守卫：已终止的工单不接受任何 TDP 操作（幂等丢弃）──
-                if tdp_ticket_id and tdp_type in ("acceptance", "delivery", "decline"):
-                    existing = dm.get_ticket(tdp_ticket_id)
-                    if existing and existing.is_terminal:
-                        logger.info(
-                            f"TDP: 忽略对已终止工单 {tdp_ticket_id} "
-                            f"({existing.state.value}) 的 {tdp_type} 操作"
-                        )
-                        self._tdp_notification = None
-                        # 不 return，让正常的消息处理继续（对方可能还在说别的事）
-
-                if tdp_type == "delegation" and tdp_ticket_id:
-                    # 收到委托通知 — 在 assignee 侧创建镜像工单
-                    existing = dm.get_ticket(tdp_ticket_id)
-                    if not existing:
-                        # 用描述中的关键信息创建工单（assignee 侧视角）
-                        desc = tdp.get("text", user_input)[:500]
-                        try:
-                            # 不使用 create_ticket（会检测 pair 冲突），直接创建
-                            import uuid as _uuid
-                            ticket = TaskTicket(
-                                ticket_id=tdp_ticket_id,
-                                issuer=self.user_id,
-                                assignee=self.agent_id,
-                                description=desc,
-                                expected_output=tdp.get("expected_output", "未指定"),
-                                max_rounds=tdp.get("max_rounds", 8),
-                            )
-                            # 从委托消息中提取编排上下文
-                            orch_plan = tdp.get("_orchestration", "")
-                            if orch_plan:
-                                ticket.orchestration_plan_id = orch_plan
-                            dm._by_id[tdp_ticket_id] = ticket
-                            dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
-                            dm._save_ticket(ticket)
-                            logger.info(f"TDP 镜像工单已创建: {tdp_ticket_id} (assignee={self.agent_id})")
-                        except Exception as e:
-                            logger.warning(f"创建 TDP 镜像工单失败: {e}")
-                elif tdp_type == "delivery" and tdp_ticket_id:
-                    # 收到交付通知 — issuer 侧确认
-                    ticket = dm.get_ticket(tdp_ticket_id)
-                    if ticket and ticket.is_active:
-                        try:
-                            dm.transition(tdp_ticket_id, TicketState.CLOSED)
-                            ticket.result_summary = user_input[:500]
-                        except TicketError:
-                            pass
-                    # ── 编排回调：子任务交付 ──
-                    # 多级 fallback 获取 plan_id：
-                    #   1. 消息中的 _orchestration 字段
-                    #   2. ticket 上的 orchestration_plan_id
-                    #   3. _ticket_index 反查
-                    orch_plan_id = tdp.get("_orchestration", "")
-                    if not orch_plan_id and ticket:
-                        orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
-                    if not orch_plan_id:
-                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
-                        if entry:
-                            orch_plan_id = entry[0]
-                    if orch_plan_id:
-                        await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
-                        plan = self.orchestration_manager.get_plan(orch_plan_id)
-                        if plan and plan.is_complete():
-                            summary = self.orchestration_manager.get_progress_summary(orch_plan_id)
-                            await self.comm.send_to_agent("super_user", {
-                                "text": f"🎯 编排计划全部完成！\n\n{summary}"
-                            })
-                            # ── 触发 LLM 自动汇总子任务结果并呈现最终报告 ──
-                            self.schedule_background_task(
-                                self._synthesize_plan_results(orch_plan_id)
-                            )
-                        elif plan:
-                            # 计划未完成，程序化派发下一批就绪子任务
-                            ready = plan.get_ready_subtasks()
-                            if ready:
-                                dispatched = await self._dispatch_ready_subtasks(plan, ready)
-                                await self.comm.send_to_agent("super_user", {
-                                    "text": (
-                                        f"📤 子任务 {tdp_ticket_id} 已交付。"
-                                        f"自动派发下一批: {dispatched}"
-                                    )
-                                })
-                            else:
-                                # 依赖未满足的子任务需等待
-                                pending = [s for s in plan.subtasks if s.status == SubTaskStatus.PENDING]
-                                if pending:
-                                    blocked = [f"{s.id} (依赖: {', '.join(s.depends_on)})" for s in pending]
-                                    logger.info(
-                                        f"编排计划 {orch_plan_id}: 子任务 {tdp_ticket_id} 完成，"
-                                        f"但以下子任务仍被阻塞: {blocked}"
-                                    )
-                    # ── 委托方：区分编排与非编排交付 ──
-                    if ticket and ticket.issuer == self.agent_id:
-                        if orch_plan_id:
-                            # 编排交付：已程序化推进（mark_completed + 自动派发），无需 LLM
-                            _skip_llm_for_issuer = True
-                            logger.info(
-                                f"TDP 编排交付已程序化处理，跳过 LLM "
-                                f"(issuer={self.agent_id}, ticket={tdp_ticket_id})"
-                            )
-                            if self.thread_id:
-                                self.task_buffer.add_step(
-                                    self.thread_id,
-                                    f"来自 {self.user_id} 的编排交付（已自动处理）",
-                                    user_input[:300],
-                                )
-                        else:
-                            # 非编排交付：截断内容，LLM 可审查但禁止与 worker 对话
-                            result_preview = user_input[:300]
-                            if len(user_input) > 300:
-                                result_preview += f"...（完整结果已保存，共 {len(user_input)} 字符）"
-                            user_input = (
-                                f"[子任务交付] 工单 {tdp_ticket_id} 已完成。"
-                                f"\n交付摘要: {result_preview}"
-                                f"\n\n⚠️ 工单已关闭，禁止回复 {self.user_id}。"
-                                f"如需汇报，向 super_user 汇报结果。"
-                            )
-                elif tdp_type == "acceptance" and tdp_ticket_id:
-                    ticket = dm.get_ticket(tdp_ticket_id)
-                    if ticket and ticket.state == TicketState.PENDING:
-                        try:
-                            dm.transition(tdp_ticket_id, TicketState.ACCEPTED)
-                        except TicketError:
-                            pass
-                    # ── 编排回调：子任务被接受 ──
-                    orch_plan_id = tdp.get("_orchestration", "")
-                    if not orch_plan_id:
-                        # Fallback: look up from ticket
-                        if ticket:
-                            orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
-                    if not orch_plan_id:
-                        # Fallback: look up from ticket index
-                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
-                        if entry:
-                            orch_plan_id = entry[0]
-                    if orch_plan_id:
-                        await self.orchestration_manager.mark_accepted(tdp_ticket_id)
-                    # ── 编排工单不在此处取消，保留到交付完成 ──
-                    is_orch_ticket = bool(orch_plan_id or getattr(ticket, 'orchestration_plan_id', None) if ticket else False)
-                    if ticket and ticket.is_active and not is_orch_ticket:
-                        try:
-                            dm.cancel_ticket(tdp_ticket_id, f"TDP {tdp_type} 通知", self.user_id)
-                        except TicketError:
-                            pass
-                    # 委托方：接受通知已程序化处理完毕，无需唤醒 LLM
-                    if ticket and ticket.issuer == self.agent_id:
-                        _skip_llm_for_issuer = True
-                        logger.info(f"TDP 接受通知已程序化处理，跳过 LLM (issuer={self.agent_id})")
-                elif tdp_type in ("decline", "cancel", "timed_out") and tdp_ticket_id:
-                    # ── 编排回调：子任务被拒绝/取消/超时 ──
-                    orch_plan_id = tdp.get("_orchestration", "")
-                    if not orch_plan_id:
-                        ticket = dm.get_ticket(tdp_ticket_id)
-                        if ticket:
-                            orch_plan_id = getattr(ticket, 'orchestration_plan_id', None) or ""
-                    if not orch_plan_id:
-                        entry = self.orchestration_manager._ticket_index.get(tdp_ticket_id)
-                        if entry:
-                            orch_plan_id = entry[0]
-                    if orch_plan_id:
-                        await self.orchestration_manager.mark_failed(
-                            tdp_ticket_id,
-                            f"工单 {tdp_ticket_id} 被{tdp_type}"
-                        )
-
-                self._tdp_notification = None  # 消费后清空
-
-            # ── 委托方：TDP 接受/拒绝等通知已程序化处理，无需 LLM 介入 ──
-            if _skip_llm_for_issuer:
-                # 记录到 task_buffer 以便前端显示
-                if self.thread_id:
-                    self.task_buffer.add_step(
-                        self.thread_id,
-                        f"来自 {self.user_id} 的 TDP 通知（已自动处理）",
-                        user_input[:300],
-                    )
+            # ── TDP 通知处理 ──
+            should_skip, user_input = await self._handle_tdp_notification(user_input)
+            if should_skip:
                 return
 
             # ── 编排模式守卫：正在编排时，非 TDP 消息也禁止唤醒 LLM ──
@@ -1363,27 +1432,7 @@ class Brain:
                         )
                     return
 
-            async def on_process(full_text: str, saved_ctx: dict):
-                if saved_ctx:
-                    self.group_context = saved_ctx
-
-                # ── 过滤纯状态更新：不需要 LLM 处理的消息仅记录，不触发推理 ──
-                if not self._agent_message_needs_response(full_text):
-                    logger.debug(
-                        f"跳过 agent-to-agent 状态消息 (from={self.user_id}): "
-                        f"{full_text[:100]}"
-                    )
-                    if self.thread_id:
-                        self.task_buffer.add_step(
-                            self.thread_id,
-                            f"来自 {self.user_id} 的状态更新",
-                            full_text[:300],
-                        )
-                    return
-
-                await self._process_agent_message(full_text, image_data, new_thread)
-
-            self.msg_buffer.enqueue(self.user_id, user_input, self.group_context, on_process)
+            self._enqueue_agent_message(user_input, image_data, new_thread)
             return  # 等待定时器，不立即处理
         
         
@@ -1400,22 +1449,8 @@ class Brain:
         # 保存原始用户输入，用于精确的技能检索
         original_user_input = user_input
 
-        # Build system-level context as dedicated SystemMessages (not user message prefixes).
-        # Inspired by Claude Code: system instructions stay in system role,
-        # user messages contain only what the user actually said.
-        system_contexts = await self._build_system_contexts(image_data)
-
-        # 程序化注入相关技能经验：作为系统消息而非用户消息后缀
-        if self.user_id == 'super_user':
-            skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
-            if skill_lessons:
-                system_contexts.append(skill_lessons)
-
-        messages = []
-        for ctx in system_contexts:
-            if ctx:
-                messages.append({"role": "system", "content": ctx})
-        messages.append({"role": "user", "content": user_input})
+        # Build messages with system contexts + skill lessons
+        messages = await self._build_messages_for_stream(user_input, image_data, original_user_input)
 
         # Proactive token budget check (one-time, before the stream loop)
         if self.user_id == 'super_user' and not silent:
@@ -1469,10 +1504,10 @@ class Brain:
 
                                 for msg in messages_list:
                                     await self._send_ai_message(msg, sent_ids)
-                                    msg_id = getattr(msg, 'id', None) or f"hash_{hash(msg.content)}"
+                                    msg_id = getattr(msg, 'id', None) or f"hash_{_stable_hash(msg.content)}"
                                     if hasattr(msg, 'tool_calls') and msg.tool_calls and self.user_id == 'super_user' and not silent:
                                         for tc in msg.tool_calls:
-                                            tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
+                                            tc_id = tc.get('id', '') or f"tc_{_stable_hash(str(tc))}"
                                             if tc_id not in sent_ids:
                                                 sent_ids.add(tc_id)
                                                 tool_name = tc.get("name")
@@ -1569,8 +1604,7 @@ class Brain:
                 if command:
                     input_state = Command(resume=command)
 
-                async for event in self._astream_with_timeout(input_state, config, stream_mode="values",
-                    per_event_timeout=120, idle_timeout=180, max_total_timeout=600):
+                async for event in self._astream_with_timeout(input_state, config, stream_mode="values"):
                     if "__interrupt__" in event:
                         interrupts = event["__interrupt__"]
                         decisions = await self._process_interrupts(interrupts)
@@ -1672,7 +1706,7 @@ class Brain:
         future = asyncio.get_event_loop().create_future()
         self._pending_approvals[tool_call_id] = future
         try:
-            decision = await asyncio.wait_for(future, timeout=60)
+            decision = await asyncio.wait_for(future, timeout=config.agent.approval_timeout)
             return decision
         except asyncio.TimeoutError:
             return {"type": "reject"}
@@ -1734,11 +1768,11 @@ class Brain:
                         ids.add(msg_id)
                     elif hasattr(msg, 'content') and msg.content:
                         # 备用方案：内容哈希
-                        ids.add(hash(msg.content))
+                        ids.add(_stable_hash(msg.content))
                     # 恢复 tool_call ID，防止对话恢复时重发 tool_call_start 事件
                     if hasattr(msg, 'tool_calls') and msg.tool_calls:
                         for tc in msg.tool_calls:
-                            tc_id = tc.get('id', '') or f"tc_{hash(str(tc))}"
+                            tc_id = tc.get('id', '') or f"tc_{_stable_hash(str(tc))}"
                             ids.add(tc_id)
                 return ids
         except Exception as e:

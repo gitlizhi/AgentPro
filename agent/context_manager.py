@@ -24,6 +24,7 @@ import os
 import re
 import time
 import logging
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -212,7 +213,7 @@ def compact_tool_output(content: str, tool_name: str = "",
     os.makedirs(TOOL_OUTPUT_DIR, exist_ok=True)
 
     # Unique filename based on hash of content
-    content_hash = str(hash(content))
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
     fname = f"{tool_name or 'tool'}_{content_hash[-12:]}.txt"
     fpath = os.path.join(TOOL_OUTPUT_DIR, fname)
 

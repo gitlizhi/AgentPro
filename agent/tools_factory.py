@@ -676,44 +676,10 @@ def create_orchestration_tools(brain):
 
         results = []
         for st in ready:
-            assigned = None
-            role_hint = (st.suggested_role or "").lower()
-            # 按角色模糊匹配
-            for agent in online:
-                if role_hint and role_hint in agent.lower():
-                    assigned = agent
-                    break
-            if not assigned:
-                # 排除编排者自身，选第一个在线 agent
-                others = [a for a in online if a != brain_ref.agent_id]
-                assigned = others[0] if others else online[0]
-
             try:
-                ticket = dm.create_ticket(
-                    issuer=brain_ref.agent_id,
-                    assignee=assigned,
-                    description=st.description,
-                    expected_output=f"完成子任务: {st.description}",
-                    max_rounds=12,
-                    allow_parallel=True,
-                )
-                ticket.orchestration_plan_id = plan_id
-                dm._save_ticket(ticket)
-                await om.dispatch_subtask(plan_id, st.id, assigned, ticket.ticket_id)
-
-                await comm.send_to_agent(assigned, {
-                    "text": (
-                        f"[编排任务] 这是计划 {plan_id} 的子任务 {st.id}。\n"
-                        f"任务: {st.description}\n"
-                        f"完成后请使用 deliver_result 交付结果。"
-                    ),
-                    "_tdp": "delegation",
-                    "_orchestration": plan_id,
-                    "ticket_id": ticket.ticket_id,
-                    "max_rounds": 12,
-                    "expected_output": f"完成子任务: {st.description}",
-                })
-                results.append(f"✅ {st.id} → **{assigned}** (工单 `{ticket.ticket_id}`)")
+                msg, _ = await brain_ref._dispatch_single_subtask(
+                    plan_id, st, online, allow_parallel=True)
+                results.append(msg)
             except Exception as e:
                 results.append(f"❌ {st.id} 派发失败: {e}")
                 logger.error(f"Failed to dispatch subtask {st.id}: {e}")
@@ -772,27 +738,14 @@ def create_orchestration_tools(brain):
         st.ticket_id = None
         st.result = None
 
-        ticket = dm.create_ticket(
-            issuer=brain_ref.agent_id,
-            assignee=new_agent,
-            description=st.description,
-            expected_output=f"重新分配: {st.description}",
-            max_rounds=12,
+        online = list(brain_ref.peer_agents)
+        _, ticket_id = await brain_ref._dispatch_single_subtask(
+            plan_id, st, online,
+            allow_parallel=False, reassign=True,
+            assigned_to=new_agent,
         )
-        ticket.orchestration_plan_id = plan_id
-        dm._save_ticket(ticket)
-        await om.dispatch_subtask(plan_id, st.id, new_agent, ticket.ticket_id)
 
-        await comm.send_to_agent(new_agent, {
-            "text": f"[编排任务 重新分配] {st.description}",
-            "_tdp": "delegation",
-            "_orchestration": plan_id,
-            "ticket_id": ticket.ticket_id,
-            "max_rounds": 12,
-            "expected_output": f"完成子任务: {st.description}",
-        })
-
-        return f"已重新派发 {subtask_id} → **{new_agent}** (工单 `{ticket.ticket_id}`)"
+        return f"已重新派发 {subtask_id} → **{new_agent}** (工单 `{ticket_id}`)"
 
     return [
         create_task_plan,
