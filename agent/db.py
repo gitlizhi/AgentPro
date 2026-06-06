@@ -4,13 +4,160 @@
 from typing import Optional
 import logging
 import psycopg
-from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import AsyncConnectionPool, ConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from config import config
 
 logger = logging.getLogger(__name__)
 
 _pool: Optional[AsyncConnectionPool] = None
+_sync_pool: Optional[ConnectionPool] = None
+
+# ── 统一 DDL（所有表定义集中管理）──────────────────────────────
+_SCHEMA_DDL = [
+    # === reminders ===
+    """
+    CREATE TABLE IF NOT EXISTS reminders (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        reminder_time TIMESTAMP NOT NULL,
+        message TEXT NOT NULL,
+        triggered BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_reminders_user_time ON reminders (user_id, reminder_time) WHERE NOT triggered",
+
+    # === rooms ===
+    """
+    CREATE TABLE IF NOT EXISTS rooms (
+        room_id VARCHAR(255) PRIMARY KEY,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS room_members (
+        room_id VARCHAR(255) REFERENCES rooms(room_id) ON DELETE CASCADE,
+        agent_id VARCHAR(255),
+        joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (room_id, agent_id)
+    )
+    """,
+
+    # === chat ===
+    """
+    CREATE TABLE IF NOT EXISTS chat_messages (
+        id SERIAL PRIMARY KEY,
+        thread_id VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL,
+        content TEXT NOT NULL,
+        image TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages(thread_id)",
+    "CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created ON chat_messages(thread_id, created_at DESC)",
+
+    # === conversation_threads ===
+    """
+    CREATE TABLE IF NOT EXISTS conversation_threads (
+        id SERIAL PRIMARY KEY,
+        thread_id VARCHAR(255) UNIQUE NOT NULL,
+        agent_id VARCHAR(255) NOT NULL,
+        title VARCHAR(500) DEFAULT 'New Chat',
+        user_id VARCHAR(255) DEFAULT 'super_user',
+        is_archived BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_threads_agent ON conversation_threads(agent_id, user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_threads_updated ON conversation_threads(updated_at DESC)",
+
+    # === 迁移：为已有表添加可能缺失的列 ===
+    "ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image TEXT",
+
+    # === 编排系统 ===
+    """
+    CREATE TABLE IF NOT EXISTS orchestration_plans (
+        plan_id VARCHAR(64) PRIMARY KEY,
+        description TEXT NOT NULL,
+        issuer VARCHAR(255) NOT NULL,
+        state VARCHAR(32) NOT NULL DEFAULT 'planning',
+        completed_count INTEGER DEFAULT 0,
+        failed_count INTEGER DEFAULT 0,
+        created_at DOUBLE PRECISION,
+        updated_at DOUBLE PRECISION
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS orchestration_subtasks (
+        plan_id VARCHAR(64) REFERENCES orchestration_plans(plan_id) ON DELETE CASCADE,
+        subtask_id VARCHAR(16) NOT NULL,
+        description TEXT NOT NULL,
+        assigned_to VARCHAR(255),
+        status VARCHAR(32) NOT NULL DEFAULT 'pending',
+        depends_on JSONB DEFAULT '[]',
+        result TEXT,
+        ticket_id VARCHAR(32),
+        suggested_role VARCHAR(128),
+        PRIMARY KEY (plan_id, subtask_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_orch_subtasks_ticket
+    ON orchestration_subtasks (ticket_id) WHERE ticket_id IS NOT NULL
+    """,
+
+    # === 委托系统 ===
+    """
+    CREATE TABLE IF NOT EXISTS delegation_tickets (
+        ticket_id VARCHAR(32) PRIMARY KEY,
+        issuer VARCHAR(255) NOT NULL,
+        assignee VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        expected_output TEXT NOT NULL DEFAULT '',
+        max_rounds INTEGER DEFAULT 8,
+        state VARCHAR(32) NOT NULL DEFAULT 'pending',
+        round_count INTEGER DEFAULT 0,
+        clarification_count INTEGER DEFAULT 0,
+        result_summary TEXT,
+        cancel_reason TEXT,
+        cancelled_by VARCHAR(255),
+        thread_id VARCHAR(255),
+        created_at DOUBLE PRECISION,
+        accepted_at DOUBLE PRECISION,
+        completed_at DOUBLE PRECISION,
+        last_activity DOUBLE PRECISION DEFAULT 0,
+        orchestration_plan_id VARCHAR(64)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair
+    ON delegation_tickets (issuer, assignee)
+    WHERE state NOT IN ('closed','declined','timed_out','cancelled')
+    """,
+    # 为已存在的表补充 orchestration_plan_id 列（兼容旧数据）
+    """
+    DO $$ BEGIN
+        ALTER TABLE delegation_tickets ADD COLUMN orchestration_plan_id VARCHAR(64);
+    EXCEPTION WHEN duplicate_column THEN
+        NULL;
+    END $$
+    """,
+]
+
+
+async def _run_ddl_async(conn) -> None:
+    """在异步连接上执行全部 DDL"""
+    for sql in _SCHEMA_DDL:
+        await conn.execute(sql)
+
+
+def _run_ddl_sync(conn) -> None:
+    """在同步连接上执行全部 DDL"""
+    for sql in _SCHEMA_DDL:
+        conn.execute(sql)
 
 
 async def ensure_database_exists(uri: str):
@@ -95,117 +242,9 @@ async def init_db_pool():
             _pool = None
             raise
             
-        # ---------- 新增：创建 reminders 表 ----------
+        # 执行统一 DDL
         async with _pool.connection() as conn:
-            await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS reminders (
-                        id SERIAL PRIMARY KEY,
-                        user_id TEXT NOT NULL,
-                        reminder_time TIMESTAMP NOT NULL,
-                        message TEXT NOT NULL,
-                        triggered BOOLEAN DEFAULT FALSE,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-            # 创建索引以加速查询
-            await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_reminders_user_time
-                    ON reminders (user_id, reminder_time) WHERE NOT triggered
-                """)
-            # print("✅ 已确保 reminders 表存在")
-            await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS rooms (
-                        room_id VARCHAR(255) PRIMARY KEY,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
-            await conn.execute("""
-                    CREATE TABLE IF NOT EXISTS room_members (
-                    room_id VARCHAR(255) REFERENCES rooms(room_id) ON DELETE CASCADE,
-                    agent_id VARCHAR(255),
-                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (room_id, agent_id)
-                );
-                """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id SERIAL PRIMARY KEY,
-                    thread_id VARCHAR(255) NOT NULL,
-                    role VARCHAR(20) NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_id ON chat_messages(thread_id)")
-
-            # ── 编排系统表 ──
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS orchestration_plans (
-                    plan_id VARCHAR(64) PRIMARY KEY,
-                    description TEXT NOT NULL,
-                    issuer VARCHAR(255) NOT NULL,
-                    state VARCHAR(32) NOT NULL DEFAULT 'planning',
-                    completed_count INTEGER DEFAULT 0,
-                    failed_count INTEGER DEFAULT 0,
-                    created_at DOUBLE PRECISION,
-                    updated_at DOUBLE PRECISION
-                )
-            """)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS orchestration_subtasks (
-                    plan_id VARCHAR(64) REFERENCES orchestration_plans(plan_id) ON DELETE CASCADE,
-                    subtask_id VARCHAR(16) NOT NULL,
-                    description TEXT NOT NULL,
-                    assigned_to VARCHAR(255),
-                    status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                    depends_on JSONB DEFAULT '[]',
-                    result TEXT,
-                    ticket_id VARCHAR(32),
-                    suggested_role VARCHAR(128),
-                    PRIMARY KEY (plan_id, subtask_id)
-                )
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_orch_subtasks_ticket
-                ON orchestration_subtasks (ticket_id) WHERE ticket_id IS NOT NULL
-            """)
-            # ── 委托系统表 ──
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS delegation_tickets (
-                    ticket_id VARCHAR(32) PRIMARY KEY,
-                    issuer VARCHAR(255) NOT NULL,
-                    assignee VARCHAR(255) NOT NULL,
-                    description TEXT NOT NULL DEFAULT '',
-                    expected_output TEXT NOT NULL DEFAULT '',
-                    max_rounds INTEGER DEFAULT 8,
-                    state VARCHAR(32) NOT NULL DEFAULT 'pending',
-                    round_count INTEGER DEFAULT 0,
-                    clarification_count INTEGER DEFAULT 0,
-                    result_summary TEXT,
-                    cancel_reason TEXT,
-                    cancelled_by VARCHAR(255),
-                    thread_id VARCHAR(255),
-                    created_at DOUBLE PRECISION,
-                    accepted_at DOUBLE PRECISION,
-                    completed_at DOUBLE PRECISION,
-                    last_activity DOUBLE PRECISION DEFAULT 0,
-                    orchestration_plan_id VARCHAR(64)
-                )
-            """)
-            # 为已有数据库添加列（如果不存在）
-            await conn.execute("""
-                DO $$ BEGIN
-                    ALTER TABLE delegation_tickets ADD COLUMN orchestration_plan_id VARCHAR(64);
-                EXCEPTION WHEN duplicate_column THEN
-                    NULL;
-                END $$;
-            """)
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair
-                ON delegation_tickets (issuer, assignee)
-                WHERE state NOT IN ('closed','declined','timed_out','cancelled')
-            """)
+            await _run_ddl_async(conn)
 
         # 初始化检查点表
         checkpointer = AsyncPostgresSaver(_pool)
@@ -228,3 +267,57 @@ def get_pool() -> AsyncConnectionPool:
     if _pool is None:
         raise RuntimeError("Database pool not initialized. Call init_db_pool() first.")
     return _pool
+
+
+# ── 同步连接池（供 client.py FastAPI 使用）───────────────────
+
+
+def init_sync_pool():
+    """初始化同步连接池并创建表"""
+    global _sync_pool
+    if _sync_pool is None:
+        _sync_pool = ConnectionPool(
+            config.db.postgres_uri,
+            min_size=2,
+            max_size=10,
+            timeout=30,
+            max_idle=300,
+            max_lifetime=3600,
+            kwargs={
+                "autocommit": True,
+                "connect_timeout": 10,
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            },
+        )
+        try:
+            with _sync_pool.connection() as conn:
+                conn.execute("SELECT 1")
+        except Exception:
+            _sync_pool.close()
+            _sync_pool = None
+            raise
+
+        with _sync_pool.connection() as conn:
+            _run_ddl_sync(conn)
+
+        logger.info("同步连接池已初始化，表已创建")
+    return _sync_pool
+
+
+def get_sync_pool() -> ConnectionPool:
+    """获取全局同步连接池（确保已初始化）"""
+    if _sync_pool is None:
+        raise RuntimeError("Sync pool not initialized. Call init_sync_pool() first.")
+    return _sync_pool
+
+
+def close_sync_pool():
+    """关闭同步连接池"""
+    global _sync_pool
+    if _sync_pool:
+        _sync_pool.close()
+        _sync_pool = None
+        logger.info("Sync pool closed.")

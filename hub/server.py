@@ -259,6 +259,7 @@ class Hub:
                 self.observers.discard(ws)
     
     async def init_db(self):
+        # NOTE: 完整 schema 定义见 agent/db.py:_SCHEMA_DDL，此处仅创建 Hub 自身需要的 rooms/room_members 表
         self.db_pool = await asyncpg.create_pool(
             config.db.postgres_uri,
             min_size=2,                           # 保持少量热连接，避免频繁建连

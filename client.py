@@ -13,19 +13,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+from config import config
 from pydantic import BaseModel
 from datetime import datetime, timezone
-import psycopg
-from config import config  # 导入你的配置
 from agent.prompts import build_launch_agent_prompt
+from agent.db import init_sync_pool, get_sync_pool, close_sync_pool
 from dotenv import load_dotenv
 load_dotenv()
 
-# 获取数据库连接字符串（同步方式）
-DB_URI = config.db.postgres_uri
-
-def get_db_connection():
-    return psycopg.connect(DB_URI)
 
 def fmt_dt(dt):
     """将 naive datetime 标记为 UTC 并返回带时区的 ISO 字符串"""
@@ -35,142 +30,44 @@ def fmt_dt(dt):
 
 # 在 lifespan 中初始化表（同步）
 def init_db():
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id SERIAL PRIMARY KEY,
-                thread_id VARCHAR(255) NOT NULL,
-                role VARCHAR(20) NOT NULL,
-                content TEXT NOT NULL,
-                image TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_threads (
-                id SERIAL PRIMARY KEY,
-                thread_id VARCHAR(255) UNIQUE NOT NULL,
-                agent_id VARCHAR(255) NOT NULL,
-                title VARCHAR(500) DEFAULT 'New Chat',
-                user_id VARCHAR(255) DEFAULT 'super_user',
-                is_archived BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_threads_agent
-            ON conversation_threads(agent_id, user_id)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_threads_updated
-            ON conversation_threads(updated_at DESC)
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created
-            ON chat_messages(thread_id, created_at DESC)
-        """)
-        # Migration: add image column if not exists
-        cur.execute("""
-            ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS image TEXT
-        """)
-        # ── 编排系统表 ──
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS orchestration_plans (
-                plan_id VARCHAR(64) PRIMARY KEY,
-                description TEXT NOT NULL,
-                issuer VARCHAR(255) NOT NULL,
-                state VARCHAR(32) NOT NULL DEFAULT 'planning',
-                completed_count INTEGER DEFAULT 0,
-                failed_count INTEGER DEFAULT 0,
-                created_at DOUBLE PRECISION,
-                updated_at DOUBLE PRECISION
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS orchestration_subtasks (
-                plan_id VARCHAR(64) REFERENCES orchestration_plans(plan_id) ON DELETE CASCADE,
-                subtask_id VARCHAR(16) NOT NULL,
-                description TEXT NOT NULL,
-                assigned_to VARCHAR(255),
-                status VARCHAR(32) NOT NULL DEFAULT 'pending',
-                depends_on JSONB DEFAULT '[]',
-                result TEXT,
-                ticket_id VARCHAR(32),
-                suggested_role VARCHAR(128),
-                PRIMARY KEY (plan_id, subtask_id)
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_orch_subtasks_ticket
-            ON orchestration_subtasks (ticket_id) WHERE ticket_id IS NOT NULL
-        """)
-        # ── 委托系统表 ──
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS delegation_tickets (
-                ticket_id VARCHAR(32) PRIMARY KEY,
-                issuer VARCHAR(255) NOT NULL,
-                assignee VARCHAR(255) NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                expected_output TEXT NOT NULL DEFAULT '',
-                max_rounds INTEGER DEFAULT 8,
-                state VARCHAR(32) NOT NULL DEFAULT 'pending',
-                round_count INTEGER DEFAULT 0,
-                clarification_count INTEGER DEFAULT 0,
-                result_summary TEXT,
-                cancel_reason TEXT,
-                cancelled_by VARCHAR(255),
-                thread_id VARCHAR(255),
-                created_at DOUBLE PRECISION,
-                accepted_at DOUBLE PRECISION,
-                completed_at DOUBLE PRECISION,
-                last_activity DOUBLE PRECISION DEFAULT 0
-            )
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_delegation_tickets_pair
-            ON delegation_tickets (issuer, assignee)
-            WHERE state NOT IN ('closed','declined','timed_out','cancelled')
-        """)
-    conn.commit()
-    conn.close()
+    """委托给 agent.db 统一连接池初始化"""
+    init_sync_pool()
     migrate_legacy_threads()
 
 def migrate_legacy_threads():
     """将旧格式 thread_id（如 private_agent_super_user）迁移到 conversation_threads 表"""
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT thread_id FROM chat_messages
-            WHERE thread_id LIKE 'private\\_%\\_super\\_user'
-            AND thread_id NOT LIKE 'private\\_%\\_super\\_user\\_%'
-        """)
-        old_threads = [row[0] for row in cur.fetchall()]
-        for thread_id in old_threads:
-            parts = thread_id.split('_')
-            # 格式: private_{agent_id}_super_user
-            if len(parts) >= 3 and parts[0] == 'private' and parts[-1] == 'user' and parts[-2] == 'super':
-                agent_id = '_'.join(parts[1:-2])  # 处理 agent_id 中可能包含下划线
-                cur.execute(
-                    "SELECT 1 FROM conversation_threads WHERE thread_id = %s",
-                    (thread_id,)
-                )
-                if not cur.fetchone():
-                    cur.execute("""
-                        INSERT INTO conversation_threads (thread_id, agent_id, title, created_at, updated_at)
-                        SELECT %s, %s, %s,
-                            (SELECT MIN(created_at) FROM chat_messages WHERE thread_id = %s),
-                            (SELECT MAX(created_at) FROM chat_messages WHERE thread_id = %s)
-                    """, (thread_id, agent_id, f'Chat with {agent_id}', thread_id, thread_id))
-        conn.commit()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT thread_id FROM chat_messages
+                WHERE thread_id LIKE 'private\\_%\\_super\\_user'
+                AND thread_id NOT LIKE 'private\\_%\\_super\\_user\\_%'
+            """)
+            old_threads = [row[0] for row in cur.fetchall()]
+            for thread_id in old_threads:
+                parts = thread_id.split('_')
+                # 格式: private_{agent_id}_super_user
+                if len(parts) >= 3 and parts[0] == 'private' and parts[-1] == 'user' and parts[-2] == 'super':
+                    agent_id = '_'.join(parts[1:-2])  # 处理 agent_id 中可能包含下划线
+                    cur.execute(
+                        "SELECT 1 FROM conversation_threads WHERE thread_id = %s",
+                        (thread_id,)
+                    )
+                    if not cur.fetchone():
+                        cur.execute("""
+                            INSERT INTO conversation_threads (thread_id, agent_id, title, created_at, updated_at)
+                            SELECT %s, %s, %s,
+                                (SELECT MIN(created_at) FROM chat_messages WHERE thread_id = %s),
+                                (SELECT MAX(created_at) FROM chat_messages WHERE thread_id = %s)
+                        """, (thread_id, agent_id, f'Chat with {agent_id}', thread_id, thread_id))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()   # 同步初始化
+    init_db()   # 同步初始化（创建连接池 + 迁移）
     asyncio.create_task(connect_to_hub())
     yield
+    close_sync_pool()
 
     
 class MessageIn(BaseModel):
@@ -373,7 +270,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def connect_to_hub():
     global hub_ws, online_agents
-    uri = "ws://localhost:8765"
+    uri = config.hub.hub_url
     while True:
         try:
             async with websockets.connect(uri, max_size=20 * 1024 * 1024) as ws:
@@ -572,30 +469,27 @@ async def upload_image(data: dict):
 
 @app.post("/chat/history")
 async def save_message(msg: MessageIn):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO chat_messages (thread_id, role, content, image) VALUES (%s, %s, %s, %s)",
-            (msg.thread_id, msg.role, msg.content, msg.image)
-        )
-        cur.execute(
-            "UPDATE conversation_threads SET updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
-            (msg.thread_id,)
-        )
-    conn.commit()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO chat_messages (thread_id, role, content, image) VALUES (%s, %s, %s, %s)",
+                (msg.thread_id, msg.role, msg.content, msg.image)
+            )
+            cur.execute(
+                "UPDATE conversation_threads SET updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+                (msg.thread_id,)
+            )
     return {"status": "ok"}
 
 @app.get("/chat/history")
 async def get_history(thread_id: str, limit: int = 100):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, role, content, created_at, image FROM chat_messages WHERE thread_id = %s ORDER BY created_at LIMIT %s",
-            (thread_id, limit)
-        )
-        rows = cur.fetchall()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, role, content, created_at, image FROM chat_messages WHERE thread_id = %s ORDER BY created_at LIMIT %s",
+                (thread_id, limit)
+            )
+            rows = cur.fetchall()
     return [
         {
             "id": row[0],
@@ -608,36 +502,34 @@ async def get_history(thread_id: str, limit: int = 100):
     ]
 @app.get("/chat/threads")
 async def get_threads():
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT thread_id FROM chat_messages ORDER BY thread_id")
-        rows = cur.fetchall()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT thread_id FROM chat_messages ORDER BY thread_id")
+            rows = cur.fetchall()
     return {"threads": [row[0] for row in rows]}
 
 # ── 对话管理 API ──
 
 @app.get("/chat/conversations")
 async def list_conversations(agent_id: str = None):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        if agent_id:
-            cur.execute(
-                """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
-                   FROM conversation_threads
-                   WHERE agent_id = %s AND user_id = 'super_user' AND is_archived = FALSE
-                   ORDER BY updated_at DESC""",
-                (agent_id,)
-            )
-        else:
-            cur.execute(
-                """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
-                   FROM conversation_threads
-                   WHERE user_id = 'super_user' AND is_archived = FALSE
-                   ORDER BY updated_at DESC"""
-            )
-        rows = cur.fetchall()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if agent_id:
+                cur.execute(
+                    """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
+                       FROM conversation_threads
+                       WHERE agent_id = %s AND user_id = 'super_user' AND is_archived = FALSE
+                       ORDER BY updated_at DESC""",
+                    (agent_id,)
+                )
+            else:
+                cur.execute(
+                    """SELECT thread_id, agent_id, title, is_archived, created_at, updated_at
+                       FROM conversation_threads
+                       WHERE user_id = 'super_user' AND is_archived = FALSE
+                       ORDER BY updated_at DESC"""
+                )
+            rows = cur.fetchall()
     return {
         "conversations": [
             {
@@ -650,54 +542,48 @@ async def list_conversations(agent_id: str = None):
 
 @app.post("/chat/conversations")
 async def create_conversation(data: ConversationCreate):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            """INSERT INTO conversation_threads (thread_id, agent_id, title, user_id)
-               VALUES (%s, %s, 'New Chat', 'super_user')
-               ON CONFLICT (thread_id) DO NOTHING""",
-            (data.thread_id, data.agent_id)
-        )
-    conn.commit()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO conversation_threads (thread_id, agent_id, title, user_id)
+                   VALUES (%s, %s, 'New Chat', 'super_user')
+                   ON CONFLICT (thread_id) DO NOTHING""",
+                (data.thread_id, data.agent_id)
+            )
     return {"status": "ok", "thread_id": data.thread_id}
 
 @app.patch("/chat/conversations/{thread_id}")
 async def update_conversation(thread_id: str, data: ConversationUpdate):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        updates = []
-        params = []
-        if data.title is not None:
-            updates.append("title = %s")
-            params.append(data.title[:500])
-        if data.is_archived is not None:
-            updates.append("is_archived = %s")
-            params.append(data.is_archived)
-        if updates:
-            params.append(thread_id)
-            cur.execute(
-                f"UPDATE conversation_threads SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
-                params
-            )
-    conn.commit()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            updates = []
+            params = []
+            if data.title is not None:
+                updates.append("title = %s")
+                params.append(data.title[:500])
+            if data.is_archived is not None:
+                updates.append("is_archived = %s")
+                params.append(data.is_archived)
+            if updates:
+                params.append(thread_id)
+                cur.execute(
+                    f"UPDATE conversation_threads SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+                    params
+                )
     return {"status": "ok"}
 
 @app.delete("/chat/conversations/{thread_id}")
 async def delete_conversation(thread_id: str, permanent: bool = False):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        if permanent:
-            cur.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
-            cur.execute("DELETE FROM conversation_threads WHERE thread_id = %s", (thread_id,))
-        else:
-            cur.execute(
-                "UPDATE conversation_threads SET is_archived = TRUE, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
-                (thread_id,)
-            )
-    conn.commit()
-    conn.close()
+    with get_sync_pool().connection() as conn:
+        with conn.cursor() as cur:
+            if permanent:
+                cur.execute("DELETE FROM chat_messages WHERE thread_id = %s", (thread_id,))
+                cur.execute("DELETE FROM conversation_threads WHERE thread_id = %s", (thread_id,))
+            else:
+                cur.execute(
+                    "UPDATE conversation_threads SET is_archived = TRUE, updated_at = CURRENT_TIMESTAMP WHERE thread_id = %s",
+                    (thread_id,)
+                )
     return {"status": "ok"}
 
 # ── 智能体管理 API ──
