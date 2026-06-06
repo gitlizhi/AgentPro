@@ -1302,16 +1302,10 @@ class Brain:
             result += f"- {dt} UTC：{row['message']}\n"
         return result
      
-    async def _astream_with_timeout(self, input_state, config, stream_mode="updates",
+    async def _astream_with_timeout(self, input_state, runnable_config, stream_mode="updates",
                                      per_event_timeout: float = None,
                                      idle_timeout: float = None,
                                      max_total_timeout: float = None):
-        if per_event_timeout is None:
-            per_event_timeout = config.agent.stream_per_event_timeout
-        if idle_timeout is None:
-            idle_timeout = config.agent.stream_idle_timeout
-        if max_total_timeout is None:
-            max_total_timeout = config.agent.stream_max_timeout
         """对 agent.astream 的每次 __anext__ 调用增加超时保护，避免流永久挂起。
 
         三层超时设计（按优先级）：
@@ -1324,7 +1318,13 @@ class Brain:
 
         使用 asyncio.wait 代替 wait_for，避免 Python 3.12 将内部 CancelledError 掩码为 TimeoutError。
         """
-        agen = self.agent.astream(input_state, config, stream_mode=stream_mode)
+        if per_event_timeout is None:
+            per_event_timeout = config.agent.stream_per_event_timeout
+        if idle_timeout is None:
+            idle_timeout = config.agent.stream_idle_timeout
+        if max_total_timeout is None:
+            max_total_timeout = config.agent.stream_max_timeout
+        agen = self.agent.astream(input_state, runnable_config, stream_mode=stream_mode)
         total_deadline = asyncio.get_event_loop().time() + max_total_timeout
         last_event_time = asyncio.get_event_loop().time()
 
