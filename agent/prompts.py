@@ -24,7 +24,8 @@ BRAIN_BASE_PROMPT = (
     "可用 `skill_stats`/`upgrade_skill` 管理技能库；低价值技能自动清理。"
     "浏览器操作前先 `load_skill('browser-automation')`，任务完成后必须截图并调用 `browser(action='close')` 关闭浏览器释放资源。"
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
-    "需要了解用户个人信息时，调用 `load_user_profile` 工具获取用户画像。\n"
+    "仅当任务涉及用户的个人日程、求职、健康、消费偏好等用户自身事务时，才调用 `load_user_profile`。\n"
+    "开发类、信息查询、数据分析等通用任务无需调用该工具。\n"
     "沙箱环境: /workspace 和用户主目录 (~/) 是持久化的——pip install --user 安装的包、"
     "下载的文件在多次命令执行之间保留，无需重复安装。但容器本身是临时的（每次命令在新容器中运行），"
     "系统级目录（/usr、/tmp 等）不持久。\n"
@@ -378,15 +379,85 @@ FALLBACK_SYSTEM_MESSAGE = "你是一个聪明的人工智能助手"
 
 
 # ============================================================
-# 十一、任务编排提示词
+# 十一、智能澄清提示词
 # ============================================================
 
-def build_task_decomposition_prompt(description: str, agents_info: str) -> str:
-    """构建复杂任务分解提示词。"""
-    return f"""你是一个任务分解专家。请将以下复杂任务分解为可并行或顺序执行的子任务。
+CLARIFICATION_PROMPT = """你是一个需求分析师。用户的目标描述如下：
+{user_input}
+
+历史追问与回答：
+{history}
+
+请判断是否足够清晰（目标、用户群体、核心功能、验收标准是否明确）。
+若不够，请提出1-2个最需要澄清的问题，按重要性排序。问题应简洁明确，方便用户直接回答。
+
+若已足够清晰（或用户主动要求停止追问），请将原始需求与所有已澄清的内容整合为一段完整的目标描述。
+
+返回 JSON 格式：
+{{"clear": true/false, "questions": ["问1", "问2"], "clarified_goal": "整合后完整的目标描述（clear=true时必须填写）", "assumption": "若达上限时的最优假设"}}
+"""
+
+REVIEWER_PROMPT_TEMPLATE = """你是一个专业的审核专家。请审核以下任务产出：
+
+## 原始任务
+{description}
+
+## 交付结果
+{delivery}
+
+## 预期交付标准
+{expected_output}
+
+## 审核要求
+1. 判断交付结果是否满足任务要求
+2. 指出具体问题（不要模糊评价）
+3. 提供可操作的改进建议
+
+返回 JSON 格式：
+{{
+    "passed": true/false,
+    "feedback": "具体的审核意见或改进建议",
+    "score": 0-10
+}}
+"""
+
+ESCALATION_PROMPT = """你是一个资深项目经理。你的子任务遇到了困境，需要你做出决策。
+
+## 子任务
+{subtask_id}: {description}
+
+## 困境描述
+{blocked_reason}
+
+## 已尝试方案
+{attempts_summary}
+
+## 可选方案
+1. skip: 跳过此子任务（不影响整体交付）
+2. reassign: 更换执行者
+3. modify: 修正任务描述后重试
+4. retry: 保持原任务，再试一次
+
+请分析并返回决策 JSON：
+{{
+    "resolution": "skip|reassign|modify|retry",
+    "reason": "决策理由",
+    "new_agent": "仅在 resolution=reassign 时提供新 Agent ID",
+    "new_description": "仅在 resolution=modify 时提供新描述"
+}}
+"""
+
+# ============================================================
+# 十二、任务编排提示词
+# ============================================================
+
+def build_task_decomposition_prompt(description: str, agents_info: str, project_overview: str = "") -> str:
+    """构建复杂任务分解提示词（含 Loop Engineering 扩展）。"""
+    overview_section = f"\n项目背景：{project_overview}" if project_overview else ""
+    return f"""你是一个任务规划专家。请将以下用户目标分解为 2-5 个子任务：
 
 原始任务:
-{description}
+{description}{overview_section}
 
 当前在线智能体:
 {agents_info if agents_info else "无在线智能体（子任务将由后续上线的智能体执行）"}
@@ -400,12 +471,15 @@ def build_task_decomposition_prompt(description: str, agents_info: str) -> str:
 
 输出格式（严格 JSON）:
 {{{{
+  "project_overview": "项目高层描述（1-2句概括整个任务的目标和范围）",
   "analysis": "简要分析任务的分解思路（1-2句）",
   "subtasks": [
     {{{{
-      "description": "子任务描述（明确具体，包含期望产出。注意：不要创建'撰写最终报告'或'向用户汇报'类子任务，这由你（orchestrator）自己完成）",
+      "description": "子任务描述（明确具体，包含期望产出）",
       "depends_on": [],
-      "suggested_role": "建议的角色名，如搜索专家、数据分析师"
+      "suggested_role": "建议的角色名，如搜索专家、数据分析师",
+      "worker_prompt": "为执行此子任务的 Agent 编写的系统提示词，包含：角色定义、具体任务、工作原则",
+      "reviewer_prompt": "为审核此子任务产出的 Agent 编写的系统提示词，包含：审核标准、输出格式要求。若不需审核则留空"
     }}}}
   ]
 }}}}
@@ -413,10 +487,10 @@ def build_task_decomposition_prompt(description: str, agents_info: str) -> str:
 规则:
 1. 子任务数量控制在 2-5 个
 2. 可并行的任务不要设置依赖关系
-3. depends_on 中引用的是子任务序号（从 1 开始），如 depends_on: [1] 表示依赖第1个子任务，depends_on: [1, 2] 表示依赖第1和第2个。无依赖时用空数组 []。**禁止使用 0 或其他不存在的序号。**
-4. suggested_role 用于匹配合适的在线智能体，如 "搜索智能体"、"分析智能体"
-5. 第一个子任务通常没有依赖
-6. 如果在线智能体列表中已有匹配的角色，优先建议已有角色名
+3. depends_on 中引用的是子任务序号（从 1 开始），如 depends_on: [1] 表示依赖第1个子任务。**禁止使用 0 或其他不存在的序号。**
+4. suggested_role 用于匹配合适的在线智能体
+5. worker_prompt 应包含具体的工作指示和可用工具提示
+6. reviewer_prompt 用于审核 Agent 判定该子任务的产出是否合格，应为审核 Agent 提供明确的审核标准
 7. **不要把最终汇总/报告/呈现给用户的工作放进子任务，这是你（orchestrator）自己的职责**
 
 只输出 JSON，不要任何额外文字。"""

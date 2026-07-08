@@ -98,7 +98,7 @@ class DockerSandboxBackend(BaseSandbox):
                  **kwargs):
         super().__init__(**kwargs)
         try:
-            self.docker_client = docker.from_env()
+            self.docker_client = docker.from_env(timeout=600)  # HTTP 超时 10 分钟，支持 pip install 等长操作
             self.docker_client.ping()
         except Exception as e:
             raise RuntimeError(f"无法连接到 Docker 守护进程，请确保 Docker Desktop 已启动。错误详情: {e}")

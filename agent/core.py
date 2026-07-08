@@ -226,21 +226,14 @@ class Agent:
     async def _process_message(self, sender, user_input, image_data, new_thread, thread_id=None,
                                tdp_notification=None):
         """后台处理普通消息（包括可能触发 HITL 的任务）"""
-        # 前端显式传了 thread_id 则使用；new_thread 时不制造兜底值，交给 brain 生成
         if new_thread:
-            effective_thread_id = thread_id  # None 或前端 createConversation 生成的 UUID
+            effective_thread_id = thread_id
         else:
             effective_thread_id = thread_id if thread_id else f"private_{self.agent_id}_{sender}"
         try:
-            response = await self.brain.process(
-                user_id=sender,
-                user_input=user_input,
-                image_data=image_data,
-                new_thread=new_thread,
-                thread_id_override=effective_thread_id,
-                silent=False,
-                tdp_notification=tdp_notification,
-            )
+            response = await self._handle_brain_with_crash_recovery(
+                sender, user_input, image_data, new_thread,
+                effective_thread_id, tdp_notification)
             if response:
                 response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL).strip()
             if not response:
@@ -250,6 +243,44 @@ class Agent:
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
             await self.comm.send_to_agent(sender, {"text": f"处理出错: {e}"})
+
+    async def _handle_brain_with_crash_recovery(self, sender, user_input, image_data,
+                                                  new_thread, thread_id, tdp_notification):
+        """Brain 崩溃恢复：捕获未处理异常并自动重试一次。"""
+        try:
+            return await self.brain.process(
+                user_id=sender,
+                user_input=user_input,
+                image_data=image_data,
+                new_thread=new_thread,
+                thread_id_override=thread_id,
+                silent=False,
+                tdp_notification=tdp_notification,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Brain 处理崩溃: {e}")
+            await self.brain._safe_send(
+                f"⚠️ 任务遇到意外错误，已自动重试: {str(e)[:100]}"
+            )
+            await self.brain._notify_status("idle")
+            try:
+                await asyncio.sleep(1)
+                return await self.brain.process(
+                    user_id=sender,
+                    user_input=user_input,
+                    image_data=image_data,
+                    new_thread=new_thread,
+                    thread_id_override=thread_id,
+                    silent=False,
+                    tdp_notification=tdp_notification,
+                )
+            except Exception as e2:
+                await self.brain._safe_send(
+                    f"❌ 自动恢复失败，请手动重试: {str(e2)[:100]}"
+                )
+                return None
 
     async def _process_group_message(self, room_id, sender, user_input, image_data):
         """处理群聊消息"""

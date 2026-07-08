@@ -145,6 +145,26 @@ _SCHEMA_DDL = [
         NULL;
     END $$
     """,
+
+    # === Loop Engineering 迁移：orchestration_subtasks 新增列 ===
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS reviewer_agent VARCHAR(255)",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS review_feedback TEXT",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS max_retries INTEGER DEFAULT 3",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS blocked_reason TEXT",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS attempts JSONB DEFAULT '[]'",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS worker_system_prompt TEXT",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS reviewer_system_prompt TEXT",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMP",
+    "ALTER TABLE orchestration_subtasks ADD COLUMN IF NOT EXISTS skipped BOOLEAN DEFAULT FALSE",
+
+    # === Loop Engineering 迁移：orchestration_plans 新增列 ===
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS project_overview TEXT DEFAULT ''",
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS critical_decisions JSONB DEFAULT '[]'",
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS escalation_log JSONB DEFAULT '[]'",
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS created_from_clarification BOOLEAN DEFAULT FALSE",
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS agent_pool JSONB DEFAULT '{}'",
+    "ALTER TABLE orchestration_plans ADD COLUMN IF NOT EXISTS degradation_level INTEGER DEFAULT 0",
 ]
 
 

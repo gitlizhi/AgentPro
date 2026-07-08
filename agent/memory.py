@@ -189,13 +189,16 @@ class LongTermMemory:
         if not facts:
             return "暂无该用户的画像信息。"
 
-        # 去重（保持顺序）
+        # 去重+限制数量，避免大量噪音淹没当前任务上下文
         seen = set()
         unique_facts = []
         for f in facts:
-            if f not in seen:
-                seen.add(f)
+            key = f[:60]
+            if key not in seen:
+                seen.add(key)
                 unique_facts.append(f)
+        if len(unique_facts) > 20:
+            unique_facts = unique_facts[:20]
 
         return "## 用户画像\n\n" + "\n".join(f"- {f}" for f in unique_facts)
 

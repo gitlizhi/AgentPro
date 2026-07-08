@@ -8,6 +8,7 @@ import asyncio
 import json as _json
 import logging
 import uuid
+from datetime import datetime
 
 from langchain.tools import tool
 from langchain_core.runnables import RunnableConfig
@@ -631,6 +632,8 @@ def create_orchestration_tools(brain):
                 return "任务分解失败：未生成子任务"
 
             plan = await om.create_plan(description, brain_ref.agent_id)
+            # 存储项目概览
+            plan.project_overview = plan_data.get("project_overview", "")
             await om.set_subtasks(plan.plan_id, subtasks)
 
             result = om.get_progress_summary(plan.plan_id)
@@ -753,3 +756,122 @@ def create_orchestration_tools(brain):
         check_plan_progress,
         reassign_subtask,
     ]
+
+
+def create_board_tools(brain):
+    """创建 Loop Engineering 全局任务看板工具。
+
+    提供 read_board（查看看板快照）和 update_task_status（更新子任务状态并触发事件）。
+    """
+    brain_ref = brain
+    om: OrchestrationManager = brain_ref.orchestration_manager
+
+    @tool
+    def read_board(plan_id: str) -> str:
+        """获取当前计划的完整看板快照（Markdown 格式）。
+
+        所有 Agent 都可以通过此工具查看任务团队的全局状态，
+        包括每个子任务的状态、执行者、审核者和重试次数。
+
+        Args:
+            plan_id: 计划 ID
+        """
+        plan = om.get_plan(plan_id)
+        if not plan:
+            return "❌ 计划不存在"
+
+        lines = [
+            f"# 📊 任务看板: {plan_id}",
+            f"**项目**: {plan.project_overview or plan.description[:80]}",
+            f"**状态**: {plan.state.value}",
+            f"**进度**: {plan.completed_count}/{plan.total_count} 已完成",
+            f"**降级模式**: {['正常', 'LLM降级', '网络降级', '安全模式'][plan.degradation_level]}",
+            "",
+            "## 子任务列表",
+            "| ID | 描述 | 状态 | 执行者 | 审核者 | 重试 |",
+            "|----|------|------|--------|--------|------|",
+        ]
+
+        for st in plan.subtasks:
+            desc = st.description[:30] + "..." if len(st.description) > 30 else st.description
+            reviewer = st.reviewer_agent or "无"
+            lines.append(
+                f"| {st.id} | {desc} | {st.status.value} | "
+                f"{st.assigned_to or '未分配'} | {reviewer} | "
+                f"{st.retry_count}/{st.max_retries} |"
+            )
+
+        if plan.critical_decisions:
+            lines.append("")
+            lines.append("## 📝 关键决策")
+            for decision in plan.critical_decisions[-5:]:
+                lines.append(f"- {decision}")
+
+        if plan.escalation_log:
+            lines.append("")
+            lines.append("## 🚨 升级记录")
+            for entry in plan.escalation_log[-3:]:
+                lines.append(f"- {entry.get('time', '?')}: {entry.get('reason', '?')[:80]}")
+
+        return "\n".join(lines)
+
+    @tool
+    async def update_task_status(plan_id: str, subtask_id: str, status: str,
+                                  message: str = "") -> str:
+        """更新子任务状态，触发级联事件。
+
+        可用状态: pending, in_progress, reviewing, approved, blocked, completed, failed, skipped
+        特殊行为:
+        - BLOCKED: 自动触发升级研讨
+        - APPROVED: 自动触发后续派发
+
+        Args:
+            plan_id: 计划 ID
+            subtask_id: 子任务 ID
+            status: 新状态
+            message: 附加说明（阻塞原因或审核意见）
+        """
+        plan = om.get_plan(plan_id)
+        if not plan:
+            return f"❌ 计划 {plan_id} 不存在"
+
+        st = plan.get_subtask(subtask_id)
+        if not st:
+            return f"❌ 子任务 {subtask_id} 不存在"
+
+        old_status = st.status
+        try:
+            new_status = SubTaskStatus(status)
+        except ValueError:
+            valid = [s.value for s in SubTaskStatus]
+            return f"❌ 无效状态 '{status}'。可用: {', '.join(valid)}"
+
+        st.status = new_status
+
+        # BLOCKED 触发升级
+        if new_status == SubTaskStatus.BLOCKED:
+            st.blocked_reason = message
+            plan.escalation_log.append({
+                "time": datetime.now().isoformat(),
+                "subtask_id": subtask_id,
+                "reason": message,
+                "resolution": "待处理",
+            })
+            asyncio.create_task(brain_ref._handle_escalation(plan_id, subtask_id))
+
+        # APPROVED 触发后续派发
+        if new_status == SubTaskStatus.APPROVED:
+            plan.completed_count += 1
+            if plan.is_complete():
+                asyncio.create_task(brain_ref._synthesize_plan_results(plan_id))
+            else:
+                ready = plan.get_ready_subtasks()
+                if ready:
+                    asyncio.create_task(
+                        brain_ref._dispatch_ready_subtasks(plan, ready)
+                    )
+
+        await om._save_plan(plan)
+        return f"✅ 子任务 {subtask_id} 状态已更新: {old_status.value} → {new_status.value}"
+
+    return [read_board, update_task_status]

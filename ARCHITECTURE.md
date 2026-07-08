@@ -1782,3 +1782,184 @@ args=[
 | 级联删除而非依赖 ON DELETE CASCADE | 子任务/消息显式先删除，避免依赖数据库外键约束的隐性行为 |
 | `--agent` 全链路清理 | 智能体可能在多个表中留下数据（聊天、工单、子任务、提醒），逐表清理容易遗漏 |
 | `--all --force` 双层防护 | `--all` 需确认输入 "yes"，`--force` 跳过确认，防止误操作 |
+
+## 十七、Loop Engineering 自治多智能体系统
+
+### 17.1 概述
+
+Loop Engineering 是在现有 TDP + Orchestration 基础上构建的完全自治多智能体系统。用户只需一句话输入目标，系统自动完成：
+
+```
+澄清 → 拆解 → 启动Agent团队 → 分配执行 → 审核反馈 → 升级研讨 → 汇总报告
+```
+
+**核心设计原则：**
+- **主管 Agent 唯一常驻**：其他 Agent（干活/审核）均为按需启动的临时进程
+- **启动即绑定角色**：通过 `system_prompt` 参数注入角色定义
+- **生命周期由主管管理**：任务完成后主管决定保留复用或停止释放
+- **TDP 协议通信**：所有 Agent 间通信复用现有 DelegationManager 和 OrchestrationManager
+- **看板为唯一状态源**：所有 Agent 通过 `read_board` / `update_task_status` 读写全局状态
+- **降级优先**：任何异常都有对应的降级方案
+
+### 17.2 数据结构
+
+#### SubTask 扩展字段（agent/orchestration.py:51-61）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `reviewer_agent` | `Optional[str]` | 负责审核的 Agent ID |
+| `review_feedback` | `Optional[str]` | 审核反馈内容 |
+| `retry_count` | `int` | 当前重试次数，默认 0 |
+| `max_retries` | `int` | 最大重试次数，默认 3 |
+| `blocked_reason` | `Optional[str]` | 阻塞原因（触发升级） |
+| `attempts` | `list[dict]` | 历史尝试记录 |
+| `worker_system_prompt` | `Optional[str]` | 干活 Agent 的系统提示词 |
+| `reviewer_system_prompt` | `Optional[str]` | 审核 Agent 的系统提示词 |
+| `escalated_at` | `Optional[datetime]` | 升级时间 |
+| `skipped` | `bool` | 是否被降级策略跳过 |
+
+#### SubTaskStatus 新增值
+
+- `REVIEWING` — 交付后等待审核
+- `APPROVED` — 审核通过（终态）
+- `BLOCKED` — 遇到困境已触发升级
+- `SKIPPED` — 被跳过（降级策略，终态）
+
+#### OrchestrationPlan 扩展字段（agent/orchestration.py:75-81）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `project_overview` | `str` | 项目背景描述 |
+| `critical_decisions` | `list[str]` | 关键决策日志 |
+| `escalation_log` | `list[dict]` | 升级记录 |
+| `created_from_clarification` | `bool` | 是否经过澄清环节 |
+| `agent_pool` | `dict[str, dict]` | Agent 池：agent_id → {role, status, started_at} |
+| `degradation_level` | `int` | 0=正常, 1=LLM降级, 2=网络降级, 3=安全模式 |
+
+### 17.3 智能澄清循环
+
+**位置**：`agent/brain.py:clarify()` + `agent/prompts.py:CLARIFICATION_PROMPT`
+
+**流程：**
+1. 用户发送模糊目标 → `Brain.process()` 入口在意图分类前调用 `clarify()`
+2. 使用轻量模型（`config.model.memory_extraction_model`）判断模糊度
+3. 若模糊，生成 1-2 个追问，通过 `_safe_send` 发送给用户
+4. 利用实例状态 `_clarify_state` 跨 `process()` 调用跟踪多轮对话
+5. 最多 5 轮追问，达上限后生成最优假设并告知用户
+6. 澄清结束将 `created_from_clarification` 标记为 `True`
+
+**关键设计决策**：不使用 LangGraph interrupt（因 `process()` 是 per-message 而非 stream-level），改用实例状态跟踪跨消息的澄清上下文。
+
+### 17.4 任务拆解增强
+
+**位置**：`agent/prompts.py:build_task_decomposition_prompt()`
+
+拆解 Prompt 扩展了以下要求：
+- 为每个子任务生成 `worker_prompt`（角色定义 + 具体任务 + 工作原则 + 可用工具）
+- 为每个子任务生成 `reviewer_prompt`（审核标准 + 输出格式要求）
+- 输出 `project_overview` 项目高层描述
+- 禁止创建"撰写最终报告"类子任务（由主管自动汇总）
+- 子任务数量控制在 2-5 个
+
+### 17.5 Agent 动态生命周期管理
+
+**位置**：`agent/orchestration.py`
+
+| 方法 | 说明 |
+|------|------|
+| `ensure_agent(plan_id, role, system_prompt)` | 确保某角色有可用 Agent。优先复用空闲 Agent，无则调用 `launch_agent` 启动新 Agent，轮询等待最多 30 秒，超时抛 `TimeoutError` |
+| `get_idle_agent(plan_id, role)` | 从 agent_pool 中查找空闲的同角色 Agent |
+| `mark_agent_busy(plan_id, agent_id)` | 标记 Agent 为忙碌 |
+| `mark_agent_idle(plan_id, agent_id)` | 标记 Agent 为空闲 |
+| `cleanup_agents(plan_id, brain)` | 计划完成后停止所有子 Agent 并清空 agent_pool |
+| `recover_crashed_agent(plan_id, subtask_id, brain)` | 检测离线 Agent 并重启替代 Agent |
+
+**调度集成**：`dispatch_subtasks`（`agent/tools_factory.py`）分发时就绪子任务自动调用 `ensure_agent` 创建干活/审核 Agent，然后通过 TDP 工单派发任务。
+
+### 17.6 全局任务看板
+
+**位置**：`agent/tools_factory.py:create_board_tools()`
+
+| 工具 | 说明 |
+|------|------|
+| `read_board(plan_id)` | 返回 Markdown 格式的完整看板快照：项目描述、进度、降级模式、子任务表格（ID/描述/状态/执行者/审核者/重试次数）、最近 5 条关键决策 |
+| `update_task_status(plan_id, subtask_id, status, message)` | 更新子任务状态并触发事件：BLOCKED → 自动触发升级；APPROVED → 自动触发后续派发 |
+
+看板状态变更时通过 `_safe_send` 推送摘要给 super_user。
+
+### 17.7 干活-审核内循环
+
+**流程：**
+1. 干活 Agent 交付结果 → `_handle_delivery` 检查 `subtask.reviewer_agent`
+2. 若有审核 Agent：子任务进入 `REVIEWING` 状态，发送 `review_request` TDP 消息给审核 Agent
+3. 审核 Agent 调用 `_llm_review()` 使用 `REVIEWER_PROMPT_TEMPLATE`（`agent/prompts.py`）评估交付结果
+4. 审核通过 → 标记 `APPROVED`，触发后续派发
+5. 审核不通过 → `retry_count < max_retries` 时重新指派（附反馈），达上限触发 `BLOCKED` 升级
+6. 无审核 Agent → 直接标记 `COMPLETED`
+
+### 17.8 困境升级与研讨
+
+**位置**：`agent/brain.py:_handle_escalation()` + `agent/prompts.py:ESCALATION_PROMPT`
+
+**触发条件**：子任务标记为 `BLOCKED`（审核不通过达上限、执行异常等）
+
+**处理流程：**
+1. 记录升级日志到 `plan.escalation_log`
+2. 通知 super_user
+3. 主管 LLM（轻量模型）使用 `ESCALATION_PROMPT` 分析困境并给出决策
+4. 四种决策方案：
+   - `skip` — 跳过该子任务，标记 `SKIPPED`
+   - `reassign` — 更换执行者重新分配
+   - `modify` — 修正任务描述后重试
+   - `retry` — 保持原任务再试一次
+5. 保存状态并触发 `_dispatch_next_batch`
+
+### 17.9 多层级降级策略
+
+**位置**：`agent/degradation.py` + `agent/brain.py`
+
+#### 降级级别（DegradationLevel）
+
+| 级别 | 值 | 说明 |
+|------|-----|------|
+| `NORMAL` | 0 | 全功能模式 |
+| `DEGRADED_LLM` | 1 | LLM 不可用，使用规则/模板兜底 |
+| `DEGRADED_NET` | 2 | 网络不可用，离线模式 |
+| `DEGRADED_SAFE` | 3 | 安全模式，仅读操作 |
+
+`DegradationManager` 通过 `enabled` 开关控制（默认开启），所有降级事件记录到 `fallback_log`。
+
+#### 各层降级实现
+
+| 层级 | 方法 | 策略 |
+|------|------|------|
+| 执行层 | `ensure_agent_with_fallback()` | Agent 启动失败 → 指数退避重试 3 次 → 主管接管 |
+| 执行层 | `_handle_brain_with_crash_recovery()` (core.py) | Brain 崩溃 → 捕获异常 → 标记 idle → 自动重试一次 |
+| 协调层 | `_safe_llm_call()` | LLM 调用失败 → 重试 2 次 → 设置 DEGRADED_LLM → 规则兜底 |
+| 协调层 | `_check_review_deadlock()` | 审核超 10 分钟 → 终审仲裁自动通过 |
+| 协调层 | `DegradationManager.get_fallback_response()` | 按 prompt 类型返回规则兜底：拆解→按行分割，审核→自动通过，升级→自动重试 |
+
+### 17.10 经验系统对接
+
+**位置**：`agent/brain.py`
+
+- **干活 Agent 自动检索**：Worker 模式下，任务开始前通过 `search_skills` 检索相关技能并注入系统提示词
+- **任务成功自动生成技能**：子任务 `APPROVED` 后调用 `_auto_create_skill()`，触发反思流程并将成功经验存入 ChromaDB
+
+### 17.11 数据库迁移
+
+**位置**：`agent/db.py`（Loop Engineering 迁移段）
+
+为 `orchestration_subtasks` 新增 10 列，为 `orchestration_plans` 新增 6 列，全部使用 `ALTER TABLE ADD COLUMN IF NOT EXISTS` 保证幂等。
+
+### 17.12 文件变更清单
+
+| 文件 | 改动类型 | 说明 |
+|------|----------|------|
+| `agent/orchestration.py` | 大量扩展 | SubTask/OrchestrationPlan 新字段 + Agent 生命周期方法 |
+| `agent/db.py` | 中等 | 16 个 ALTER TABLE 迁移 |
+| `agent/prompts.py` | 中等 | 3 个新 Prompt + 拆解 Prompt 扩展 |
+| `agent/brain.py` | 大量 | clarify、review、escalation、降级、经验对接等方法 |
+| `agent/tools_factory.py` | 中等 | 看板工具 + dispatch 集成 ensure_agent |
+| `agent/degradation.py` | 新建 | 降级级别定义和管理器 |
+| `agent/core.py` | 小 | Brain 崩溃恢复包装 |

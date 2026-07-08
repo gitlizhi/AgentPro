@@ -13,6 +13,7 @@ import hashlib
 from agent.conversation_tracker import ConversationTracker
 from agent.delegation import DelegationManager, TaskTicket, TicketState, TicketError
 from agent.orchestration import OrchestrationManager, PlanState, SubTaskStatus
+from agent.degradation import DegradationManager, DegradationLevel
 from agent.utils import call_big_model_chat
 import dateparser
 from datetime import datetime, timezone, timedelta
@@ -31,6 +32,7 @@ from agent.tools_factory import (
     create_log_memory_tool,
     create_delegation_tools,
     create_orchestration_tools,
+    create_board_tools,
 )
 from deepagents import create_deep_agent, SubAgent
 # from deepagents.backends.filesystem import FilesystemBackend
@@ -41,6 +43,9 @@ from agent.db import get_pool
 from agent.intent import IntentType, INTENT_DESCRIPTIONS
 from agent.prompts import (
     REFLECTION_SUBAGENT_PROMPT,
+    CLARIFICATION_PROMPT,
+    REVIEWER_PROMPT_TEMPLATE,
+    ESCALATION_PROMPT,
     build_brain_system_prompt,
     build_reminder_detection_prompt,
     build_intent_classification_prompt,
@@ -118,6 +123,8 @@ class Brain:
         self._timeout_loop_started = False  # 工单超时循环惰性启动
         self._in_flight_tools = []  # 当前正在执行的工具名称列表（用于中断时清理）
         self._orchestration_dispatch_hint: str = ""  # 编排子任务完成后，提示派发下一批
+        self._skip_clarify = False  # 被打断后跳过下一条消息的澄清
+        self.degradation_manager = DegradationManager()  # 多层级降级策略
         self.group_context = None  # 当前消息的群聊上下文
         # 和其他Agent交互工具
         self.send_to_agent_tool = create_send_to_agent_tool(self)
@@ -191,7 +198,8 @@ class Brain:
         # 自定义工具
         delegation_tools = create_delegation_tools(self)
         orchestration_tools = create_orchestration_tools(self)
-        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), create_get_current_time_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools
+        board_tools = create_board_tools(self)
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), create_get_current_time_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools + board_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
@@ -309,8 +317,34 @@ class Brain:
             # ── 编排回调：子任务交付 ──
             orch_plan_id = self._resolve_plan_id(tdp, ticket, tdp_ticket_id)
             if orch_plan_id:
-                await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
                 plan = self.orchestration_manager.get_plan(orch_plan_id)
+                result_pair = self.orchestration_manager.get_subtask_by_ticket(tdp_ticket_id)
+                subtask = result_pair[1] if result_pair else None
+
+                # ── 检查是否有审核 Agent ──
+                if subtask and subtask.reviewer_agent:
+                    # 进入审核流程
+                    subtask.status = SubTaskStatus.REVIEWING
+                    subtask.result = user_input[:500]
+                    await self.orchestration_manager._save_plan(plan)
+
+                    await self.comm.send_to_agent(subtask.reviewer_agent, {
+                        "_tdp": "review_request",
+                        "_orchestration": orch_plan_id,
+                        "subtask_id": subtask.id,
+                        "delivery_summary": user_input[:500],
+                        "original_description": subtask.description,
+                        "expected_output": getattr(ticket, 'expected_output', '') if ticket else '',
+                    })
+                    await self._safe_send(
+                        f"🔍 子任务 {subtask.id} 已交付，已发送给审核 Agent "
+                        f"{subtask.reviewer_agent} 审核..."
+                    )
+                    # 不继续处理，等待审核结果
+                    return
+
+                # ── 无审核 Agent，直接标记完成 ──
+                await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
                 if plan and plan.is_complete():
                     summary = self.orchestration_manager.get_progress_summary(orch_plan_id)
                     await self.comm.send_to_agent("super_user", {
@@ -383,6 +417,12 @@ class Brain:
                 _skip_llm_for_issuer = True
                 logger.info(f"TDP 接受通知已程序化处理，跳过 LLM (issuer={self.agent_id})")
 
+        elif tdp_type == "review_request":
+            # 收到审核请求——由审核 Agent 处理
+            await self._handle_review_request(tdp)
+            self._tdp_notification = None
+            return True, user_input  # 纯程序化处理，跳过 LLM
+
         elif tdp_type in ("decline", "cancel", "timed_out") and tdp_ticket_id:
             decline_ticket = dm.get_ticket(tdp_ticket_id)
             orch_plan_id = self._resolve_plan_id(tdp, decline_ticket, tdp_ticket_id)
@@ -405,6 +445,322 @@ class Brain:
             return True, user_input
 
         return False, user_input
+
+    async def _llm_review(self, description: str, delivery: str,
+                           expected_output: str) -> dict:
+        """调用 LLM 执行审核。"""
+        prompt = REVIEWER_PROMPT_TEMPLATE.format(
+            description=description,
+            delivery=delivery,
+            expected_output=expected_output,
+        )
+        try:
+            response = await call_big_model_chat(
+                prompt,
+                model=config.model.memory_extraction_model,
+                temperature=0.2,
+                is_json=True,
+            )
+            content = response["choices"][0]["message"]["content"]
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+            return json.loads(content)
+        except Exception as e:
+            logger.warning(f"LLM 审核失败: {e}")
+            return {"passed": True, "feedback": f"审核异常自动通过: {e}", "score": 8}
+
+    async def _handle_review_request(self, msg: dict):
+        """处理审核请求——由审核 Agent 调用。"""
+        plan_id = msg.get("_orchestration", "")
+        subtask_id = msg.get("subtask_id", "")
+        delivery_summary = msg.get("delivery_summary", "")
+        original_description = msg.get("original_description", "")
+        expected_output = msg.get("expected_output", "")
+
+        # 调用 LLM 审核
+        review_result = await self._llm_review(
+            description=original_description,
+            delivery=delivery_summary,
+            expected_output=expected_output,
+        )
+
+        passed = review_result.get("passed", False)
+        feedback = review_result.get("feedback", "无具体反馈")
+        score = review_result.get("score", 0)
+
+        plan = self.orchestration_manager.get_plan(plan_id)
+        if not plan:
+            return
+        st = plan.get_subtask(subtask_id)
+        if not st:
+            return
+
+        if passed:
+            await self._safe_send(
+                f"✅ 审核通过: {subtask_id} (评分: {score}/10)\n{feedback}"
+            )
+            st.status = SubTaskStatus.APPROVED
+            st.review_feedback = feedback
+            plan.completed_count += 1
+            await self.orchestration_manager._save_plan(plan)
+
+            # 自动生成技能
+            self.schedule_background_task(
+                self._auto_create_skill(plan_id, subtask_id)
+            )
+
+            if plan.is_complete():
+                self.schedule_background_task(
+                    self._synthesize_plan_results(plan_id)
+                )
+            else:
+                ready = plan.get_ready_subtasks()
+                if ready:
+                    dispatched = await self._dispatch_ready_subtasks(plan, ready)
+                    await self._safe_send(
+                        f"📤 子任务审核通过，自动派发下一批: {dispatched}"
+                    )
+        else:
+            # 审核不通过，检查重试次数
+            if st.retry_count >= st.max_retries:
+                st.status = SubTaskStatus.BLOCKED
+                st.blocked_reason = f"审核不通过且已达最大重试次数: {feedback}"
+                st.review_feedback = feedback
+                await self.orchestration_manager._save_plan(plan)
+                await self._safe_send(
+                    f"⚠️ 子任务 {subtask_id} 已达最大重试次数 ({st.retry_count}/{st.max_retries})，触发升级"
+                )
+                self.schedule_background_task(
+                    self._handle_escalation(plan_id, subtask_id)
+                )
+            else:
+                st.retry_count += 1
+                st.review_feedback = feedback
+                st.attempts.append({
+                    "time": datetime.now().isoformat(),
+                    "feedback": feedback,
+                    "result_summary": delivery_summary[:200],
+                })
+                st.status = SubTaskStatus.PENDING
+                await self.orchestration_manager._save_plan(plan)
+                await self._safe_send(
+                    f"🔄 子任务 {subtask_id} 审核不通过 (评分: {score}/10)，"
+                    f"第 {st.retry_count}/{st.max_retries} 次重试:\n{feedback}"
+                )
+                # 重新派发
+                online = list(self.peer_agents)
+                if st.assigned_to and st.assigned_to in online:
+                    await self._dispatch_single_subtask(
+                        plan_id, st, online, allow_parallel=True,
+                        assigned_to=st.assigned_to,
+                    )
+
+    async def _llm_analyze_escalation(self, subtask_id: str, description: str,
+                                        blocked_reason: str,
+                                        attempts: list) -> dict:
+        """调用 LLM 分析困境并给出决策。"""
+        attempts_summary = json.dumps(attempts[-3:], ensure_ascii=False) if attempts else "无"
+        prompt = ESCALATION_PROMPT.format(
+            subtask_id=subtask_id,
+            description=description,
+            blocked_reason=blocked_reason,
+            attempts_summary=attempts_summary,
+        )
+        try:
+            response = await call_big_model_chat(
+                prompt,
+                model=config.model.memory_extraction_model,
+                temperature=0.2,
+                is_json=True,
+            )
+            content = response["choices"][0]["message"]["content"]
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+            return json.loads(content)
+        except Exception as e:
+            logger.warning(f"LLM 升级分析失败: {e}")
+            return {"resolution": "retry", "reason": f"LLM 不可用，自动重试: {e}"}
+
+    async def _handle_escalation(self, plan_id: str, subtask_id: str):
+        """处理困境升级请求——由主管 Agent 调用。"""
+        plan = self.orchestration_manager.get_plan(plan_id)
+        if not plan:
+            return
+        st = plan.get_subtask(subtask_id)
+        if not st:
+            return
+
+        # 记录升级日志
+        plan.escalation_log.append({
+            "time": datetime.now().isoformat(),
+            "subtask_id": subtask_id,
+            "reason": st.blocked_reason or "未知原因",
+            "resolution": "研讨中",
+        })
+
+        # 通知用户
+        await self._safe_send(
+            f"🚨 子任务 {subtask_id}（{st.description[:60]}...）遇到困境，"
+            f"主管正在研讨解决方案..."
+        )
+
+        # LLM 分析困境
+        analysis = await self._llm_analyze_escalation(
+            subtask_id=subtask_id,
+            description=st.description,
+            blocked_reason=st.blocked_reason or "未知",
+            attempts=st.attempts,
+        )
+
+        resolution = analysis.get("resolution", "retry")
+
+        if resolution == "skip":
+            st.skipped = True
+            st.status = SubTaskStatus.SKIPPED
+            plan.critical_decisions.append(
+                f"子任务 {subtask_id} 被跳过: {analysis.get('reason', '无')}"
+            )
+            await self._safe_send(f"⏭️ 子任务 {subtask_id} 已被跳过，继续执行其他任务")
+
+        elif resolution == "reassign":
+            new_agent = analysis.get("new_agent", "")
+            if new_agent:
+                st.assigned_to = new_agent
+                st.status = SubTaskStatus.PENDING
+                await self._safe_send(f"🔄 子任务 {subtask_id} 已重新分配给 {new_agent}")
+                online = list(self.peer_agents)
+                if new_agent in online:
+                    await self._dispatch_single_subtask(
+                        plan_id, st, online, allow_parallel=True,
+                        assigned_to=new_agent,
+                    )
+
+        elif resolution == "modify":
+            new_description = analysis.get("new_description", st.description)
+            st.description = new_description
+            st.status = SubTaskStatus.PENDING
+            plan.critical_decisions.append(
+                f"子任务 {subtask_id} 描述已修正: {new_description[:100]}..."
+            )
+            await self._safe_send(f"📝 子任务 {subtask_id} 描述已修正，重新执行")
+
+        else:  # retry
+            st.retry_count += 1
+            st.status = SubTaskStatus.PENDING
+            await self._safe_send(
+                f"🔄 子任务 {subtask_id} 第 {st.retry_count} 次重试"
+            )
+
+        # 保存状态并尝试派发
+        await self.orchestration_manager._save_plan(plan)
+        if st.status == SubTaskStatus.PENDING:
+            online = list(self.peer_agents)
+            if st.assigned_to and st.assigned_to in online:
+                await self._dispatch_single_subtask(
+                    plan_id, st, online, allow_parallel=True,
+                    assigned_to=st.assigned_to,
+                )
+            else:
+                ready = plan.get_ready_subtasks()
+                if ready:
+                    await self._dispatch_ready_subtasks(plan, ready)
+
+    async def _safe_llm_call(self, prompt: str, max_retries: int = 2,
+                              prompt_hint: str = "") -> dict:
+        """安全的 LLM 调用，含降级策略。"""
+        dm = self.degradation_manager
+        for attempt in range(max_retries + 1):
+            try:
+                response = await call_big_model_chat(
+                    prompt,
+                    model=config.model.memory_extraction_model,
+                    temperature=0.2,
+                    is_json=True,
+                )
+                content = response["choices"][0]["message"]["content"]
+                if content.startswith("```"):
+                    lines = content.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    content = "\n".join(lines)
+                return json.loads(content)
+            except (asyncio.TimeoutError, ConnectionError,
+                    json.JSONDecodeError, Exception) as e:
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    continue
+                if dm.enabled:
+                    dm.set_level(DegradationLevel.DEGRADED_LLM,
+                                 f"LLM 调用失败: {e}")
+                logger.warning(f"LLM 调用降级 (hint={prompt_hint}): {e}")
+                return dm.get_fallback_response(prompt_hint)
+        return {"error": "LLM 完全不可用"}
+
+    async def _check_review_deadlock(self, plan_id: str):
+        """检查审核死锁，自动终审仲裁。"""
+        plan = self.orchestration_manager.get_plan(plan_id)
+        if not plan:
+            return
+        now = datetime.now()
+        for st in plan.subtasks:
+            if st.status == SubTaskStatus.REVIEWING:
+                review_start = st.escalated_at
+                if review_start:
+                    duration = (now - review_start).total_seconds()
+                    if duration > 600:
+                        st.status = SubTaskStatus.APPROVED
+                        st.review_feedback = (
+                            f"审核超时（{int(duration)}s），自动通过（终审仲裁）"
+                        )
+                        plan.critical_decisions.append(
+                            f"子任务 {st.id} 审核超时（{int(duration)}s），自动通过"
+                        )
+                        await self.orchestration_manager._save_plan(plan)
+                        await self._safe_send(
+                            f"⚖️ 子任务 {st.id} 审核超时，已自动通过（终审仲裁）"
+                        )
+                        ready = plan.get_ready_subtasks()
+                        if ready:
+                            await self._dispatch_ready_subtasks(plan, ready)
+
+    async def ensure_agent_with_fallback(self, plan_id: str, role: str,
+                                          system_prompt: str) -> tuple:
+        """确保 Agent 可用，含降级策略。返回 (agent_id, 是否降级)。"""
+        try:
+            agent_id = await self.orchestration_manager.ensure_agent(
+                plan_id, role, system_prompt, brain=self)
+            return agent_id, False
+        except TimeoutError:
+            for i in range(3):
+                try:
+                    await asyncio.sleep(2 ** i)
+                    agent_id = await self.orchestration_manager.ensure_agent(
+                        plan_id, role, system_prompt, brain=self)
+                    return agent_id, True
+                except TimeoutError:
+                    continue
+
+            await self._safe_send(
+                f"⚠️ 无法启动 {role} Agent，主管将接管该任务"
+            )
+            if self.degradation_manager.enabled:
+                self.degradation_manager.set_level(
+                    DegradationLevel.DEGRADED_NET,
+                    f"无法启动 {role} Agent"
+                )
+            return self.agent_id, True
 
     async def _dispatch_single_subtask(self, plan_id, subtask, online_agents,
                                        allow_parallel=True, reassign=False,
@@ -532,6 +888,10 @@ class Brain:
         )
 
         logger.info(f"触发编排结果自动汇总: plan={plan_id}")
+
+        # 清理子 Agent
+        await self.orchestration_manager.cleanup_agents(plan_id, brain=self)
+
         await self.process(
             user_id="super_user",
             user_input=synthesis_prompt,
@@ -701,10 +1061,9 @@ class Brain:
     async def _build_messages_for_stream(self, user_input: str, image_data: str, original_user_input: str) -> list:
         """组装用于 stream 的消息列表：系统上下文 + 技能经验 + 用户输入。"""
         system_contexts = await self._build_system_contexts(image_data)
-        if self.user_id == 'super_user':
-            skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
-            if skill_lessons:
-                system_contexts.append(skill_lessons)
+        skill_lessons = await self._get_relevant_skill_lessons(original_user_input)
+        if skill_lessons:
+            system_contexts.append(skill_lessons)
         messages = []
         for ctx in system_contexts:
             if ctx:
@@ -892,6 +1251,39 @@ class Brain:
             logger.warning("检查 checkpoint 有效性失败", exc_info=True)
             return False
 
+    async def _auto_create_skill(self, plan_id: str, subtask_id: str):
+        """任务审核通过后自动生成技能。"""
+        plan = self.orchestration_manager.get_plan(plan_id)
+        if not plan:
+            return
+        st = plan.get_subtask(subtask_id)
+        if not st or st.status != SubTaskStatus.APPROVED:
+            return
+
+        try:
+            task_data = {
+                "task_id": f"{plan_id}_{subtask_id}",
+                "task_description": st.description,
+                "steps": [
+                    {"step_description": f"尝试 {i+1}", "result": att.get("result_summary", ""),
+                     "tool_calls": []}
+                    for i, att in enumerate(st.attempts)
+                ] or [{"step_description": "执行", "result": st.result or "", "tool_calls": []}],
+                "final_result": "success",
+                "user_feedback": st.review_feedback or "审核通过",
+            }
+            from agent.reflection import reflect_on_task, create_skill_from_reflection
+            reflection = await reflect_on_task(task_data)
+            if reflection.get("should_create_skill"):
+                await create_skill_from_reflection(task_data, reflection)
+                plan.critical_decisions.append(
+                    f"子任务 {subtask_id} 已生成技能: {reflection.get('skill_name', 'unknown')}"
+                )
+                await self.orchestration_manager._save_plan(plan)
+                logger.info(f"子任务 {subtask_id} 成功生成技能")
+        except Exception as e:
+            logger.warning(f"自动创建技能失败 ({subtask_id}): {e}")
+
     async def _get_relevant_skill_lessons(self, user_input: str) -> str:
         """搜索与用户输入相关的技能，提取经验教训注入上下文。
         程序化强制执行，不依赖 Agent 自觉调用 search_skills。"""
@@ -943,6 +1335,104 @@ class Brain:
         """静默更新指定线程的记忆"""
         await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
 
+    async def clarify(self, user_id: str, user_input: str, max_rounds: int = 5) -> tuple:
+        """多轮澄清循环。
+        返回: (clarified_input: str, is_clear: bool)
+
+        使用轻量模型判断用户目标的模糊度。若模糊则生成追问，
+        每轮更新上下文直到明确或达到最大轮次。澄清环节不计入 TDP 轮次。
+        """
+        # 初始化或获取澄清状态
+        if not hasattr(self, '_clarify_state') or self._clarify_state is None:
+            self._clarify_state = {
+                "round": 0,
+                "history": [],
+                "original_input": user_input,
+            }
+
+        state = self._clarify_state
+
+        # 若上一轮有未回答的追问，则当前 user_input 就是用户的回答
+        if state["history"]:
+            last_entry = state["history"][-1]
+            if not last_entry.get("answer"):
+                last_entry["answer"] = user_input
+
+        state["round"] += 1
+
+        # 构建历史字符串
+        history_str = ""
+        for entry in state["history"]:
+            history_str += f"第{entry['round']}轮——问: {entry['question']}\\n答: {entry['answer']}\\n"
+
+        # 调用轻量模型判断
+        prompt = CLARIFICATION_PROMPT.format(
+            user_input=state["original_input"],
+            history=history_str if history_str else "（首次澄清）",
+        )
+
+        try:
+            response = await call_big_model_chat(
+                prompt,
+                model=config.model.memory_extraction_model,
+                temperature=0.2,
+                is_json=True,
+            )
+            content = response["choices"][0]["message"]["content"]
+            # 清理可能的 markdown 代码块包装
+            if content.startswith("```"):
+                lines = content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].strip() == "```":
+                    lines = lines[:-1]
+                content = "\n".join(lines)
+            result = json.loads(content)
+        except Exception as e:
+            logger.warning(f"澄清判断失败: {e}")
+            # 降级：当作已明确，直接通过
+            self._clarify_state = None
+            return user_input, True
+
+        is_clear = result.get("clear", True)
+        questions = result.get("questions", [])
+        assumption = result.get("assumption", "")
+        clarified_goal = result.get("clarified_goal", "")
+
+        if is_clear:
+            self._clarify_state = None
+            # 用 LLM 合成的完整目标描述替代原始输入，避免丢失澄清内容
+            final_goal = clarified_goal or user_input
+            logger.info(f"澄清完成: 用户目标已明确，共 {state['round']} 轮")
+            return final_goal, True
+
+        # 达到上限，使用假设
+        if state["round"] >= max_rounds:
+            self._clarify_state = None
+            fallback = assumption or clarified_goal or user_input
+            await self._safe_send(
+                f"经过 {state['round']} 轮澄清，我将基于以下理解继续：\n\n"
+                f"**{fallback}**\n\n如有偏差，请随时纠正。"
+            )
+            logger.info(f"澄清达上限 ({max_rounds} 轮)，使用假设: {fallback[:100]}")
+            return fallback, False
+
+        # 发送追问
+        questions_text = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(questions))
+        await self._safe_send(
+            f"为了更好地帮你完成任务，我需要确认以下几点：\n\n"
+            f"{questions_text}\n\n请逐一回答。"
+        )
+
+        # 记录本轮问题（回答留空，下一轮由 user_input 回填）
+        state["history"].append({
+            "round": state["round"],
+            "question": " | ".join(questions),
+            "answer": "",
+        })
+
+        return "", False  # is_clear=False，调用方应提前返回
+
     def _inject_time_context(self, text: str) -> str:
         """将相对时间词替换为带具体日期的标注，帮助模型理解当前时间。
         使用正则负向后顾避免误替换（如"如今天气"中的"今天"不会被替换）。"""
@@ -977,6 +1467,18 @@ class Brain:
             try:
                 self.user_id = user_id
                 effective_thread_id = thread_id_override if thread_id_override is not None else self.thread_id
+
+                # ── 智能澄清循环：仅 super_user 的普通文本消息触发 ──
+                # 被打断后的新消息视为明确指令，跳过澄清直接执行
+                if self._skip_clarify:
+                    self._skip_clarify = False
+                elif self.user_id == 'super_user' and not tdp_notification and not image_data:
+                    clarified_input, is_clear = await self.clarify(user_id, user_input)
+                    if not clarified_input and not is_clear:
+                        # 仍在澄清中，已发送追问，等待用户回复
+                        return ""
+                    user_input = clarified_input
+
                 if self.user_id != 'super_user':
                     intent_data = IntentType.COMPLEX_TASKS.value
                 else:
@@ -1022,6 +1524,10 @@ class Brain:
         if self._current_task and not self._current_task.done():
             self._current_task.cancel()
             logger.info(f"Task cancelled for agent {self.agent_id}")
+        # 清除澄清状态，避免新消息被误判为澄清轮次
+        self._clarify_state = None
+        # 被打断后的下一条消息跳过澄清，直接执行
+        self._skip_clarify = True
 
     def _ensure_timeout_loop_started(self):
         """惰性启动工单超时检测后台循环（仅首次调用生效）"""
