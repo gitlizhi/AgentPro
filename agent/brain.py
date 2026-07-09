@@ -1335,7 +1335,43 @@ class Brain:
         """静默更新指定线程的记忆"""
         await self.process(user_id, user_input, thread_id_override=thread_id, silent=True)
 
-    async def clarify(self, user_id: str, user_input: str, max_rounds: int = 5) -> tuple:
+    async def _get_clarification_context(self, thread_id: str = None, max_messages: int = 10) -> str:
+        """从当前会话 checkpoints 中提取最近对话，为澄清判断提供上下文。
+
+        使 LLM 能理解"那个文件"、"加个功能"等指代词所指的具体内容，
+        避免对同一对话中的自然延续重复追问。
+        """
+        effective_id = thread_id or self.thread_id
+        if not hasattr(self, 'agent') or not effective_id:
+            return "（无上文对话记录）"
+        try:
+            config = {"configurable": {"thread_id": effective_id}}
+            state = await self.agent.aget_state(config)
+            if not state or not state.values:
+                return "（无上文对话记录）"
+            messages = state.values.get("messages", [])
+            if not messages:
+                return "（无上文对话记录）"
+
+            # 取最近 N 条 human/ai 消息，格式化为简洁对话记录
+            recent = []
+            for msg in messages[-max_messages:]:
+                role = msg.type
+                content = msg.content if msg.content else ""
+                if role == "human":
+                    recent.append(f"用户: {content}")
+                elif role == "ai":
+                    # AI 消息可能很长，截取前 300 字符
+                    short = content[:300] + ("..." if len(content) > 300 else "")
+                    recent.append(f"助手: {short}")
+            if not recent:
+                return "（无上文对话记录）"
+            return "\n".join(recent)
+        except Exception as e:
+            logger.debug(f"获取澄清上下文失败: {e}")
+            return "（获取上文对话失败）"
+
+    async def clarify(self, user_id: str, user_input: str, thread_id: str = None, max_rounds: int = 5) -> tuple:
         """多轮澄清循环。
         返回: (clarified_input: str, is_clear: bool)
 
@@ -1348,6 +1384,7 @@ class Brain:
                 "round": 0,
                 "history": [],
                 "original_input": user_input,
+                "conversation_context": await self._get_clarification_context(thread_id),
             }
 
         state = self._clarify_state
@@ -1367,6 +1404,7 @@ class Brain:
 
         # 调用轻量模型判断
         prompt = CLARIFICATION_PROMPT.format(
+            conversation_context=state.get("conversation_context", "（无上文对话记录）"),
             user_input=state["original_input"],
             history=history_str if history_str else "（首次澄清）",
         )
@@ -1473,7 +1511,7 @@ class Brain:
                 if self._skip_clarify:
                     self._skip_clarify = False
                 elif self.user_id == 'super_user' and not tdp_notification and not image_data:
-                    clarified_input, is_clear = await self.clarify(user_id, user_input)
+                    clarified_input, is_clear = await self.clarify(user_id, user_input, thread_id=effective_thread_id)
                     if not clarified_input and not is_clear:
                         # 仍在澄清中，已发送追问，等待用户回复
                         return ""
