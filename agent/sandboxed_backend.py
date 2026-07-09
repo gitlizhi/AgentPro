@@ -91,7 +91,7 @@ class DockerSandboxBackend(BaseSandbox):
                  network_disabled: bool = True,
                  desktop_path: Optional[str] = None,
                  skills_host_path: Optional[str] = None,
-                 user: str = "nobody",          # 以非 root 用户运行
+                 user: str = "root",            # 以 root 用户运行，避免权限问题
                  read_only_rootfs: bool = False, # 根文件系统只读
                  env: Optional[dict] = None,
                  agent_id: str = "default",     # 智能体 ID，用于隔离持久化工作区
@@ -186,9 +186,7 @@ class DockerSandboxBackend(BaseSandbox):
                 volumes=volumes,
                 user=self.user,
                 read_only=self.read_only_rootfs,
-                cap_drop=["ALL"],
-                security_opt=["no-new-privileges:true"],
-                pids_limit=100,
+                pids_limit=200,
                 labels={PROJECT_LABEL: PROJECT_LABEL_VALUE},
             )
 
