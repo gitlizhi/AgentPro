@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 import docker
 from typing import Optional, List, Tuple
 from deepagents.backends.sandbox import BaseSandbox
-from deepagents.backends.protocol import ExecuteResponse
+from deepagents.backends.protocol import (
+    EditResult,
+    ExecuteResponse,
+    FileInfo,
+    GrepMatch,
+    WriteResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -377,3 +383,248 @@ class DockerSandboxBackend(BaseSandbox):
 
     def close(self):
         pass
+
+
+class HybridBackend(DockerSandboxBackend):
+    """混合后端：文件 I/O 直连宿主机，代码执行仍走 Docker 沙箱。
+
+    重写 BaseSandbox 中全部文件操作（read / write / edit / ls / glob / grep），
+    直接在宿主机文件系统上执行，完全跳过 Docker 容器。
+    仅 execute() 保留在 Docker 沙箱中运行。
+    """
+
+    # ---- 路径映射 ----
+
+    def _host_path(self, sandbox_path: str) -> str:
+        """将沙箱虚拟路径映射为宿主机真实路径。"""
+        # 已知挂载点 → 宿主机路径
+        if sandbox_path.startswith('/workspace/'):
+            return os.path.join(self._workspace_dir, sandbox_path[len('/workspace/'):])
+        if sandbox_path == '/workspace':
+            return self._workspace_dir
+        if sandbox_path.startswith('/home/pwuser/'):
+            return os.path.join(self._home_dir, sandbox_path[len('/home/pwuser/'):])
+        if sandbox_path == '/home/pwuser':
+            return self._home_dir
+        if self.desktop_path:
+            if sandbox_path.startswith('/desktop/'):
+                return os.path.join(self.desktop_path, sandbox_path[len('/desktop/'):])
+            if sandbox_path == '/desktop':
+                return self.desktop_path
+        if self.skills_host_path:
+            if sandbox_path.startswith('/agent/skills/'):
+                return os.path.join(self.skills_host_path, sandbox_path[len('/agent/skills/'):])
+            if sandbox_path == '/agent/skills':
+                return self.skills_host_path
+        # 默认：相对项目根目录解析
+        rel = sandbox_path.lstrip('/')
+        return os.path.abspath(rel)
+
+    def _sandbox_path(self, host_path: str) -> str:
+        """将宿主机路径反转为沙箱虚拟路径（用于 grep/glob 返回值）。"""
+        host = os.path.abspath(host_path).replace('\\', '/')
+        ws = os.path.abspath(self._workspace_dir).replace('\\', '/')
+        home = os.path.abspath(self._home_dir).replace('\\', '/')
+        cwd = os.getcwd().replace('\\', '/')
+
+        if host.startswith(ws + '/'):
+            return '/workspace/' + host[len(ws) + 1:]
+        if host == ws:
+            return '/workspace'
+        if host.startswith(home + '/'):
+            return '/home/pwuser/' + host[len(home) + 1:]
+        if host == home:
+            return '/home/pwuser'
+        if self.desktop_path:
+            dtop = os.path.abspath(self.desktop_path).replace('\\', '/')
+            if host.startswith(dtop + '/'):
+                return '/desktop/' + host[len(dtop) + 1:]
+            if host == dtop:
+                return '/desktop'
+        if self.skills_host_path:
+            skills = os.path.abspath(self.skills_host_path).replace('\\', '/')
+            if host.startswith(skills + '/'):
+                return '/agent/skills/' + host[len(skills) + 1:]
+            if host == skills:
+                return '/agent/skills'
+        if host.startswith(cwd + '/'):
+            return '/' + host[len(cwd) + 1:]
+        if host == cwd:
+            return '/'
+        # 兜底
+        return '/' + os.path.relpath(host, cwd).replace('\\', '/')
+
+    # ---- 文件操作（直连宿主机） ----
+
+    def read(
+        self,
+        file_path: str,
+        offset: int = 0,
+        limit: int = 2000,
+    ) -> str:
+        host_path = self._host_path(file_path)
+        try:
+            with open(host_path, 'r', encoding='utf-8', errors='replace') as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            return f"Error: File '{file_path}' not found"
+        except PermissionError:
+            return f"Error: Permission denied reading '{file_path}'"
+        except IsADirectoryError:
+            return f"Error: '{file_path}' is a directory, not a file"
+        except OSError as e:
+            return f"Error reading '{file_path}': {e}"
+
+        if not lines:
+            return "System reminder: File exists but has empty contents"
+
+        selected = lines[offset:offset + limit]
+        content = ''.join(selected)
+        if content.endswith('\n'):
+            content = content[:-1]
+        from deepagents.backends.utils import format_content_with_line_numbers
+        return format_content_with_line_numbers(content, start_line=offset + 1)
+
+    def write(
+        self,
+        file_path: str,
+        content: str,
+    ) -> WriteResult:
+        host_path = self._host_path(file_path)
+        if os.path.exists(host_path):
+            return WriteResult(error=f"Error: File '{file_path}' already exists")
+        try:
+            parent = os.path.dirname(host_path) or '.'
+            os.makedirs(parent, exist_ok=True)
+            with open(host_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            return WriteResult(path=file_path, files_update=None)
+        except PermissionError:
+            return WriteResult(error=f"Error: Permission denied writing '{file_path}'")
+        except OSError as e:
+            return WriteResult(error=f"Error writing '{file_path}': {e}")
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ) -> EditResult:
+        from deepagents.backends.utils import perform_string_replacement
+        host_path = self._host_path(file_path)
+        if not os.path.isfile(host_path):
+            return EditResult(error=f"Error: File '{file_path}' not found")
+        try:
+            with open(host_path, 'r', encoding='utf-8') as f:
+                text = f.read()
+        except PermissionError:
+            return EditResult(error=f"Error: Permission denied reading '{file_path}'")
+        except OSError as e:
+            return EditResult(error=f"Error reading '{file_path}': {e}")
+
+        result = perform_string_replacement(text, old_string, new_string, replace_all)
+        if isinstance(result, str):
+            # 错误信息
+            return EditResult(error=result)
+
+        new_text, occurrences = result
+        try:
+            with open(host_path, 'w', encoding='utf-8') as f:
+                f.write(new_text)
+            return EditResult(path=file_path, files_update=None, occurrences=occurrences)
+        except PermissionError:
+            return EditResult(error=f"Error: Permission denied writing '{file_path}'")
+        except OSError as e:
+            return EditResult(error=f"Error writing '{file_path}': {e}")
+
+    def ls_info(self, path: str) -> list[FileInfo]:
+        host_path = self._host_path(path)
+        try:
+            entries = list(os.scandir(host_path))
+        except FileNotFoundError:
+            return []
+        except PermissionError:
+            return []
+
+        infos: list[FileInfo] = []
+        for entry in sorted(entries, key=lambda e: (not e.is_dir(), e.name.lower())):
+            infos.append({
+                "path": self._sandbox_path(entry.path),
+                "is_dir": entry.is_dir(follow_symlinks=False),
+            })
+        return infos
+
+    def glob_info(self, pattern: str, path: str = "/") -> list[FileInfo]:
+        import glob as glob_mod
+        host_path = self._host_path(path)
+        cwd_before = os.getcwd()
+        try:
+            os.chdir(host_path)
+            matches = sorted(glob_mod.glob(pattern, recursive=True))
+            infos: list[FileInfo] = []
+            for m in matches:
+                full = os.path.join(host_path, m)
+                try:
+                    st = os.stat(full)
+                    is_dir = os.path.isdir(full)
+                except OSError:
+                    continue
+                # 路径还原为沙箱格式
+                sandbox_full = self._sandbox_path(full)
+                infos.append({
+                    "path": sandbox_full,
+                    "is_dir": is_dir,
+                    "size": st.st_size,
+                    "modified_at": datetime.fromtimestamp(
+                        st.st_mtime, tz=timezone.utc
+                    ).isoformat(),
+                })
+            return infos
+        except FileNotFoundError:
+            return []
+        except PermissionError:
+            return []
+        finally:
+            try:
+                os.chdir(cwd_before)
+            except OSError:
+                pass
+
+    def grep_raw(
+        self,
+        pattern: str,
+        path: str | None = None,
+        glob: str | None = None,
+    ) -> list[GrepMatch] | str:
+        import fnmatch
+        search_path = self._host_path(path or '/')
+        if not os.path.isdir(search_path):
+            return f"Error: '{path or '/'}' is not a directory"
+
+        matches: list[GrepMatch] = []
+        # 跳过的目录
+        _SKIP_DIRS = frozenset({'.git', '__pycache__', 'node_modules', '.venv',
+                                 'venv', '.tox', '.eggs', '.mypy_cache', '.pytest_cache',
+                                 'chroma_db', 'pgdata', 'browser_data', 'screenshots',
+                                 'agent_temp', 'chat_images', '.claude'})
+
+        for root, dirs, files in os.walk(search_path):
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith('.')]
+            for fname in files:
+                if glob and not fnmatch.fnmatch(fname, glob):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                        for i, line in enumerate(f, 1):
+                            if pattern in line:
+                                sandbox = self._sandbox_path(fpath)
+                                matches.append({
+                                    "path": sandbox,
+                                    "line": i,
+                                    "text": line.rstrip('\n').rstrip('\r'),
+                                })
+                except (PermissionError, OSError, UnicodeDecodeError):
+                    continue
+        return matches

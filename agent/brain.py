@@ -54,7 +54,7 @@ from agent.prompts import (
 from config import config
 from langchain.tools import tool
 from langchain_tavily import TavilySearch
-from agent.sandboxed_backend import DockerSandboxBackend
+from agent.sandboxed_backend import HybridBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
 from pathlib import Path
 from agent.reflection import init_chroma, submit_task_for_reflection, get_skill_collection, SKILLS_DIR
@@ -171,7 +171,7 @@ class Brain:
         #     }
         # )
         
-        self.docker_backend = DockerSandboxBackend(
+        self.docker_backend = HybridBackend(
             # image="python:3.12-slim",
             image="my-agent-base:latest",  # 可自定义镜像
             mem_limit="1g",
