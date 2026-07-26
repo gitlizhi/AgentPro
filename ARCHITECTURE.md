@@ -85,7 +85,7 @@ Agent (core.py)
   │     │     ├── SubAgents (反思、技能)
   │     │     ├── SummarizationMiddleware (历史消息摘要)
   │     │     ├── ToolOutputCompactionMiddleware (工具输出压缩)
-  │     │     ├── FilesystemMiddleware
+  │     │     ├── FilesystemMiddleware (ls/read_file/write_file/edit_file/glob/grep)
   │     │     └── TodoListMiddleware
   │     ├── ContextManager (token 预算 + 工具输出压缩)
   │     ├── Agent 专属上下文 (agent/agent_context/{agent_id}.md)
@@ -94,7 +94,7 @@ Agent (core.py)
   │     ├── LongTermMemory (ChromaDB + 按需加载)
   │     └── Tools (send_to_agent, launch_agent, log_memory, Computer Tools, ...)
   ├── Computer Tools (19 个桌面自动化工具)
-  ├── DockerSandboxBackend (代码执行)
+  ├── HybridBackend (文件 I/O 直连宿主机 + execute 走 Docker)
   └── Browser Tools (Playwright)
 ```
 
@@ -1018,15 +1018,40 @@ Agent.run()
 
 ---
 
-## 六、Docker 沙箱
+## 六、Docker 沙箱与混合后端
+
+### 6.0 混合后端架构（HybridBackend）
+
+`agent/sandboxed_backend.py` 提供两级后端：
+
+| 类 | 用途 |
+|---|------|
+| `DockerSandboxBackend` | 纯 Docker 后端，所有操作（文件 I/O + 命令执行）均在容器中完成 |
+| **`HybridBackend`** (当前使用) | **继承 DockerSandboxBackend，重写文件操作为宿主机直连，仅 execute 保留在容器** |
+
+**`HybridBackend` 设计动机**：deepagents 框架通过 `FilesystemMiddleware` 自动提供 `ls`、`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`execute` 七个工具。如果后端是 `DockerSandboxBackend`，**每个文件操作都会启动一个独立 Docker 容器**——即使只是读取一个文件。对于以代码开发为主的场景，这种开销是不可接受的。
+
+**折中方案**：`HybridBackend` 重写全部文件操作方法（`read` / `write` / `edit` / `ls_info` / `glob_info` / `grep_raw`），直接在宿主机文件系统上执行，仅 `execute()`（Shell 命令）保留在 Docker 沙箱中。
+
+**路径映射机制**：
+
+| 沙箱路径 | 宿主机路径 |
+|---------|-----------|
+| `/workspace/foo.py` | `agent/agent_temp/shared_workspace/foo.py` |
+| `/home/pwuser/` | `agent/agent_temp/sandbox_workspaces/{agent_id}/home/` |
+| `/desktop/` | 配置的桌面路径 |
+| `/agent/skills/` | `agent/skills/` |
+| `/agent/brain.py` (默认) | `{项目根目录}/agent/brain.py` |
+
+`_host_path()` 负责沙箱路径 → 宿主机路径映射，`_sandbox_path()` 负责反向映射（grep/glob 返回值需要转换为沙箱路径）。
 
 ### 6.1 设计原则
 
-`agent/sandboxed_backend.py` 提供隔离的命令执行环境：
+Docker 沙箱部分提供隔离的命令执行环境：
 
 - **安全加固**：非 root 用户（nobody）、根文件系统只读、cap_drop=ALL、no-new-privileges、进程数限制
 - **资源限制**：mem_limit、cpu_limit
-- **挂载**：临时 workspace（/workspace）、桌面目录（/desktop）、技能脚本（/agent/skills，只读）、对话历史（/conversation_history）
+- **挂载**：持久化 workspace（/workspace）、桌面目录（/desktop）、技能脚本（/agent/skills，只读）、对话历史（/conversation_history）
 
 ### 6.2 容器生命周期
 
@@ -1208,6 +1233,7 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | `create_task_plan` 并行度程序化校验 | LLM 生成的计划可能全部串行或角色完全相同。`create_task_plan` 解析 LLM 输出后检查两个反模式（全部串行/角色完全相同），检测到时自动带修正指令重试 LLM 一次（temperature=0.4 增加多样性），失败则回退原始计划。确保多 worker 环境充分利用并行能力 |
 | `send_to_agent` 探测拦截 | orchestrator 在创建计划前用 `send_to_agent` 打探 worker 能力，由于消息缓冲延迟 worker 来不及回复，浪费大量消息。代码层在 `send_to_agent` 入口硬拦截：无工单 + 无计划 + 目标是 peer → 直接返回拒绝并指引正确流程 |
 | Docker 命令安全拦截 | LLM 生成的 `find /` / `glob **/*.md` 扫描全文件系统导致 20s 超时。`sandboxed_backend.py` 新增 `_sanitize_command()` 方法，用正则匹配危险模式并自动改写（`find /` → `find /workspace/` + `-maxdepth 6`；`glob '**/'` → `glob '/workspace/**/'`），静默修正后执行 |
+| **HybridBackend 混合后端** | deepagents 自带的 `FilesystemMiddleware` 已经提供了 `ls/read_file/write_file/edit_file/glob/grep` 七个文件操作工具，但默认全部通过 Docker 沙箱后端执行——每次文件读写都要启停容器。新增 `HybridBackend` 继承 `DockerSandboxBackend`，重写全部文件操作为宿主机直连 I/O，仅 `execute()` 保留在 Docker 中。路径映射（沙箱路径 ↔ 宿主机路径）通过 `_host_path()` 和 `_sandbox_path()` 双向转换，Agent 无感知 |
 
 ### 11.3 工具调用进度流
 
@@ -1821,7 +1847,7 @@ args=[
 | `agent/reflection.py` | 任务反思 + 技能生成 |
 | `agent/skill_tools.py` | 技能管理工具 |
 | `agent/skill_version_manager.py` | 技能版本管理 |
-| `agent/sandboxed_backend.py` | Docker 沙箱 |
+| `agent/sandboxed_backend.py` | Docker 沙箱 + HybridBackend 混合后端（文件 I/O 宿主机直连 + execute 走容器） |
 | `agent/browser_tools.py` | Playwright 浏览器工具 |
 | `agent/message_buffer.py` | Agent 间消息缓冲队列 |
 | `agent/tools_factory.py` | 工具工厂函数（send_to_agent、room_tools 等） |
