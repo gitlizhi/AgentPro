@@ -1623,6 +1623,41 @@ interrupt_on={
 | **安全** | 禁止访问 localhost / 127.0.0.1 / ::1 等本地地址 |
 | **回退** | 如果 HTMLParser 提取内容过短（< 50 字符），自动回退到正则去标签 |
 
+### 12.14 图表生成工具
+
+`render_diagram` 工具通过 Kroki API 将图表代码渲染为 SVG/PNG 图片，零额外依赖。
+
+| 特性 | 说明 |
+|------|------|
+| **主方案** | Kroki API（`kroki.io`），开源图表渲染服务 |
+| **备用方案** | Mermaid.ink API（仅限 Mermaid 类型） |
+| **输出格式** | SVG（矢量，推荐）或 PNG |
+| **输出目录** | `diagrams/`，按 `{type}_{hash}.svg` 命名 |
+| **幂等** | 相同代码重复渲染直接返回已有文件路径 |
+
+**支持的图表类型**：
+
+| 类型 | 别名 | 用途 |
+|------|------|------|
+| `mermaid` | `mmd` | 流程图、时序图、甘特图、类图、ER图、饼图等 |
+| `plantuml` | `puml` | UML 图（类图、时序图、用例图、组件图等） |
+| `graphviz` | `dot` | 有向图/无向图、网络拓扑图 |
+| `d2` | — | 现代化图表语言，D2 语法 |
+| `c4plantuml` | `c4` | C4 架构图（Context/Container/Component/Code） |
+| `erd` | — | 实体关系图 |
+| `nomnoml` | — | 手绘风格 UML |
+| `excalidraw` | — | 白板风格手绘图 |
+
+**原理**：
+```
+Agent 生成 Mermaid 代码
+  → POST https://kroki.io/mermaid/svg
+    → Kroki 服务端渲染
+      → 返回 SVG XML
+        → 保存到 diagrams/ 目录
+          → 返回文件路径给 Agent
+```
+
 ---
 
 ## 十三、聊天图片系统
@@ -1889,6 +1924,7 @@ args=[
 | `agent/computer_tools.py` | 19 个桌面自动化工具（Computer Use） |
 | `agent/git_tools.py` | Git 版本控制工具（status/diff/log/add/commit） |
 | `agent/web_tools.py` | 网页抓取工具（web_fetch） |
+| `agent/diagram_tools.py` | 图表渲染工具（render_diagram，Mermaid/PlantUML 等） |
 | `agent/tools.py` | 自定义 LangChain 工具（含 windows_automation） |
 | `agent/scheduler.py` | APScheduler 调度 |
 | `agent/tasks.py` | 提醒 + 整合任务 |
