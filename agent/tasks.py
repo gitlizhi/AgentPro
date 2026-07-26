@@ -39,23 +39,24 @@ async def consolidate_all_users():
 
 
 def cleanup_old_screenshots(days: int = 30):
-    """清理超过指定天数的截图文件（同步执行，由 APScheduler 调度）"""
-    screenshots_dir = Path(__file__).parent.parent / "screenshots"
-    if not screenshots_dir.exists():
-        return
-
-    cutoff = time.time() - days * 86400
-    deleted = 0
-    for filepath in screenshots_dir.iterdir():
-        if not filepath.is_file():
+    """清理超过指定天数的截图文件和图表文件（同步执行，由 APScheduler 调度）"""
+    for keyword in ["screenshots", "diagrams"]:
+        clean_dir = Path(__file__).parent.parent / keyword
+        if not clean_dir.exists():
             continue
-        try:
-            mtime = filepath.stat().st_mtime
-            if mtime < cutoff:
-                filepath.unlink()
-                deleted += 1
-        except OSError as e:
-            logger.warning(f"清理截图文件失败: {filepath.name} - {e}")
+    
+        cutoff = time.time() - days * 86400
+        deleted = 0
+        for filepath in clean_dir.iterdir():
+            if not filepath.is_file():
+                continue
+            try:
+                mtime = filepath.stat().st_mtime
+                if mtime < cutoff:
+                    filepath.unlink()
+                    deleted += 1
+            except OSError as e:
+                logger.warning(f"清理截图文件失败: {filepath.name} - {e}")
 
     if deleted > 0:
         logger.info(f"截图清理完成: 删除了 {deleted} 个超过 {days} 天的文件")

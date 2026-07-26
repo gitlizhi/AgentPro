@@ -97,7 +97,7 @@ def _install_chromium():
         return False
 
 
-def _cleanup_old_screenshots(days: int = 7):
+def _cleanup_old_screenshots(days: int = 30):
     """删除超过指定天数的截图文件。"""
     import time
     if not SCREENSHOT_DIR.exists():
