@@ -56,6 +56,8 @@ from langchain.tools import tool
 from langchain_tavily import TavilySearch
 from agent.sandboxed_backend import HybridBackend
 from agent.tools import (launch_agent, stop_agent, stop_all_agents_impl)
+from agent.git_tools import git_status, git_diff, git_log, git_add, git_commit
+from agent.web_tools import web_fetch
 from pathlib import Path
 from agent.reflection import init_chroma, submit_task_for_reflection, get_skill_collection, SKILLS_DIR
 from agent.browser_tools import browser, close_browser_session
@@ -200,7 +202,8 @@ class Brain:
         delegation_tools = create_delegation_tools(self)
         orchestration_tools = create_orchestration_tools(self)
         board_tools = create_board_tools(self)
-        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), create_get_current_time_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools + board_tools
+        git_tools = [git_status, git_diff, git_log, git_add, git_commit]
+        tools = [self.send_to_agent_tool, create_list_online_agents_tool(self), create_get_current_time_tool(self), TavilySearch(max_results=5), create_log_memory_tool(self), create_load_user_profile_tool(self), launch_agent, stop_agent, stop_all_agents_impl, browser, web_fetch] + room_tools + COMPUTER_TOOLS + delegation_tools + orchestration_tools + board_tools + git_tools
         tools = tools + [list_skills, load_skill, search_skills, skill_stats, upgrade_skill, report_skill_result]
         self.agent = create_deep_agent(
             model=self.model,
