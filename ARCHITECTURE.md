@@ -92,7 +92,7 @@ Agent (core.py)
   │     ├── ConversationTracker (轮次计数+硬上限)
   │     ├── TaskBuffer (任务步骤缓冲)
   │     ├── LongTermMemory (ChromaDB + 按需加载)
-  │     └── Tools (send_to_agent, launch_agent, log_memory, Computer Tools, ...)
+  │     └── Tools (send_to_agent, launch_agent, log_memory, Computer Tools, Git, WebFetch, ...)
   ├── Computer Tools (19 个桌面自动化工具)
   ├── HybridBackend (文件 I/O 直连宿主机 + execute 走 Docker)
   └── Browser Tools (Playwright)
@@ -1515,12 +1515,14 @@ computer_paste(text='你好，这是中文消息')
 #### 13.9.1 工具注册（brain.py）
 
 ```python
-# brain.py line 41
-from agent.computer_tools import COMPUTER_TOOLS
+# brain.py line 58-60
+from agent.git_tools import git_status, git_diff, git_log, git_add, git_commit
+from agent.web_tools import web_fetch
 
-# brain.py line 150
-tools = [..., browser] + room_tools + COMPUTER_TOOLS
+# brain.py line ~205
+tools = [..., browser] + room_tools + COMPUTER_TOOLS + git_tools + [web_fetch]
 # COMPUTER_TOOLS 包含 windows_automation + 18 个 computer_* 工具
+# git_tools 包含 git_status/git_diff/git_log/git_add/git_commit
 ```
 
 所有电脑工具以**平铺方式**注册到 LangGraph Agent，Agent 在每次 LLM 调用时都能看到全部 19 个工具。
@@ -1587,6 +1589,39 @@ interrupt_on={
 | **HITL（可配置）** | 支持对 `windows_automation` 和 `computer_execute` 启用人工审批，当前为关闭状态 |
 | **依赖优雅降级** | 任何依赖缺失都不会导致崩溃，返回明确错误信息引导 Agent 使用替代方案 |
 | **OCR 失败缓存** | EasyOCR 初始化失败后不再重试，避免重复网络超时阻塞任务 |
+
+### 12.12 Git 版本控制工具
+
+5 个 Git 工具，让 Agent 可以查看仓库状态、浏览变更、暂存文件和创建提交。运行在宿主机上（`subprocess` 直接调用 git），不经过 Docker 沙箱。
+
+| # | 工具名称 | 功能 |
+|---|---------|------|
+| 1 | `git_status` | 查看工作区状态：已修改、已暂存、未跟踪的文件列表 |
+| 2 | `git_diff` | 查看工作区或暂存区的代码变更（`staged=True` 查看已暂存） |
+| 3 | `git_log` | 查看最近提交历史（`max_count` 控制条数，默认 10） |
+| 4 | `git_add` | 暂存指定文件（禁止通配符 `.`/`-A`/`*`） |
+| 5 | `git_commit` | 创建提交（仅限已暂存文件，禁止 `--no-verify`/`--amend`） |
+
+**安全约束**：
+- 禁止 `git add .` 或 `git add -A` 等通配符暂存，只接受明确指定的文件路径
+- 禁止 `--no-verify`（必须过 pre-commit hooks）
+- 禁止 `--amend`（不修改已发布的提交）
+- 提交前必须先 `git_add` 明确指定文件
+- 所有 git 命令 30s 超时
+
+### 12.13 WebFetch 网页抓取工具
+
+`web_fetch` 工具抓取网页 URL 并将 HTML 转换为可读纯文本，弥补 TavilySearch 只返回摘要的不足。
+
+| 特性 | 说明 |
+|------|------|
+| **伪装** | User-Agent 模拟 Chrome 131 |
+| **超时** | 15 秒请求超时 |
+| **大小限制** | 响应体不超过 2MB，文本输出不超过 100,000 字符 |
+| **编码检测** | 自动检测 UTF-8 / GBK / GB2312 / Latin-1 |
+| **HTML 解析** | `HTMLParser` 提取纯文本，跳过 script/style/head/noscript/iframe/svg |
+| **安全** | 禁止访问 localhost / 127.0.0.1 / ::1 等本地地址 |
+| **回退** | 如果 HTMLParser 提取内容过短（< 50 字符），自动回退到正则去标签 |
 
 ---
 
@@ -1852,6 +1887,8 @@ args=[
 | `agent/message_buffer.py` | Agent 间消息缓冲队列 |
 | `agent/tools_factory.py` | 工具工厂函数（send_to_agent、room_tools 等） |
 | `agent/computer_tools.py` | 19 个桌面自动化工具（Computer Use） |
+| `agent/git_tools.py` | Git 版本控制工具（status/diff/log/add/commit） |
+| `agent/web_tools.py` | 网页抓取工具（web_fetch） |
 | `agent/tools.py` | 自定义 LangChain 工具（含 windows_automation） |
 | `agent/scheduler.py` | APScheduler 调度 |
 | `agent/tasks.py` | 提醒 + 整合任务 |
