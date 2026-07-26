@@ -8,6 +8,7 @@
 *.log
 *.json
 *.md
+*.svg
 !ARCHITECTURE.md
 !README_EN.md
 !README.md
@@ -17,4 +18,5 @@ agent/agent_temp/
 /agent/chroma_db/*
 /pgdata
 /screenshots
+/diagrams
 /browser_data
