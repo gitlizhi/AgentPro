@@ -1370,7 +1370,7 @@ class Brain:
             seen = set()
             for idx, meta in enumerate(results['metadatas'][0]):
                 # 检查相似度：距离超过阈值则跳过
-                if distances and idx < len(distances) and distances[idx] > 0.5:
+                if distances and idx < len(distances) and distances[idx] > 0.6:
                     logger.debug(f"技能 {meta.get('skill_name', '?')} 距离={distances[idx]:.3f} 超过阈值，跳过")
                     continue
                 skill_name = meta.get('skill_name', '')
@@ -1392,7 +1392,13 @@ class Brain:
             if not lessons:
                 return ""
 
-            return "\n\n[相关经验] 以下是你过去处理类似任务时积累的经验教训，请在执行时特别注意避开已知的坑：\n\n" + "\n\n".join(lessons)
+            skill_names = "、".join(sorted(seen))
+            header = (
+                f"\n\n[相关经验] 系统自动检索到 {len(lessons)} 个与你当前任务相关的历史技能：{skill_names}\n"
+                "以下是从中提取的关键经验，请在执行时特别注意避开已知的坑：\n"
+                f">>> **强烈建议立即调用 `load_skill` 加载完整技能文档获取详细执行步骤。你可以用 `search_skills` 精确搜索更多相关技能。** <<<\n\n"
+            )
+            return header + "\n\n".join(lessons)
         except Exception as e:
             logger.warning(f"获取相关技能经验失败: {e}")
             return ""

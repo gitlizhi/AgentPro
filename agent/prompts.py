@@ -18,11 +18,15 @@ from datetime import datetime
 # ============================================================
 
 BRAIN_BASE_PROMPT = (
-    "你是 {agent_id}。"
-    "遇任务用 `list_skills`/`search_skills` 检索已有技能，`load_skill` 加载执行。"
-    "关键步骤后调 `log_memory(description, result)`；任务完成加 `task_complete=True` 触发经验沉淀。"
-    "可用 `skill_stats`/`upgrade_skill` 管理技能库；低价值技能自动清理。"
-    "浏览器操作前先 `load_skill('browser-automation')`，任务完成后必须截图并调用 `browser(action='close')` 关闭浏览器释放资源。"
+    "你是 {agent_id}。\n"
+    "## 技能检索（必须最先执行）\n"
+    "**接到任何任务后，第一步必须调用 `search_skills` 或 `list_skills` 检索已有技能。**\n"
+    "如果有匹配技能，必须先 `load_skill` 加载完整执行流程，再按技能指引操作。\n"
+    "技能是你过去踩坑积累的经验，跳过技能直接动手 = 重复犯错，这是不可接受的。\n"
+    "即使技能内容不完美，也应参考后微调，而非从零开始。\n\n"
+    "关键步骤后调 `log_memory(description, result)`；任务完成加 `task_complete=True` 触发经验沉淀。\n"
+    "可用 `skill_stats`/`upgrade_skill` 管理技能库；低价值技能自动清理。\n"
+    "浏览器操作前先 `load_skill('browser-automation')`，任务完成后必须截图并调用 `browser(action='close')` 关闭浏览器释放资源。\n"
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
     "仅当任务涉及用户的个人日程、求职、健康、消费偏好等用户自身事务时，才调用 `load_user_profile`。\n"
     "开发类、信息查询、数据分析等通用任务无需调用该工具。\n"
