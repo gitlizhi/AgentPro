@@ -81,7 +81,11 @@ class BackendConfig(BaseSettings):
     backend_virtual_mode: bool = Field(True, alias="BACKEND_VIRTUAL_MODE")
     backend_timeout: int = Field(30, alias="BACKEND_TIMEOUT")
     backend_max_output_bytes: int = Field(10000, alias="BACKEND_MAX_OUTPUT_BYTES")
-    docker_volumes: str = Field("F:\\agent-workspace", alias="DOCKER_VOLUMES")
+    docker_volumes: str = Field(
+        os.path.join(os.environ.get("USERPROFILE", ""), "Desktop"),
+        alias="DOCKER_VOLUMES",
+        description="桌面/文件挂载路径，默认自动检测 Windows 桌面"
+    )
 
 class SchedulerConfig(BaseSettings):
     """调度器配置"""

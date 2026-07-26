@@ -26,12 +26,12 @@ BRAIN_BASE_PROMPT = (
     "桌面应用操作前先 `load_skill('computer-automation')`。\n"
     "仅当任务涉及用户的个人日程、求职、健康、消费偏好等用户自身事务时，才调用 `load_user_profile`。\n"
     "开发类、信息查询、数据分析等通用任务无需调用该工具。\n"
-    "沙箱环境: /workspace 和用户主目录 (~/) 是持久化的——pip install --user 安装的包、"
-    "下载的文件在多次命令执行之间保留，无需重复安装。但容器本身是临时的（每次命令在新容器中运行），"
-    "系统级目录（/usr、/tmp 等）不持久。\n"
-    "**文件搜索必须限定范围**：使用 `glob`、`find`、`ls` 等命令搜索文件时，"
-    "**必须在 `/workspace/` 下执行**（如 `glob '/workspace/**/*.md'`），"
-    "**严禁**对根目录 `/` 或全文件系统执行 `**/*.md` 这种全局搜索——会扫描整个容器文件系统导致超时（20s）。\n"
+    "**文件系统权限说明**：你拥有项目根目录的完整读写权限，可以自由使用 "
+    "`read_file`、`write_file`、`edit_file`、`glob`、`grep`、`ls` 操作项目文件。\n"
+    "**桌面文件**：宿主机桌面以**只读方式**挂载在 `/desktop`。"
+    "你可以用 `read_file('/desktop/文件名')` / `ls('/desktop')` / `glob` / `grep` 读取桌面文件，"
+    "但**不能修改或删除**桌面上的文件。不要在桌面路径上使用 `write_file` 或 `edit_file`。\n"
+    "**命令执行**：`execute` 工具在 Docker 沙箱中运行，仅映射 `/workspace`（读写）和 `/desktop`（只读）。\n"
     "推理过程放 <thinking>...</thinking> 内，标签外才会发给其他 Agent。"
     "任务委托协议（TDP）："
     "所有与其它 Agent 的私聊必须在任务委托框架内进行。"
@@ -52,7 +52,12 @@ BRAIN_REFLECTION_GUIDE = (
 )
 
 BRAIN_DESKTOP_INSTRUCTIONS = (
-    "注意：宿主机桌面挂载在 `/desktop`，桌面文件路径用 `/desktop/文件名`，不要用 Windows 路径（C:\\Users\\...）。"
+    "## 桌面文件访问\n"
+    "宿主机桌面以**只读**方式挂载在 `/desktop`。\n"
+    "- **读取桌面文件**：使用 `read_file('/desktop/文件名')`, `ls('/desktop')`, `glob`, `grep`\n"
+    "- **禁止修改桌面文件**：`write_file` 和 `edit_file` 对 `/desktop/` 路径会返回错误\n"
+    "- **桌面路径格式**：`/desktop/文件名`，不要用 Windows 路径（`C:\\Users\\...`）\n"
+    "- 如需在桌面附近操作文件，先用 `read_file` 读取内容，如果要创建新文件请写到 `/workspace/`"
 )
 
 BRAIN_COMPUTER_INSTRUCTIONS = (

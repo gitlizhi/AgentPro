@@ -201,7 +201,7 @@ class DockerSandboxBackend(BaseSandbox):
                 self._home_dir: {"bind": "/home/pwuser", "mode": "rw"},
             }
             if self.desktop_path:
-                volumes[self.desktop_path] = {"bind": "/desktop", "mode": "rw"}
+                volumes[self.desktop_path] = {"bind": "/desktop", "mode": "ro"}
             if self.skills_host_path:
                 volumes[self.skills_host_path] = {"bind": "/agent/skills", "mode": "ro"}
             conversation_host_path = os.path.join(os.getcwd(), "conversation_history")
@@ -456,6 +456,19 @@ class HybridBackend(DockerSandboxBackend):
 
     # ---- 文件操作（直连宿主机） ----
 
+    # 只读挂载点：这些路径允许 read/ls/glob/grep 但禁止 write/edit
+    _READONLY_MOUNTS = frozenset({"/desktop", "/agent/skills"})
+
+    def _check_readonly_path(self, sandbox_path: str) -> str | None:
+        """检查路径是否在只读挂载点下，是则返回错误信息，否则返回 None。"""
+        for mount in self._READONLY_MOUNTS:
+            if sandbox_path == mount or sandbox_path.startswith(mount + "/"):
+                return (
+                    f"Error: '{mount}' 是只读挂载点，不允许修改文件。"
+                    f"如需在桌面创建文件，请先写入 /workspace/ 再通过 computer_paste 等工具处理。"
+                )
+        return None
+
     def read(
         self,
         file_path: str,
@@ -490,6 +503,9 @@ class HybridBackend(DockerSandboxBackend):
         file_path: str,
         content: str,
     ) -> WriteResult:
+        err = self._check_readonly_path(file_path)
+        if err:
+            return WriteResult(error=err)
         host_path = self._host_path(file_path)
         if os.path.exists(host_path):
             return WriteResult(error=f"Error: File '{file_path}' already exists")
@@ -511,6 +527,9 @@ class HybridBackend(DockerSandboxBackend):
         new_string: str,
         replace_all: bool = False,
     ) -> EditResult:
+        err = self._check_readonly_path(file_path)
+        if err:
+            return EditResult(error=err)
         from deepagents.backends.utils import perform_string_replacement
         host_path = self._host_path(file_path)
         if not os.path.isfile(host_path):
