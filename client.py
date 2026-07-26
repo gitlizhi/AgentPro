@@ -125,6 +125,11 @@ _chat_images_dir = pathlib.Path(__file__).parent / "chat_images"
 _chat_images_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/chat_images", StaticFiles(directory=str(_chat_images_dir)), name="chat_images")
 
+# 挂载 diagrams 目录，让前端能直接展示渲染的图表
+_diagrams_dir = pathlib.Path(__file__).parent / "diagrams"
+_diagrams_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/diagrams", StaticFiles(directory=str(_diagrams_dir)), name="diagrams")
+
 
 @app.get("/")
 async def get():
