@@ -952,11 +952,14 @@ class Brain:
         # 清理子 Agent
         await self.orchestration_manager.cleanup_agents(plan_id, brain=self)
 
+        # 使用计划创建时的 thread_id，确保报告发到用户发起任务的原始会话
+        target_thread = plan.thread_id or f"private_{self.agent_id}_super_user"
+        logger.info(f"编排汇总报告将路由到 thread: {target_thread}")
         await self.process(
             user_id="super_user",
             user_input=synthesis_prompt,
             new_thread=False,
-            thread_id_override=f"private_{self.agent_id}_super_user",
+            thread_id_override=target_thread,
             silent=False,
         )
 

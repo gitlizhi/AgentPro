@@ -1912,6 +1912,10 @@ async function setConversationTitle(threadId, firstMessage) {
     await api('PATCH', `/chat/conversations/${encodeURIComponent(threadId)}`, { title: title });
     const conv = findConversation(threadId);
     if (conv) conv.title = title;
+    // 更新顶部标题栏
+    if (activeThreadId === threadId) {
+        currentChatNameSpan.textContent = title;
+    }
     renderConvList();
 }
 

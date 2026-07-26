@@ -725,6 +725,8 @@ def create_orchestration_tools(brain):
                 return "任务分解失败：未生成子任务"
 
             plan = await om.create_plan(description, brain_ref.agent_id)
+            # 记录创建时的 thread_id，确保合成报告路由到正确会话
+            plan.thread_id = brain_ref.thread_id or ""
             # 存储项目概览
             plan.project_overview = plan_data.get("project_overview", "")
             await om.set_subtasks(plan.plan_id, subtasks)

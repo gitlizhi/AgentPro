@@ -71,6 +71,7 @@ class OrchestrationPlan:
     created_at: float = 0.0
     completed_count: int = 0
     failed_count: int = 0
+    thread_id: str = ""  # 创建此计划时用户所在的 thread_id，用于合成报告时正确路由
 
     # ===== Loop Engineering 新增字段 =====
     project_overview: str = ""
