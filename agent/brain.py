@@ -123,6 +123,7 @@ class Brain:
         self._timeout_loop_started = False  # 工单超时循环惰性启动
         self._in_flight_tools = []  # 当前正在执行的工具名称列表（用于中断时清理）
         self._orchestration_dispatch_hint: str = ""  # 编排子任务完成后，提示派发下一批
+        self._plan_used_agents: dict = {}  # plan_id → set()，跨批次跟踪已分配的智能体
         self._skip_clarify = False  # 被打断后跳过下一条消息的澄清
         self.degradation_manager = DegradationManager()  # 多层级降级策略
         self.group_context = None  # 当前消息的群聊上下文
@@ -300,7 +301,10 @@ class Brain:
                     if orch_plan:
                         ticket.orchestration_plan_id = orch_plan
                     dm._by_id[tdp_ticket_id] = ticket
-                    dm._by_pair[dm._pair_key(self.agent_id, self.user_id)] = tdp_ticket_id
+                    pair_key = dm._pair_key(self.agent_id, self.user_id)
+                    if pair_key not in dm._by_pair:
+                        dm._by_pair[pair_key] = []
+                    dm._by_pair[pair_key].append(tdp_ticket_id)
                     dm._save_ticket(ticket)
                     logger.info(f"TDP 镜像工单已创建: {tdp_ticket_id} (assignee={self.agent_id})")
                 except Exception as e:
@@ -346,6 +350,7 @@ class Brain:
                 # ── 无审核 Agent，直接标记完成 ──
                 await self.orchestration_manager.mark_completed(tdp_ticket_id, user_input[:500])
                 if plan and plan.is_complete():
+                    self._plan_used_agents.pop(orch_plan_id, None)  # 清理缓存
                     summary = self.orchestration_manager.get_progress_summary(orch_plan_id)
                     await self.comm.send_to_agent("super_user", {
                         "text": f"🎯 编排计划全部完成！\n\n{summary}"
@@ -371,6 +376,32 @@ class Brain:
                                 f"编排计划 {orch_plan_id}: 子任务 {tdp_ticket_id} 完成，"
                                 f"但以下子任务仍被阻塞: {blocked}"
                             )
+                    # ── 推动卡住的 DISPATCHED 子任务：提醒 worker 处理未接受的工单 ──
+                    stuck = [
+                        s for s in plan.subtasks
+                        if s.status == SubTaskStatus.DISPATCHED
+                        and s.assigned_to
+                        and s.id != getattr(subtask, 'id', None)  # 排除刚完成的那个
+                    ]
+                    if stuck:
+                        by_agent: dict[str, list] = {}
+                        for s in stuck:
+                            by_agent.setdefault(s.assigned_to, []).append(s)
+                        for agent_id, tasks in by_agent.items():
+                            task_list = "\n".join(
+                                f"  - {t.id}: {t.description[:80]}（工单 `{t.ticket_id}`）"
+                                for t in tasks
+                            )
+                            await self.comm.send_to_agent(agent_id, {
+                                "text": (
+                                    f"📋 你还有 {len(tasks)} 个子任务尚未接受，请逐一处理：\n"
+                                    f"{task_list}\n\n"
+                                    f"请对每个工单调用 accept_task 接受并完成。"
+                                ),
+                            })
+                            logger.info(
+                                f"编排推动: 提醒 {agent_id} 处理 {len(tasks)} 个 DISPATCHED 子任务"
+                            )
             # ── 委托方：区分编排与非编排交付 ──
             if ticket and ticket.issuer == self.agent_id:
                 if orch_plan_id:
@@ -386,15 +417,18 @@ class Brain:
                             user_input[:300],
                         )
                 else:
-                    # 非编排交付：截断内容，LLM 可审查但禁止与 worker 对话
-                    result_preview = user_input[:300]
-                    if len(user_input) > 300:
-                        result_preview += f"...（完整结果已保存，共 {len(user_input)} 字符）"
-                    user_input = (
-                        f"[子任务交付] 工单 {tdp_ticket_id} 已完成。"
-                        f"\n交付摘要: {result_preview}"
-                        f"\n\n⚠️ 工单已关闭，禁止回复 {self.user_id}。"
-                        f"如需汇报，向 super_user 汇报结果。"
+                    # 非编排交付：程序化处理，不唤醒 LLM，避免误发消息给 worker
+                    _skip_llm_for_issuer = True
+                    logger.info(
+                        f"TDP 非编排交付已程序化处理，跳过 LLM "
+                        f"(issuer={self.agent_id}, ticket={tdp_ticket_id})"
+                    )
+                    result_preview = user_input[:200]
+                    if len(user_input) > 200:
+                        result_preview += f"...（共 {len(user_input)} 字符）"
+                    await self._safe_send(
+                        f"📦 [交付] {self.user_id} 完成了工单 {tdp_ticket_id}。\n"
+                        f"交付摘要: {result_preview}"
                     )
 
         elif tdp_type == "acceptance" and tdp_ticket_id:
@@ -515,6 +549,7 @@ class Brain:
             )
 
             if plan.is_complete():
+                self._plan_used_agents.pop(plan_id, None)  # 清理缓存
                 self.schedule_background_task(
                     self._synthesize_plan_results(plan_id)
                 )
@@ -764,7 +799,8 @@ class Brain:
 
     async def _dispatch_single_subtask(self, plan_id, subtask, online_agents,
                                        allow_parallel=True, reassign=False,
-                                       assigned_to=None) -> str:
+                                       assigned_to=None,
+                                       used_agents=None) -> str:
         """派发单个子任务：分配智能体、创建工单、通知目标。
 
         由 _dispatch_ready_subtasks 和编排工具共用，消除重复逻辑。
@@ -777,6 +813,7 @@ class Brain:
             allow_parallel: 是否允许同对智能体并行工单（编排场景为 True）
             reassign: 是否为重新分配（影响通知文本）
             assigned_to: 若指定则跳过角色匹配直接分配
+            used_agents: 本批次已分配过的智能体集合（用于负载均衡，避免全部任务集中于同一智能体）
 
         Returns:
             结果描述字符串，如 "✅ st_1 → agent_x (工单 `abc`)"
@@ -784,18 +821,34 @@ class Brain:
         dm = self.delegation_manager
         om = self.orchestration_manager
 
+        if used_agents is None:
+            used_agents = set()
+
         if assigned_to:
             assigned = assigned_to
         else:
             assigned = None
             role_hint = (subtask.suggested_role or "").lower()
-            for agent in online_agents:
-                if role_hint and role_hint in agent.lower():
-                    assigned = agent
-                    break
-            if not assigned:
-                others = [a for a in online_agents if a != self.agent_id]
-                assigned = others[0] if others else online_agents[0]
+            # 收集所有角色匹配的智能体，优先选择本批次尚未分配过的
+            matching = [a for a in online_agents
+                        if role_hint and role_hint in a.lower()]
+            if matching:
+                # 负载均衡：优先从未使用过的匹配智能体中选
+                fresh = [a for a in matching if a not in used_agents]
+                if fresh:
+                    assigned = fresh[0]
+                else:
+                    # 兜底：匹配的都用过了，强制分配给其他未使用的智能体
+                    fallback = [a for a in online_agents
+                                if a != self.agent_id and a not in used_agents]
+                    assigned = fallback[0] if fallback else matching[0]
+            else:
+                # 无角色匹配：在未使用的 agent 中轮流分配
+                fallback = [a for a in online_agents
+                            if a != self.agent_id and a not in used_agents]
+                assigned = fallback[0] if fallback else online_agents[0]
+
+        used_agents.add(assigned)
 
         prefix = "[编排任务 重新分配]" if reassign else "[编排任务]"
         expected_output = f"{'重新分配' if reassign else '完成子任务'}: {subtask.description}"
@@ -814,8 +867,14 @@ class Brain:
         await self.comm.send_to_agent(assigned, {
             "text": (
                 f"{prefix} 这是计划 {plan_id} 的子任务 {subtask.id}。\n"
-                f"任务: {subtask.description}\n"
-                f"完成后请使用 deliver_result 交付结果。"
+                f"工单ID: `{ticket.ticket_id}`（请在所有操作中使用此ID）\n"
+                f"任务: {subtask.description}\n\n"
+                f"⚠️ **你必须严格按照 TDP 协议操作，否则任务会超时并重分配：**\n"
+                f"1. 首先调用 accept_task('{ticket.ticket_id}') 接受工单\n"
+                f"2. 执行任务（搜索、分析、写文件等）\n"
+                f"3. 完成后调用 deliver_result('{ticket.ticket_id}', '你的结果摘要') 交付\n\n"
+                f"**严禁使用 send_to_agent 来交付结果！** 必须使用 TDP 工具。"
+                f"文件请写入 /workspace/（所有 Agent 共享此目录）。"
             ),
             "_tdp": "delegation",
             "_orchestration": plan_id,
@@ -835,10 +894,11 @@ class Brain:
             return "（无在线智能体可供派发）"
 
         results = []
+        used = self._plan_used_agents.setdefault(plan.plan_id, set())
         for st in ready_subtasks:
             try:
                 msg, ticket_id = await self._dispatch_single_subtask(
-                    plan.plan_id, st, online, allow_parallel=True)
+                    plan.plan_id, st, online, allow_parallel=True, used_agents=used)
                 results.append(msg)
                 logger.info(
                     f"编排自动派发: {st.id} → (plan={plan.plan_id}, ticket={ticket_id})"
@@ -1385,6 +1445,7 @@ class Brain:
                 "history": [],
                 "original_input": user_input,
                 "conversation_context": await self._get_clarification_context(thread_id),
+                "_prior_questions": [],  # 用于循环检测
             }
 
         state = self._clarify_state
@@ -1394,6 +1455,27 @@ class Brain:
             last_entry = state["history"][-1]
             if not last_entry.get("answer"):
                 last_entry["answer"] = user_input
+
+        # ── 代码层循环检测 1：用户重复原始请求 = 拒绝澄清 ──
+        if state["history"]:
+            orig = state["original_input"]
+            # 提取核心关键词进行匹配（取最长的词作关键信息）
+            def _extract_keywords(s: str) -> set:
+                import re as _re
+                # 取长度>=2的中文词或英文单词
+                tokens = _re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', s.lower())
+                return set(tokens)
+            orig_kw = _extract_keywords(orig)
+            curr_kw = _extract_keywords(user_input)
+            if orig_kw and curr_kw:
+                overlap = len(orig_kw & curr_kw) / max(len(orig_kw), len(curr_kw), 1)
+                if overlap > 0.5:
+                    # 用户核心请求没变 → 在拒绝澄清
+                    logger.info(
+                        f"澄清循环检测：用户重复原始请求 (重叠度 {overlap:.0%})，强制通过"
+                    )
+                    self._clarify_state = None
+                    return user_input, True
 
         state["round"] += 1
 
@@ -1436,6 +1518,32 @@ class Brain:
         questions = result.get("questions", [])
         assumption = result.get("assumption", "")
         clarified_goal = result.get("clarified_goal", "")
+
+        # ── 代码层循环检测 2：追问与历史雷同 ──
+        if not is_clear and questions and state.get("_prior_questions"):
+            def _q_similarity(qs1, qs2) -> float:
+                """计算两轮追问的相似度（基于共享关键词）。"""
+                import re as _re
+                def _tokens(text: str) -> set:
+                    return set(_re.findall(r'[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}', text.lower()))
+                t1 = set()
+                for q in qs1:
+                    t1 |= _tokens(q)
+                t2 = set()
+                for q in qs2:
+                    t2 |= _tokens(q)
+                if not t1 or not t2:
+                    return 0.0
+                return len(t1 & t2) / max(len(t1), len(t2), 1)
+            for prior_qs in state["_prior_questions"]:
+                if _q_similarity(questions, prior_qs) > 0.6:
+                    logger.warning(
+                        f"澄清循环检测：第 {state['round']} 轮追问与历史雷同，强制通过"
+                    )
+                    self._clarify_state = None
+                    return user_input, True
+        if not is_clear and questions:
+            state.setdefault("_prior_questions", []).append(list(questions))
 
         if is_clear:
             self._clarify_state = None
@@ -1576,45 +1684,144 @@ class Brain:
     async def _ticket_timeout_loop(self, interval_seconds: int = None):
         if interval_seconds is None:
             interval_seconds = config.agent.ticket_timeout_interval
-        """后台循环：定期检查工单是否空闲超时并自动终止。"""
+        """后台循环：定期检查工单是否空闲超时并自动终止/重分配。"""
         from agent.delegation import DEFAULT_IDLE_TIMEOUT_MINUTES
+        # PENDING 工单的超时更短：worker 应尽快 accept，不 accept 说明遗漏或卡死
+        PENDING_TIMEOUT_MINUTES = 3
         while True:
             try:
                 await asyncio.sleep(interval_seconds)
-                timed_out = self.delegation_manager.check_timeouts(DEFAULT_IDLE_TIMEOUT_MINUTES)
+                now = __import__("time").time()
+                dm = self.delegation_manager
+                om = self.orchestration_manager
+
+                # ── 通用超时检测（所有活跃工单） ──
+                timed_out = dm.check_timeouts(DEFAULT_IDLE_TIMEOUT_MINUTES)
                 for ticket in timed_out:
                     logger.info(f"工单 {ticket.ticket_id} 空闲超时，自动终止")
-                    # ── 编排回调：标记子任务失败 ──
-                    await self.orchestration_manager.mark_failed(
-                        ticket.ticket_id,
-                        f"工单超时 ({DEFAULT_IDLE_TIMEOUT_MINUTES}分钟无活动)"
+                    await self._handle_ticket_timeout(ticket, "通用空闲超时")
+
+                # ── PENDING 工单专项检测（更短超时 + 自动重分配） ──
+                for ticket in list(dm._by_id.values()):
+                    if not ticket.is_active:
+                        continue
+                    if ticket.state != TicketState.PENDING:
+                        continue
+                    idle_seconds = now - ticket.last_activity
+                    if idle_seconds < PENDING_TIMEOUT_MINUTES * 60:
+                        continue
+                    # PENDING 超时：尝试重分配给其他 agent
+                    logger.info(
+                        f"PENDING 工单 {ticket.ticket_id} 超过 {PENDING_TIMEOUT_MINUTES} 分钟未被接受，"
+                        f"尝试重分配"
                     )
-                    await self._safe_send(
-                        f"⏰ 工单 {ticket.ticket_id}（{ticket.description[:50]}...）空闲超时，已自动终止。"
-                    )
-                    # 通知双方
-                    try:
-                        other = ticket.issuer if self.agent_id == ticket.assignee else ticket.assignee
-                        await self.comm.send_to_agent(other, {
-                            "text": f"[TDP] 工单 {ticket.ticket_id} 因 {DEFAULT_IDLE_TIMEOUT_MINUTES} 分钟无活动而自动超时。",
-                            "_tdp": "cancel",
-                            "ticket_id": ticket.ticket_id,
-                        })
-                    except Exception:
-                        pass
-                    try:
-                        await self.comm.send_to_agent("super_user", {
-                            "text": (
-                                f"⏰ [TDP超时] 工单 {ticket.ticket_id} "
-                                f"({ticket.issuer} -> {ticket.assignee}) 因 {DEFAULT_IDLE_TIMEOUT_MINUTES} 分钟无活动而超时。"
-                            )
-                        })
-                    except Exception:
-                        pass
+                    await self._handle_pending_timeout(ticket)
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.warning(f"工单超时检测异常: {e}")
+
+    async def _handle_ticket_timeout(self, ticket, reason: str):
+        """处理通用工单超时：标记编排失败、通知双方。"""
+        from agent.delegation import TicketState
+        await self.orchestration_manager.mark_failed(
+            ticket.ticket_id, reason
+        )
+        await self._safe_send(
+            f"⏰ 工单 {ticket.ticket_id}（{ticket.description[:50]}...）空闲超时，已自动终止。"
+        )
+        try:
+            other = ticket.issuer if self.agent_id == ticket.assignee else ticket.assignee
+            await self.comm.send_to_agent(other, {
+                "text": f"[TDP] 工单 {ticket.ticket_id} 因 {reason} 而自动超时。",
+                "_tdp": "cancel",
+                "ticket_id": ticket.ticket_id,
+            })
+        except Exception:
+            pass
+        try:
+            await self.comm.send_to_agent("super_user", {
+                "text": (
+                    f"⏰ [TDP超时] 工单 {ticket.ticket_id} "
+                    f"({ticket.issuer} -> {ticket.assignee}) 因 {reason} 而超时。"
+                )
+            })
+        except Exception:
+            pass
+
+    async def _handle_pending_timeout(self, ticket):
+        """处理 PENDING 工单超时：取消原工单 + 尝试重分配给其他 agent。
+        仅在 issuer 侧处理（避免 worker 端重复操作）。"""
+        # 只有工单的发行方（编排者）才能执行重分配
+        if ticket.issuer != self.agent_id:
+            return
+
+        from agent.delegation import TicketState, TicketError
+        dm = self.delegation_manager
+        om = self.orchestration_manager
+
+        old_assignee = ticket.assignee
+        plan_id = getattr(ticket, 'orchestration_plan_id', None)
+
+        # 取消原工单
+        try:
+            # 再次检查：工单可能已被 deliver_result 关闭
+            if ticket.state != TicketState.CLOSED:
+                dm.cancel_ticket(ticket.ticket_id, "PENDING 超时未接受，自动重分配", "system")
+        except TicketError:
+            pass
+
+        # 编排关联：标记子任务失败，尝试重分配
+        if plan_id:
+            plan = om.get_plan(plan_id)
+            if plan:
+                result_pair = om.get_subtask_by_ticket(ticket.ticket_id)
+                subtask = result_pair[1] if result_pair else None
+                if subtask and subtask.status != SubTaskStatus.COMPLETED:
+                    # 限制最大重分配次数为 2 次，防止死循环
+                    reassign_count = getattr(subtask, '_reassign_count', 0)
+                    if reassign_count >= 2:
+                        logger.warning(
+                            f"子任务 {subtask.id} 已重分配 {reassign_count} 次，放弃重分配，标记为 FAILED"
+                        )
+                        await om.mark_failed(ticket.ticket_id, "多次重分配失败，worker 未使用 TDP 工具")
+                        await self.comm.send_to_agent("super_user", {
+                            "text": (
+                                f"❌ [重分配失败] 子任务 {subtask.id} 已重分配 {reassign_count} 次，"
+                                f"所有 worker 均未在规定时间内接受工单，已标记为失败。"
+                            )
+                        })
+                        return
+
+                    # 找一个新的 assignee（排除原来的）
+                    online = list(self.peer_agents)
+                    others = [a for a in online if a != old_assignee and a != self.agent_id]
+                    if others:
+                        new_agent = others[0]
+                        # 重分配
+                        subtask.status = SubTaskStatus.PENDING
+                        subtask.assigned_to = None
+                        subtask.ticket_id = None
+                        subtask._reassign_count = reassign_count + 1  # type: ignore
+                        await self._dispatch_single_subtask(
+                            plan_id, subtask, online,
+                            allow_parallel=True, reassign=True,
+                            assigned_to=new_agent,
+                        )
+                        await self.comm.send_to_agent("super_user", {
+                            "text": (
+                                f"🔄 [自动重分配 #{subtask._reassign_count}] 子任务 {subtask.id} 因 {old_assignee} "
+                                f"在 3 分钟内未接受，已自动重分配给 {new_agent}"
+                            )
+                        })
+                        logger.info(
+                            f"PENDING 超时重分配 #{subtask._reassign_count}: {subtask.id} {old_assignee} → {new_agent}"
+                        )
+                    else:
+                        logger.warning(
+                            f"PENDING 超时的子任务 {subtask.id} 无其他 agent 可重分配"
+                        )
 
     def get_thread_id(self, new_thread, chat_id):
         # new_thread 优先级最高：强制开启新对话

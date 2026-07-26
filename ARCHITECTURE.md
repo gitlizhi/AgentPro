@@ -323,12 +323,28 @@ Brain._handle_with_agent() / _process_agent_message()
 **示例**（`agent/agent_context/agent_main.md`）：
 ```markdown
 ## 角色
-你是 AgentPro 平台的主智能体，负责协调其他子智能体完成复杂任务。
+你是 agent_main，语言简洁，结论先行。
 
-## 工作原则
-- 优先复用已有技能，避免重复造轮子
-- 复杂任务优先考虑委派给子智能体
-- 保持回复简洁专业
+## 硬性红线
+1. 不确定的信息必须说"不清楚"，严禁编造。
+2. 涉及文件修改：先展示变更摘要（diff），确认后再执行。
+3. 超3步的复杂任务：先给执行清单，等我确认再动手。
+
+## 多智能体协作规则（核心职责）
+你是平台的主编排者（Orchestrator），价值在于协调其他智能体完成复杂任务。
+
+### 决策流程
+1. 先调用 list_online_agents 检查当前在线的智能体。
+2. 如果存在不同角色的在线智能体，使用编排流程：create_task_plan → dispatch_subtasks → 等待 → 汇总
+3. 严禁自己执行子任务（禁止自己调用 tavily_search、write_file 等做委派给别人的工作）
+4. 仅在没有任何在线智能体可胜任时，才允许自己执行
+
+### 工具使用红线（委派后立即生效）
+一旦创建了委派（dispatch_subtasks 或 delegate_task），以下工具完全锁定：
+- ❌ tavily_search、write_file、computer_execute、browser
+- ✅ 仅允许：check_plan_progress、report_progress、cancel_task、reassign_subtask、log_memory、get_current_time
+
+核心原则：委派出去的工作，你就不要再碰。搜索智能体比你搜得好，分析智能体比你写得好。你的价值在编排，不在执行。
 ```
 
 **注意事项**：上下文文件的内容会在**每一轮对话**中都占用 token，应保持精简。如需大量操作指南，应使用技能系统（`load_skill`）按需加载。
@@ -547,6 +563,18 @@ Brain._handle_with_agent() / _process_agent_message()
 | `agent/brain.py` | 集成 DelegationManager，工单上下文注入，超时循环 |
 | `agent/core.py` | 消息路由层 TDP 门控 |
 
+#### Pair-Key 并行工单支持（v2）
+
+早期 `DelegationManager._by_pair` 是 `Dict[str, str]`（一对智能体只存一个 `ticket_id`），编排派发多个并行子任务给同一 worker 时，后创建的工单会覆盖前一个的索引记录，导致早期工单在 `get_active_ticket()` 中不可见。
+
+**改进**：`_by_pair` 改为 `Dict[str, List[str]]`，支持同对智能体持有多个活跃工单：
+
+- `create_ticket()`：索引变为 `append` 而非覆盖；`allow_parallel=False` 时检查列表中是否有活跃工单
+- `get_active_ticket()`：遍历列表返回第一个活跃工单
+- 新增 `get_active_tickets_by_pair()`：返回同对智能体的所有活跃工单
+- `transition()` 入终态时：从列表中移除该 `ticket_id`（列表为空则删除 key），其余并行工单不受影响
+- `load_active()` 恢复时：追加到列表（而非覆盖）
+
 ### 5.3 兜底方案：ConversationTracker
 
 `agent/conversation_tracker.py` 保留作为兜底机制，在无活跃 TDP 工单时提供基础的轮次计数和硬截断保护。
@@ -637,10 +665,13 @@ PLANNING → READY → EXECUTING → COMPLETED / PARTIALLY_COMPLETED / FAILED
 
 | 工具 | 用途 | 关键行为 |
 |------|------|---------|
-| `create_task_plan(description)` | LLM 分析复杂任务，生成 2-5 个子任务，含 DAG 依赖和建议角色 | 一次性 JSON 返回完整计划，避免多轮交互 |
-| `dispatch_subtasks(plan_id)` | 并行派发所有就绪子任务，自动匹配在线智能体 | 每个子任务创建 TDP 工单，携带 `_orchestration` 和 `orchestration_plan_id` |
+| `create_task_plan(description)` | LLM 分析复杂任务，生成 2-5 个子任务，含 DAG 依赖和建议角色 | 一次性 JSON 返回完整计划；**程序化校验并行度**：全部串行或角色完全相同时自动带修正指令重试 LLM（最多一次），确保在多 worker 环境下充分利用并行能力 |
+| `dispatch_subtasks(plan_id)` | 并行派发所有就绪子任务，自动匹配在线智能体 | 每个子任务创建 TDP 工单；使用 `_plan_used_agents` 跨批次持久化缓存（DAG 阶段间不重置），确保同一计划的不同批次不会重复分配给同一智能体 |
 | `check_plan_progress(plan_id)` | 查看计划整体进度 | **仅限用户主动询问时使用**，含 20 秒防抖 |
 | `reassign_subtask(plan_id, subtask_id, new_agent)` | 失败子任务重新分配 | 重置子任务状态，创建新工单 |
+
+**`deliver_result` 待处理工单提醒**：worker 调用 `deliver_result` 完成一个工单后，返回值自动检查该 agent 是否还有其他 PENDING 工单。若有则显式列出并催促处理，只有全部完成才输出「任务已完全结束」。
+**`dispatch_subtasks` 负载均衡**：派发循环维护 `used_agents` 集合，按 `suggested_role` 匹配时收集所有匹配 agent，优先从未使用过的 agent 中选取。当所有匹配 agent 都已用过时，兜底分配给其他未使用的在线 agent。
 
 #### 5.4.5 编排完整生命周期
 
@@ -740,6 +771,10 @@ Orchestrator 收到交付消息:
          └── plan.is_complete() = False:
                ├── plan.get_ready_subtasks() 获取依赖已满足的下一批
                ├── _dispatch_ready_subtasks(plan, ready) → 自动派发
+               ├── ★ 检查 DISPATCHED 但卡住的子任务（未 accept）:
+               │     → 按 assignee 分组
+               │     → 向每个 worker 发送提醒消息，列出其未处理的工单
+               │     → 唤醒 worker 的 LLM 继续处理
                ├── 通知 super_user: "子任务 X 已交付，自动派发下一批: st_3 → 分析智能体"
                └── 无需 LLM 参与，纯程序化推进
 
@@ -851,16 +886,27 @@ Orchestrator (agent_main) 的消息处理路径:
 
 #### 5.4.8 智能体匹配策略
 
-`dispatch_subtasks` 和 `_dispatch_ready_subtasks` 根据 `suggested_role` 字段模糊匹配在线智能体：
+`dispatch_subtasks` 和 `_dispatch_ready_subtasks` 通过 `_dispatch_single_subtask` 实现负载均衡的智能体分配：
 
-1. 子串匹配：`role_hint in agent_id.lower()`（如 "搜索" 匹配 "搜索智能体"）
-2. 无匹配时选第一个非自身的在线智能体
-3. 无在线智能体时返回提示，稍后手动重试
+1. **角色匹配**：收集所有 `suggested_role` 子串匹配的在线智能体（`role_hint in agent_id.lower()`）
+2. **负载均衡**：从匹配的候选中优先选本批次尚未分配过的 agent（`used_agents` 集合跟踪）
+3. **兜底分配**：当所有匹配 agent 都已用过时，强制分配给其他尚未使用的在线 agent（即使角色不匹配），避免所有子任务集中在同一个 worker
+4. **无匹配时**：选第一个非自身的在线智能体
+5. **无在线智能体时**：返回提示，稍后手动重试
 
 **排除规则**：
 - `super_user`（人类用户）不可作为委派目标
 - `reminder_bot`（系统机器人）不可作为委派目标
 - orchestrator 自身不可作为委派目标（`send_to_agent` 工具阻止自发送）
+
+**角色多样性保障（双重防线）**：
+
+| 层级 | 机制 | 说明 |
+|------|------|------|
+| Prompt 层 | `build_task_decomposition_prompt` 规则 4 + 规则 8 | LLM 被要求在不同子任务间使用不同的 `suggested_role`，含"搜索"关键词 → "搜索专家"，含"分析" → "数据分析师" |
+| 代码层 | `_dispatch_single_subtask` 兜底 | 即使 LLM 生成的角色同质化导致所有子任务只匹配一个 agent，第二步匹配失败时自动分配给其他可用 agent |
+| **代码层** | **`_plan_used_agents` 跨批次持久化** | **DAG 串行阶段间 `used_agents` 集合按 `plan_id` 缓存在 `brain._plan_used_agents` 中。st_2 依赖 st_1 时，st_1 交付回调触发 `_dispatch_ready_subtasks` 派发 st_2，不会重置缓存，确保 111→111 的重复分配不会发生。计划完成后自动清理。** |
+| **代码层** | **`create_task_plan` 并行度自动校验** | **LLM 生成计划后，代码层检测两个反模式：① 全部子任务串行依赖（每个 depends_on 前一个）② 所有子任务 suggested_role 相同。检测到时自动带修正指令重试 LLM，避免仅靠 Promot 层引导不可靠的问题。** |
 
 #### 5.4.9 与 TDP 的集成
 
@@ -918,7 +964,28 @@ Agent.run()
 - 不保存/不恢复终态数据——终态计划和工单不参与恢复，避免无用数据堆积
 - `orchestration_plan_id` 在 ticket 上持久化——进程重启后 ticket 仍能找到所属 plan
 
-#### 5.4.11 Orchestration vs 普通 TDP 委托
+#### 5.4.11 PENDING 工单超时检测与自动重分配
+
+编排场景中，worker 可能收到多个 delegation 消息但只 accept 其中一个（LLM 遗漏），导致其余子任务永远卡在 PENDING/DISPATCHED 状态。`_ticket_timeout_loop` 后台循环增加了 PENDING 专项检测：
+
+**超时层级**：
+
+| 超时类型 | 阈值 | 检测对象 | 行为 |
+|---------|------|---------|------|
+| 通用空闲超时 | 10 分钟无活动 | 所有活跃工单 | 标记 `TIMED_OUT`，通知双方，编排侧 `mark_failed` |
+| **PENDING 专项超时** | **3 分钟未被 accept** | 仅 PENDING 状态工单 | 取消原工单 → 查找其他在线 agent → 自动重分配子任务 |
+
+**自动重分配流程**（`_handle_pending_timeout`）：
+1. 仅在 issuer（编排者）侧处理，worker 侧跳过避免重复
+2. 取消原工单（标记 `CANCELLED`，reason="PENDING 超时未接受"）
+3. 通过 `orchestration_plan_id` 找到关联计划和子任务
+4. 排除原 assignee 和 orchestrator 自身，选第一个其他在线 agent
+5. 重建子任务工单（reassign=True），发送 delegation 消息给新 worker
+6. 通知 super_user：「子任务 st_X 因原 worker 3 分钟未接受，已自动重分配给 Y」
+
+**防重复机制**：`_handle_pending_timeout` 通过 `ticket.issuer != self.agent_id` 守卫确保只有发行方执行重分配，避免 worker 端也运行超时循环导致重复操作。
+
+#### 5.4.12 Orchestration vs 普通 TDP 委托
 
 | 维度 | 普通 TDP 委托 | 编排 |
 |------|-------------|------|
@@ -931,6 +998,23 @@ Agent.run()
 | 工单轮次 | 8 轮 | 12 轮（更复杂） |
 | pair-key | 一对一互斥 | `allow_parallel` 允许多工单 |
 | orchestrator LLM | 参与审查 | **不参与**（程序化推进，最终汇总除外） |
+
+#### 5.4.13 send_to_agent 探测拦截
+
+编排场景中，orchestrator（agent_main）在创建计划前常常通过 `send_to_agent` 向每个 worker 发送"你是谁？你会什么？"等探测消息。由于 `MessageBuffer` 的 5 秒延迟合并机制，worker 往往来不及回复，orchestrator 就放弃了等待——浪费了大量消息而毫无产出。
+
+**代码层硬拦截**（`tools_factory.py:create_send_to_agent_tool`）：
+
+在 `send_to_agent` 工具入口增加守卫逻辑，满足以下**全部条件**时直接返回拒绝：
+
+1. 无活跃 TDP 工单（`dm.get_active_ticket()` 返回 None）
+2. 目标不是 `super_user`（允许与用户正常通信）
+3. 目标在 `brain.peer_agents` 中（目标是 peer agent）
+4. orchestrator 无活跃编排计划（`om.has_active_plans(issuer)` 返回 False）
+
+拒绝消息引导 LLM 直接使用 `create_task_plan` + `dispatch_subtasks`，无需事先探测 worker 能力。
+
+**设计考量**：此拦截仅在 orchestrator 尚未创建任何计划时生效。一旦创建了计划、或已存在活跃工单，`send_to_agent` 恢复正常使用。这样既防止了无效探测，又不影响正常的任务内通信。
 
 ---
 
@@ -959,6 +1043,19 @@ execute() 调用
   - running 容器 → 仅清理运行超过 30 分钟（视为孤儿）
   - 运行中且 < 30 分钟 → 跳过（可能是其他智能体在使用）
 ```
+
+### 6.3 命令安全拦截
+
+LLM 生成的 shell 命令经常包含不安全的文件系统搜索（如 `find / -name "*.md"`、`glob **/*.md`），这些命令会扫描整个容器文件系统导致超时（20s+）。**代码层拦截**不依赖提示词：
+
+**`_sanitize_command()`**（`sandboxed_backend.py:161`）在 `execute()` 入口自动修正：
+
+| 危险模式 | 检测方式 | 修正行为 |
+|---------|---------|---------|
+| `find /`（从根目录搜索） | 正则 `\bfind\s+/(?=\s\|$)` | 自动替换为 `find /workspace/`，附加 `-maxdepth 6` 防止深层递归 |
+| `glob '**/*.md'`（无路径前缀） | 正则 `(glob\s+)(['\"])(?!/)` | 自动插入 `/workspace/` 前缀 → `glob '/workspace/**/*.md'` |
+
+**设计原则**：不阻塞命令，静默修正后执行。修正信息记录到 logger.info 用于调试。`-exec` 类命令（如 `find / -exec rm {}`）不附加 `-maxdepth` 以避免破坏预期行为。
 
 ---
 
@@ -1099,8 +1196,18 @@ Agent A 调用 send_to_agent(B, "帮我校验这段代码")
 | 编排与委托的数据库持久化 | OrchestrationManager 和 DelegationManager 的状态变更实时写入 PostgreSQL（`orchestration_plans`、`orchestration_subtasks`、`delegation_tickets` 三张表）。Agent 启动时 `recover_state()` 恢复所有活跃工单和计划，重建内存索引。OrchestrationManager 同步等待持久化，DelegationManager 异步 fire-and-forget |
 | 防轮询与防抖 | `dispatch_subtasks` 返回值明确告知 "无需轮询"，`check_plan_progress` 内置 20 秒防抖——进度无变化时返回警告而非正常结果，防止 LLM 形成轮询正反馈 |
 | 依赖验证与 LLM 幻觉防御 | `set_subtasks()` 自动移除对不存在子任务的引用（如 `st_0`），`depends_on` 自动规范化为 `"st_N"` 格式。prompt 层禁止使用序号 0 |
+| LLM API JSON 模式兼容降级 | `call_big_model_chat` 对 DeepSeek API 的 `response_format: {"type": "json_object"}` 返回 400 的情况做降级处理：捕获 400 后移除 `response_format` 字段，靠 prompt 指引输出 JSON 并重试。同时修复了硬编码的默认 model 参数，改为按 `config.model.default_model` 配置读取 |
+| 默认 model 配置化 | `utils.py` 的 `call_big_model_chat` 将硬编码 `model="deepseek-chat"` 改为 `model=None`（→ 读取 `config.model.default_model`），支持通过 `.env` 或环境变量自由切换模型 |
+| 非编排交付不唤醒 LLM | `brain.py` 的 TDP 交付处理中，非编排工单（无 `orchestration_plan_id`）的交付消息设置 `_skip_llm_for_issuer = True`，程序化将结果摘要格式化后通过 `_safe_send` 通知委托方，不唤醒 LLM。避免 LLM 对 worker 的交付结果做无意义回复（如"好的，收到"）并错误地继续向 worker 发消息 |
+| 任务分解角色多样性 | `build_task_decomposition_prompt` 新增规则 8「角色分配指引」：含"搜索/收集"关键词的任务 → `suggested_role`="搜索专家"；含"分析/归纳" → "数据分析师"。两个角色必须在子任务中各出现至少一次。同时 `_dispatch_single_subtask` 增加兜底：所有匹配 agent 已用尽时，强制分配给其他未使用的在线 agent |
+| PENDING 工单自动重分配 | worker 收到多个 delegation 但只 accept 一个导致其余子任务卡住时，`_ticket_timeout_loop` 的 PENDING 专项检测（3 分钟未被 accept）自动取消原工单并重分配给其他在线 agent。配合 `deliver_result` 返回值中的待处理工单提醒（worker 自检）+ 编排交付处理中的 DISPATCHED 推动（orchestrator 外部推动），三层保障防止子任务遗漏 |
+| 编排推动 DISPATCHED 子任务 | orchestrator 收到一个子任务交付后，自动扫描计划中 DISPATCHED 但未被 accept 的子任务，按 assignee 分组主动发消息提醒 worker 处理。配合 `deliver_result` 返回值提醒，解决 worker LLM "说要做但实际只做了一个"的短路行为 |
 
 | 记忆提取改为事件驱动 | 原每 5 分钟轮询方案每天浪费 864+ 次 LLM 调用，绝大多数为空轮询。改为任务完成反思后 + 会话空闲关闭时触发，降至 10-30 次/天。同时使用较小模型（`memory_extraction_model`）进一步降低成本，通过 `agent_id` 元数据实现不同 Agent 记忆隔离 |
+| `_plan_used_agents` 跨批次持久缓存 | DAG 子任务分批派发时，`_dispatch_ready_subtasks` 每次创建新 `used` 集合导致同一 worker 在串行阶段被重复分配。改为 `brain._plan_used_agents: dict` 按 `plan_id` 缓存，`_dispatch_ready_subtasks` 和 `dispatch_subtasks` 都通过 `setdefault` 获取同一集合，计划完成后 `pop` 清理 |
+| `create_task_plan` 并行度程序化校验 | LLM 生成的计划可能全部串行或角色完全相同。`create_task_plan` 解析 LLM 输出后检查两个反模式（全部串行/角色完全相同），检测到时自动带修正指令重试 LLM 一次（temperature=0.4 增加多样性），失败则回退原始计划。确保多 worker 环境充分利用并行能力 |
+| `send_to_agent` 探测拦截 | orchestrator 在创建计划前用 `send_to_agent` 打探 worker 能力，由于消息缓冲延迟 worker 来不及回复，浪费大量消息。代码层在 `send_to_agent` 入口硬拦截：无工单 + 无计划 + 目标是 peer → 直接返回拒绝并指引正确流程 |
+| Docker 命令安全拦截 | LLM 生成的 `find /` / `glob **/*.md` 扫描全文件系统导致 20s 超时。`sandboxed_backend.py` 新增 `_sanitize_command()` 方法，用正则匹配危险模式并自动改写（`find /` → `find /workspace/` + `-maxdepth 6`；`glob '**/'` → `glob '/workspace/**/'`），静默修正后执行 |
 
 ### 11.3 工具调用进度流
 

@@ -343,6 +343,14 @@ class OrchestrationManager:
     def get_plan(self, plan_id: str) -> Optional[OrchestrationPlan]:
         return self._plans.get(plan_id)
 
+    def has_active_plans(self, issuer: str) -> bool:
+        """检查指定 issuer 是否有非终态的编排计划。"""
+        from agent.orchestration import PlanState
+        return any(
+            p.issuer == issuer and p.state not in (PlanState.COMPLETED, PlanState.FAILED)
+            for p in self._plans.values()
+        )
+
     def get_plan_by_ticket(self, ticket_id: str) -> Optional[OrchestrationPlan]:
         """通过 TDP ticket_id 反查所属编排计划。"""
         entry = self._ticket_index.get(ticket_id)

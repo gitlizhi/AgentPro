@@ -1,5 +1,6 @@
 """docker容器沙箱环境"""
 import os
+import re
 import shutil
 import uuid
 import time
@@ -20,6 +21,8 @@ MAX_CONTAINER_AGE_SECONDS = 1800  # 30 分钟
 
 # 沙箱持久化工作区根目录（相对于 agent 目录）
 _SANDBOX_WORKSPACES_DIR = os.path.join(os.path.dirname(__file__), "agent_temp", "sandbox_workspaces")
+# 共享工作区：所有 Agent 的 Docker 容器共用此目录，解决跨 Agent 文件读取问题
+_SHARED_WORKSPACE_DIR = os.path.join(os.path.dirname(__file__), "agent_temp", "shared_workspace")
 
 
 def _cleanup_orphan_containers(docker_client, image: str):
@@ -118,8 +121,8 @@ class DockerSandboxBackend(BaseSandbox):
         self._id = str(uuid.uuid4())
         self._agent_id = agent_id
 
-        # 持久化工作区目录（每个 Agent 独立）
-        self._workspace_dir = os.path.join(_SANDBOX_WORKSPACES_DIR, agent_id, "workspace")
+        # 持久化工作区目录（每个 Agent 独立的 home，但共享 workspace）
+        self._workspace_dir = _SHARED_WORKSPACE_DIR  # 所有 Agent 共用此目录
         self._home_dir = os.path.join(_SANDBOX_WORKSPACES_DIR, agent_id, "home")
         os.makedirs(self._workspace_dir, exist_ok=True)
         os.makedirs(self._home_dir, exist_ok=True)
@@ -153,8 +156,38 @@ class DockerSandboxBackend(BaseSandbox):
     def id(self) -> str:
         return self._id
 
+    # ---- 危险文件系统搜索拦截 ----
+    _FIND_FROM_ROOT = re.compile(r'\bfind\s+/(?=\s|$)')
+    _GLOB_UNSCOPED = re.compile(r"(^|\s)(glob\s+)(['\"])((?!/)(?:\*\*|[*?][^/\s]))")
+
+    def _sanitize_command(self, command: str) -> tuple:
+        """检测并修正危险的文件系统搜索命令，避免容器扫描全文件系统超时。
+        返回 (修正后的命令, 修正说明列表)。
+        """
+        fixes = []
+
+        # 1. find / → 限定至 /workspace/ + maxdepth 兜底
+        if self._FIND_FROM_ROOT.search(command) and '-maxdepth' not in command:
+            command = self._FIND_FROM_ROOT.sub('find /workspace/', command)
+            if ' -exec ' not in command:
+                command = command.rstrip() + ' -maxdepth 6'
+            fixes.append('find / → /workspace/')
+
+        # 2. glob 无 /workspace 前缀 → 自动添加
+        if self._GLOB_UNSCOPED.search(command):
+            def _rewrite(m):
+                return f"{m.group(1) or ''}{m.group(2)}{m.group(3)}/workspace/{m.group(4)}"
+            command = self._GLOB_UNSCOPED.sub(_rewrite, command)
+            fixes.append('glob → /workspace/ 限定')
+
+        return command, fixes
+
     def execute(self, command: str, *, timeout: Optional[int] = None, env: Optional[dict] = None) -> ExecuteResponse:
         container = None
+        sanitized, fixes = self._sanitize_command(command)
+        if fixes:
+            logger.info(f"命令已自动修正 ({', '.join(fixes)}): {command[:100]} → {sanitized[:100]}")
+            command = sanitized
         try:
             # 使用持久化工作区（而非临时目录），确保 pip 安装、文件下载等在多次 execute 之间保留
             volumes = {

@@ -1,6 +1,10 @@
 """
 Agent启动入口
 """
+import warnings
+# pywinauto 在 Python 3.12+ 下有无效转义序列警告（\; 等），非本项目问题，静默处理
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="pywinauto")
+
 import asyncio
 import sys
 import logging
@@ -10,7 +14,7 @@ from agent.reflection import reflection_worker
 from agent.core import Agent
 from agent.db import init_db_pool, close_db_pool
 from agent.scheduler import init_scheduler
-from agent.tasks import set_reminder_comm, consolidate_all_users
+from agent.tasks import set_reminder_comm, consolidate_all_users, cleanup_old_screenshots
 from agent.skill_version_manager import consolidate_skills_job
 from config import config
 from dotenv import load_dotenv
@@ -52,6 +56,16 @@ async def main():
         hour=3,
         minute=0,
         id='memory_consolidation_daily',
+        replace_existing=True
+    )
+
+    scheduler.add_job(
+        cleanup_old_screenshots,
+        trigger='cron',
+        hour=4,
+        minute=0,
+        kwargs={'days': 30},
+        id='screenshots_cleanup_daily',
         replace_existing=True
     )
     

@@ -101,7 +101,24 @@ def create_send_to_agent_tool(brain):
         if target_agent_id == brain_ref.agent_id:
             return f"❌ 不能向自己发送消息。如果你想记录信息，请使用 update_memory 工具。"
 
+        # ── 编排前探测拦截：无工单 + 无计划 → 禁止向 worker 发消息 ──
         dm: DelegationManager = brain_ref.delegation_manager
+        ticket = dm.get_active_ticket(brain_ref.agent_id, target_agent_id)
+        if (
+            ticket is None
+            and target_agent_id != "super_user"
+            and target_agent_id in (brain_ref.peer_agents or set())
+            and not brain_ref.orchestration_manager.has_active_plans(brain_ref.agent_id)
+        ):
+            return (
+                "❌ **禁止在创建编排计划前向 worker 发送消息。**\n"
+                f"你尚未创建任何编排计划，也没有与 {target_agent_id} 的活跃工单。\n"
+                "正确流程：\n"
+                "1. 直接调用 `create_task_plan(description)` 分解任务\n"
+                "2. 系统会根据 suggested_role 自动匹配合适的 worker\n"
+                "3. 用 `dispatch_subtasks(plan_id)` 派发任务\n\n"
+                "**不需要事先询问 worker 的能力**——系统已自动匹配。"
+            )
 
         # ---- [停止交流] 映射到 cancel_ticket ----
         if message and '[停止交流]' in message:
@@ -459,13 +476,33 @@ def create_delegation_tools(brain):
         except Exception:
             pass
 
-        return (
-            f"✅ 工单 {ticket_id} 已交付并关闭。\n"
-            f"耗时轮次: {ticket.round_count}/{ticket.max_rounds}\n"
-            f"交付总结: {summary}\n\n"
-            f"⚠️ **工单已关闭，不要发送任何后续消息。你的任务已完全结束。** "
-            f"不要向委托方发总结或补充说明，系统会自动通知对方。"
-        )
+        # 检查是否还有其他待处理的工单（提醒 agent 逐一处理）
+        pending_tickets = [
+            t for t in dm.get_active_tickets_for_agent(brain_ref.agent_id)
+            if t.state == TicketState.PENDING and t.assignee == brain_ref.agent_id
+        ]
+        if pending_tickets:
+            lines = [
+                f"\n📋 **你还有 {len(pending_tickets)} 个待处理的工单，"
+                f"请立即 accept 并完成，不要遗漏：**"
+            ]
+            for pt in pending_tickets[:5]:
+                lines.append(f"- 工单 `{pt.ticket_id}`: {pt.description[:120]}")
+            pending_reminder = "\n".join(lines)
+            return (
+                f"✅ 工单 {ticket_id} 已交付并关闭。\n"
+                f"耗时轮次: {ticket.round_count}/{ticket.max_rounds}\n"
+                f"交付总结: {summary}\n"
+                f"{pending_reminder}"
+            )
+        else:
+            return (
+                f"✅ 工单 {ticket_id} 已交付并关闭。\n"
+                f"耗时轮次: {ticket.round_count}/{ticket.max_rounds}\n"
+                f"交付总结: {summary}\n\n"
+                f"⚠️ **工单已关闭，不要发送任何后续消息。你的任务已完全结束。** "
+                f"不要向委托方发总结或补充说明，系统会自动通知对方。"
+            )
 
     @tool
     async def request_clarification(ticket_id: str, question: str) -> str:
@@ -616,6 +653,7 @@ def create_orchestration_tools(brain):
         """
         peer_agents = brain_ref.peer_agents
         agents_info = "\n".join(f"- {a}" for a in sorted(peer_agents)) if peer_agents else ""
+        online_count = len(peer_agents)
 
         prompt = build_task_decomposition_prompt(description, agents_info)
         try:
@@ -628,6 +666,61 @@ def create_orchestration_tools(brain):
 
             plan_data = _json.loads(content)
             subtasks = plan_data.get("subtasks", [])
+
+            # ── 程序化校验并行度（代码层兜底，不依赖提示词）──
+            if online_count >= 2 and len(subtasks) >= 2:
+                roles = [s.get("suggested_role", "") for s in subtasks]
+                unique_roles = set(r for r in roles if r)
+
+                # 校验1：全部串行（每个子任务都依赖前一个）
+                all_serial = all(
+                    subtasks[i].get("depends_on", []) == [i]
+                    for i in range(1, len(subtasks))
+                )
+                # 校验2：角色完全相同（无法分散到不同 agent）
+                all_same_role = len(unique_roles) <= 1 and len(subtasks) >= 2
+
+                if all_serial or all_same_role:
+                    reason = (
+                        "全部子任务串行依赖" if all_serial else "所有子任务角色相同"
+                    )
+                    logger.warning(
+                        f"计划并行度校验失败（{reason}），自动重试。"
+                        f"在线智能体: {online_count}, 子任务: {len(subtasks)}"
+                    )
+                    # 带修正指令重试一次
+                    correction = (
+                        f"\n\n【重要修正指令】上一次生成的计划存在严重问题：{reason}。"
+                        f"当前有 {online_count} 个在线智能体，必须充分利用：\n"
+                    )
+                    if all_serial:
+                        correction += (
+                            "- **必须创建至少 2 个无依赖（depends_on=[]）的子任务**，使其可并行派发。\n"
+                            "- 仅当后续任务确实需要前置输出时才建立依赖。\n"
+                        )
+                    if all_same_role:
+                        agents_str = ", ".join(sorted(peer_agents))
+                        correction += (
+                            f"- 在线智能体: {agents_str}\n"
+                            "- **必须为不同子任务分配不同的 suggested_role**，"
+                            f"确保工作分散到所有可用智能体。\n"
+                        )
+                    correction += "- 重新生成完整的 JSON 计划。"
+                    retry_prompt = prompt + correction
+                    response = await call_big_model_chat(
+                        retry_prompt, temperature=0.4, is_json=True,
+                    )
+                    content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        try:
+                            plan_data = _json.loads(content)
+                            subtasks = plan_data.get("subtasks", [])
+                            logger.info("并行度重试成功")
+                        except _json.JSONDecodeError:
+                            logger.warning("并行度重试返回格式异常，使用原始计划")
+                            # 回退到原始计划
+                            subtasks = plan_data.get("subtasks", [])
+
             if not subtasks:
                 return "任务分解失败：未生成子任务"
 
@@ -678,10 +771,13 @@ def create_orchestration_tools(brain):
             return "当前没有在线智能体可供派发任务。请等待智能体上线后重试。"
 
         results = []
+        # 使用 brain 级别的持久缓存，确保跨批次（DAG 阶段）不会重复分配同一智能体
+        used_agents = brain_ref._plan_used_agents.setdefault(plan_id, set())
         for st in ready:
             try:
                 msg, _ = await brain_ref._dispatch_single_subtask(
-                    plan_id, st, online, allow_parallel=True)
+                    plan_id, st, online, allow_parallel=True,
+                    used_agents=used_agents)
                 results.append(msg)
             except Exception as e:
                 results.append(f"❌ {st.id} 派发失败: {e}")

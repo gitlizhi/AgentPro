@@ -216,9 +216,15 @@ async def _generate_skill_document(task_description: str, steps: List[Dict],
     return response["choices"][0]["message"]["content"]
 
 # ---------- 保存纯反思记录 ----------
+def _sanitize_filename(name: str) -> str:
+    """Windows 文件名不能包含 < > : \" / \\ | ? *，将非法字符替换为 _"""
+    return str(name).translate(
+        {ord(c): "_" for c in r'<>:"/\|?*'}
+    )
+
 def save_reflection(task_id: str, reflection_data: Dict):
     """将反思结果保存到 reflections 目录（JSON）"""
-    filepath = REFLECTIONS_DIR / f"{task_id}.json"
+    filepath = REFLECTIONS_DIR / f"{_sanitize_filename(task_id)}.json"
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(reflection_data, f, indent=2, ensure_ascii=False)
 
@@ -248,6 +254,15 @@ async def process_pending_task(filepath: Path):
 async def reflection_worker():
     """后台任务：轮询 pending_tasks 目录并处理"""
     logger.info("Starting reflection worker...")
+    # 启动时清理一次：删除 pending_tasks 和 reflections 中有非法字符的历史文件
+    for cleanup_dir in (PENDING_TASKS_DIR, REFLECTIONS_DIR):
+        for filepath in cleanup_dir.glob("*.json"):
+            if any(c in filepath.name for c in r'<>:"/\|?*'):
+                try:
+                    filepath.unlink()
+                    logger.info(f"已清理非法文件名残留文件: {filepath.name}")
+                except OSError:
+                    pass
     while True:
         for filepath in PENDING_TASKS_DIR.glob("*.json"):
             await process_pending_task(filepath)
@@ -263,6 +278,6 @@ def submit_task_for_reflection(task_data: Dict):
     if not task_id:
         task_id = f"task_{uuid.uuid4().hex}"
         task_data["task_id"] = task_id
-    filepath = PENDING_TASKS_DIR / f"{task_id}.json"
+    filepath = PENDING_TASKS_DIR / f"{_sanitize_filename(task_id)}.json"
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(task_data, f, indent=2, ensure_ascii=False)

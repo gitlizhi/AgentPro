@@ -163,7 +163,7 @@ class DelegationManager:
 
     def __init__(self):
         self._by_id: Dict[str, TaskTicket] = {}
-        self._by_pair: Dict[str, str] = {}
+        self._by_pair: Dict[str, List[str]] = {}  # 支持同对智能体的多个并行工单
         self._pool = None  # 持久化连接池
 
     def set_pool(self, pool):
@@ -262,9 +262,9 @@ class DelegationManager:
 
                     self._by_id[ticket.ticket_id] = ticket
                     key = self._pair_key(ticket.issuer, ticket.assignee)
-                    # 同一对智能体若已有活跃工单，保留先创建的
                     if key not in self._by_pair:
-                        self._by_pair[key] = ticket.ticket_id
+                        self._by_pair[key] = []
+                    self._by_pair[key].append(ticket.ticket_id)
 
                     logger.info(
                         f"恢复工单 {ticket.ticket_id}: {ticket.issuer}→{ticket.assignee} "
@@ -295,18 +295,19 @@ class DelegationManager:
         """
         key = self._pair_key(issuer, assignee)
 
-        # 检查是否已有活跃工单
-        if not allow_parallel:
-            existing_id = self._by_pair.get(key)
-            if existing_id:
-                existing = self._by_id.get(existing_id)
-                if existing and existing.is_active:
-                    raise TicketError(
-                        f"已存在活跃工单 {existing_id}（{existing.description[:50]}...），"
-                        f"请先完成或取消该工单后再创建新的。"
-                    )
-                # 旧工单已终止，清理映射
-                del self._by_pair[key]
+        # 检查是否已有活跃工单（遍历列表，同时清理已终止的工单）
+        existing_ids = self._by_pair.get(key, [])
+        # 过滤掉已终止的工单，保持列表干净
+        active_ids = [tid for tid in existing_ids
+                      if self._by_id.get(tid) and self._by_id[tid].is_active]
+        self._by_pair[key] = active_ids
+
+        if not allow_parallel and active_ids:
+            existing = self._by_id[active_ids[0]]
+            raise TicketError(
+                f"已存在活跃工单 {existing.ticket_id}（{existing.description[:50]}...），"
+                f"请先完成或取消该工单后再创建新的。"
+            )
 
         ticket_id = str(uuid.uuid4())[:8]
         ticket = TaskTicket(
@@ -319,7 +320,9 @@ class DelegationManager:
         )
 
         self._by_id[ticket_id] = ticket
-        self._by_pair[key] = ticket_id
+        if key not in self._by_pair:
+            self._by_pair[key] = []
+        self._by_pair[key].append(ticket_id)
         self._save_ticket(ticket)
 
         logger.info(
@@ -333,15 +336,25 @@ class DelegationManager:
         return self._by_id.get(ticket_id)
 
     def get_active_ticket(self, agent_a: str, agent_b: str) -> Optional[TaskTicket]:
-        """查找两个智能体之间的活跃工单"""
+        """查找两个智能体之间的活跃工单（返回第一个活跃的）"""
         key = self._pair_key(agent_a, agent_b)
-        ticket_id = self._by_pair.get(key)
-        if not ticket_id:
-            return None
-        ticket = self._by_id.get(ticket_id)
-        if ticket and ticket.is_active:
-            return ticket
+        ticket_ids = self._by_pair.get(key, [])
+        for tid in ticket_ids:
+            ticket = self._by_id.get(tid)
+            if ticket and ticket.is_active:
+                return ticket
         return None
+
+    def get_active_tickets_by_pair(self, agent_a: str, agent_b: str) -> List[TaskTicket]:
+        """查找两个智能体之间的所有活跃工单（支持并行工单场景）"""
+        key = self._pair_key(agent_a, agent_b)
+        ticket_ids = self._by_pair.get(key, [])
+        result = []
+        for tid in ticket_ids:
+            ticket = self._by_id.get(tid)
+            if ticket and ticket.is_active:
+                result.append(ticket)
+        return result
 
     def get_active_tickets_for_agent(self, agent_id: str) -> List[TaskTicket]:
         """获取某个智能体参与的所有活跃工单"""
@@ -374,10 +387,12 @@ class DelegationManager:
             ticket.accepted_at = time.time()
         elif new_state in TERMINAL_STATES:
             ticket.completed_at = time.time()
-            # 终态清理 pair 映射，允许后续再创建工单
+            # 终态从 pair 列表中移除该工单（支持同对并行工单）
             key = self._pair_key(ticket.issuer, ticket.assignee)
-            if self._by_pair.get(key) == ticket_id:
-                del self._by_pair[key]
+            if key in self._by_pair and ticket_id in self._by_pair[key]:
+                self._by_pair[key].remove(ticket_id)
+                if not self._by_pair[key]:
+                    del self._by_pair[key]
 
         self._save_ticket(ticket)
         logger.info(

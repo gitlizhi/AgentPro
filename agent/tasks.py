@@ -3,7 +3,9 @@
 """
 import logging
 import os
+import time
 import asyncio
+from pathlib import Path
 from agent.memory import get_memory
 from agent.memory_consolidation import consolidate_user_memory
 logger = logging.getLogger(__name__)
@@ -34,4 +36,26 @@ async def consolidate_all_users():
             tasks.append(consolidate_user_memory(user_id))
     if tasks:
         await asyncio.gather(*tasks)
-    # print(" 所有用户记忆整理完成")
+
+
+def cleanup_old_screenshots(days: int = 30):
+    """清理超过指定天数的截图文件（同步执行，由 APScheduler 调度）"""
+    screenshots_dir = Path(__file__).parent.parent / "screenshots"
+    if not screenshots_dir.exists():
+        return
+
+    cutoff = time.time() - days * 86400
+    deleted = 0
+    for filepath in screenshots_dir.iterdir():
+        if not filepath.is_file():
+            continue
+        try:
+            mtime = filepath.stat().st_mtime
+            if mtime < cutoff:
+                filepath.unlink()
+                deleted += 1
+        except OSError as e:
+            logger.warning(f"清理截图文件失败: {filepath.name} - {e}")
+
+    if deleted > 0:
+        logger.info(f"截图清理完成: 删除了 {deleted} 个超过 {days} 天的文件")
