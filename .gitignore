@@ -18,6 +18,7 @@ agent/__pycache__/
 /agent/data/*
 /agent/chroma_db/*
 /pgdata
+/chat_images
 /screenshots
 /diagrams
 /browser_data
